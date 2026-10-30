@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""逻辑谬误分析模块包（训练脚本容器）。
+"""逻辑谬误分析模块包。
 
-注意：本地推理已改由 module_inference.analyze_logic 的规则引擎完成，
-不再通过本包导入。本目录保留独立训练脚本 train.py、data_utils.py 与数据。
+旧本地训练链路（train.py、data_utils.py、model/、data/）已于 2026-10-30
+归档至 archive/2026-10-30-legacy/；本包现只保留 API 方案的 logic_module。
 """
 
 __all__: list = []

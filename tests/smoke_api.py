@@ -29,5 +29,9 @@ try:
     )
     content = resp.choices[0].message.content if resp.choices else ""
     print(f"CHAT OK, 返回: {content!r}")
+    # 2026-10-30 P0：LongCat 有冒烟返回 None/空串的前科，content 为空视为失败（退出码非 0）。
+    if not (isinstance(content, str) and content.strip()):
+        print("FAIL: 返回 content 为空或 None，不能算冒烟通过")
+        sys.exit(1)
 except Exception as e:  # noqa: BLE001
     print(f"CHAT FAIL: {type(e).__name__}: {e}")

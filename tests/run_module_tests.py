@@ -6,8 +6,7 @@ MyLocalAI 全模块测试执行器（只读测试，不修改项目源码）。
   a) module_language.language_module.analyze_emotion(text)   -> "emotion"
   b) module_language.language_module.analyze_aggression(text)-> "aggression"
   c) module_logic.logic_module.analyze_logic(text)           -> "logic_api"
-  d) module_inference.analyze_sentiment/analyze_aggression/analyze_logic
-     -> "local_sentiment" / "local_aggression" / "local_logic"（本地备选，仅记录现状）
+     （module_inference 本地备选链路已于 2026-10-30 归档至 archive/，不再纳入）
   - 用例 1-8、12 另调用 core_judge.judge(text, emotion=..., attack=..., logic=...)
     -> "judge"（完整返回 dict；传入步骤 a/b/c 的预计算结果，judge 内部复用不再重复调 API）
   - report_generator 单独测：正常调用（report_standalone）+ 强制回退（report_fallback，放最后）
@@ -100,26 +99,6 @@ def timed_call(fn, *args, **kwargs):
     return out, round(time.perf_counter() - t0, 3)
 
 
-def timed_call_with_timeout(fn, *args, timeout=90.0):
-    """带看门狗的调用：超时则记录 error（线程留在后台，进程结束时随之消亡）。"""
-    box = {}
-
-    def _target():
-        try:
-            box["result"] = fn(*args)
-        except Exception as exc:  # noqa: BLE001
-            box["result"] = {"error": f"{type(exc).__name__}: {exc}"}
-
-    t0 = time.perf_counter()
-    th = threading.Thread(target=_target, daemon=True)
-    th.start()
-    th.join(timeout)
-    elapsed = round(time.perf_counter() - t0, 3)
-    if th.is_alive():
-        return {"error": f"本地调用超时（>{int(timeout)}s，后台线程仍在运行，仅记录现状）"}, elapsed
-    return box.get("result", {"error": "本地调用无返回值"}), elapsed
-
-
 # ===========================================================================
 # 模块导入（失败不中断，逐条调用时记 error）
 # ===========================================================================
@@ -136,12 +115,6 @@ try:
 except Exception as exc:  # noqa: BLE001
     logic_module = None
     _IMPORT_ERRORS["module_logic"] = f"{type(exc).__name__}: {exc}"
-
-try:
-    import module_inference
-except Exception as exc:  # noqa: BLE001
-    module_inference = None
-    _IMPORT_ERRORS["module_inference"] = f"{type(exc).__name__}: {exc}"
 
 try:
     import core_judge
@@ -187,9 +160,6 @@ for idx, case in enumerate(CASES, start=1):
         "emotion": {},
         "aggression": {},
         "logic_api": {},
-        "local_sentiment": {},
-        "local_aggression": {},
-        "local_logic": {},
         "elapsed": {},
     }
 
@@ -216,22 +186,6 @@ for idx, case in enumerate(CASES, start=1):
         )
     else:
         record["logic_api"] = _import_error_result("module_logic")
-
-    # d) 本地备选模块（仅记录现状，本机基本不可用）
-    if module_inference is not None:
-        record["local_sentiment"], record["elapsed"]["local_sentiment"] = timed_call_with_timeout(
-            module_inference.analyze_sentiment, text, timeout=90.0
-        )
-        record["local_aggression"], record["elapsed"]["local_aggression"] = timed_call_with_timeout(
-            module_inference.analyze_aggression, text, timeout=90.0
-        )
-        record["local_logic"], record["elapsed"]["local_logic"] = timed_call_with_timeout(
-            module_inference.analyze_logic, text, timeout=30.0
-        )
-    else:
-        record["local_sentiment"] = _import_error_result("module_inference")
-        record["local_aggression"] = _import_error_result("module_inference")
-        record["local_logic"] = _import_error_result("module_inference")
 
     # judge（仅用例 1-8、12）：复用上面 a/b/c 三份预计算结果，
     # 不再让 judge 内部重复调用 API（aggression 的结果传给 judge 的 attack 参数）

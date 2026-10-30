@@ -597,7 +597,7 @@ class TestNoHardcodedPaths(unittest.TestCase):
     def test_project_root_is_derived_not_configured(self):
         """站点后端与四个测试入口都必须按自身位置推导项目根目录。"""
         self.assertIn("__file__", (ROOT / "my_website" / "app.py").read_text(encoding="utf-8"))
-        for name in ("run_module_tests.py", "smoke_api.py", "smoke_local.py", "verify_fixes.py"):
+        for name in ("run_module_tests.py", "smoke_api.py", "verify_fixes.py"):
             text = (ROOT / "tests" / name).read_text(encoding="utf-8")
             self.assertIn("__file__", text, f"{name} 应按自身位置推导项目根目录")
 

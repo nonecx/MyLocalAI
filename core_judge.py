@@ -11,9 +11,8 @@
   - 将 conclusion 与三个模块 JSON 交给 report_generator.generate_report 生成报告。
 
 说明：
-  - module_inference.py（本地模型推理）保留为备选方案。本机两个本地模型当前
-    不可用（modelscope 依赖缺失 / ToxiTrace config 不兼容 transformers 5.x），
-    故主链路走 API。
+  - module_inference.py（本地模型备选推理）已于 2026-10-30 归档至 archive/，
+    备选链路退出主树；主链路只走 API。
   - 三个分析函数全部内置容错，单模块失败只返回带 error 键的默认值，
     不会让整个裁判崩溃。
 
@@ -34,7 +33,6 @@ from report_generator import generate_report
 from rumor_agent import tiering
 from shared_core import llm_cache
 from shared_core.console_io import force_utf8_stdio
-from attn_agent.deep_read import deep_read
 
 # 一次 judge() 的总时长预算（秒）。上游不可达时原先要串行等 4 个模块 × 多次重试，
 # 最差 515.8s；设了预算后每次 LLM 调用的等待不超过剩余预算，用完即快速失败转降级。
