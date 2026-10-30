@@ -1,0 +1,7 @@
+# my_website 网站依赖
+#
+# 与根目录 requirements.txt 共用一份（2026-10-22 修复 G6：原先两处各写一份
+# fastapi/uvicorn，版本容易漂移）。安装方式：在项目根目录执行
+#     pip install -r requirements.txt
+# 本文件保留为兼容入口，内容等价于根 requirements.txt。
+-r ../requirements.txt

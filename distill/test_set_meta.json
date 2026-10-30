@@ -1,0 +1,20 @@
+{
+  "n_test": 10,
+  "skipped": [
+    {
+      "src_id": 9,
+      "reason": "空串"
+    },
+    {
+      "src_id": 11,
+      "reason": "超长文(5004字)"
+    }
+  ],
+  "near_duplicates_with_train": [],
+  "rules_replication_check": "9/9 与 judge 结论一致",
+  "test_conclusion_distribution": {
+    "高度疑似水军/煽动性言论": 2,
+    "疑似情绪化谣言": 6,
+    "情绪化宣泄/普通网络争论": 2
+  }
+}

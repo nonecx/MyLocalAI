@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>网络言论智能分析系统</title>
+  <link rel="stylesheet" href="static/style.css" />
+</head>
+<body>
+  <header class="site-header">
+    <div class="brand">
+      <span class="logo">🔍</span>
+      <div class="brand-text">
+        <h1>网络言论智能分析系统</h1>
+        <p>纯提示词工程 · 情感 / 攻击性 / 逻辑三维分析 · 规则引擎裁判 · 谣言 Agent 联网取证</p>
+      </div>
+    </div>
+    <span id="apiStatus" class="status-chip checking">服务检查中…</span>
+  </header>
+
+  <main class="layout">
+    <div class="col-main">
+      <!-- 输入区 -->
+      <section class="panel">
+        <div class="panel-head">
+          <h2>✍️ 输入待分析的网络言论</h2>
+        </div>
+        <div class="mode-row">
+          <span class="mode-label">分析模式</span>
+          <div class="mode-switch" id="modeSwitch">
+            <button class="mode-btn active" data-mode="classic" type="button">⚡ 快速分析</button>
+            <button class="mode-btn" data-mode="agent" type="button">🛰️ 谣言 Agent · 联网取证</button>
+          </div>
+          <span class="mode-tip" id="modeTip">三维分析 + 规则引擎，约 10–30 秒</span>
+        </div>
+        <textarea id="inputText" maxlength="8000"
+          placeholder="粘贴一段网络评论、弹幕、帖子或聊天记录……（最多 8000 字）"></textarea>
+        <div class="input-meta">
+          <span id="charCount">0 / 8000</span>
+          <div class="samples" id="sampleBar"><span class="samples-label">试试示例：</span></div>
+        </div>
+        <div class="actions">
+          <button id="analyzeBtn" class="btn-primary">🔍 开始分析</button>
+          <button id="cancelBtn" class="btn-ghost hidden">✖ 取消分析</button>
+          <button id="clearBtn" class="btn-ghost">清空</button>
+        </div>
+        <div id="loading" class="loading hidden">
+          <div class="steps" id="steps">
+            <div class="step"><span class="dot"></span>情感分析</div>
+            <div class="step"><span class="dot"></span>攻击性分析</div>
+            <div class="step"><span class="dot"></span>逻辑分析</div>
+            <div class="step"><span class="dot"></span>生成报告</div>
+          </div>
+          <p class="loading-hint">大模型分析约需 10–30 秒，请稍候…</p>
+        </div>
+        <div id="errorBox" class="error-box hidden"></div>
+      </section>
+
+      <!-- 结果区 -->
+      <section id="resultPanel" class="panel hidden">
+        <div id="conclusionBanner" class="conclusion"></div>
+        <div id="classicResult">
+          <div id="classicAttention" class="attn-inline-box hidden"></div>
+          <div class="dims">
+            <article class="dim-card" id="dimEmotion"></article>
+            <article class="dim-card" id="dimAttack"></article>
+            <article class="dim-card" id="dimLogic"></article>
+          </div>
+          <div class="report-box">
+            <h2>📋 完整分析报告</h2>
+            <pre id="reportText"></pre>
+          </div>
+        </div>
+        <div id="agentResult" class="hidden"></div>
+      </section>
+
+      <!-- 关注度（Attention）评估 -->
+      <section id="attentionPanel" class="panel">
+        <div class="panel-head">
+          <h2>📈 关注度（Attention）评估</h2>
+          <span class="count-chip">确定性公式 · 不调大模型</span>
+        </div>
+        <p class="attn-intro">
+          公式 <code>E = 100·(1 − e^(−λ·S))</code>，其中
+          <code>S = w_x·ln(1+x)/ln(1+x0) + w_y·ln(1+y)/ln(1+y0) + w_z·ln(1+z)/ln(1+z0) + ε</code>。
+          <b>x</b>=文章数量，<b>y</b>=文章阅读量，<b>z</b>=文章留言量。
+          默认参数 <code>x0=100, y0=100000, z0=1000, w=(0.2,0.5,0.3), λ=0.7, ε=1e-6</code>。
+        </p>
+        <div class="attn-profile-row">
+          <label for="attnProfile">参数档位</label>
+          <select id="attnProfile"></select>
+          <span class="attn-profile-desc" id="attnProfileDesc"></span>
+        </div>
+        <div class="attn-tabs" id="attnTabs">
+          <button class="attn-tab active" data-attn-tab="manual" type="button">🔢 手动输入 x/y/z</button>
+          <button class="attn-tab" data-attn-tab="search" type="button">🛰️ 话题联网估参</button>
+        </div>
+
+        <!-- 手动输入 -->
+        <div id="attnManual" class="attn-pane">
+          <div class="attn-fields">
+            <label>x 文章数量<input id="attnX" type="number" min="0" step="1" value="100" /></label>
+            <label>y 文章阅读量<input id="attnY" type="number" min="0" step="1" value="100000" /></label>
+            <label>z 文章留言量<input id="attnZ" type="number" min="0" step="1" value="1000" /></label>
+          </div>
+          <div class="actions">
+            <button id="attnCalcBtn" class="btn-primary" type="button">📈 计算关注度</button>
+            <button id="attnResetBtn" class="btn-ghost" type="button">恢复默认</button>
+          </div>
+        </div>
+
+        <!-- 话题联网估参 -->
+        <div id="attnSearch" class="attn-pane hidden">
+          <div class="attn-fields attn-fields-wide">
+            <label>话题关键词
+              <input id="attnQuery" type="text" maxlength="200"
+                placeholder="输入一个话题，例如：老干妈回应AI裁员传闻" />
+            </label>
+          </div>
+          <div class="actions">
+            <button id="attnSearchBtn" class="btn-primary" type="button">🛰️ 联网估参并算分</button>
+          </div>
+          <p class="attn-hint">
+            会真实联网检索该话题，从检索结果估出 x/y/z。<b>y/z 是代理值</b>：
+            没有任何站点公开文章级精确阅读量，页面会把「代理/估计」明确标出来。
+          </p>
+        </div>
+
+        <div id="attnError" class="error-box hidden"></div>
+        <div id="attnResult" class="attn-result hidden"></div>
+      </section>
+    </div>
+
+    <aside class="col-side">
+      <!-- 历史记录 -->
+      <section class="panel">
+        <div class="panel-head">
+          <h2>🕘 分析记录</h2>
+          <span id="historyCount" class="count-chip">0</span>
+        </div>
+        <ul id="historyList" class="history-list">
+          <li class="empty">暂无记录，去分析第一条言论吧</li>
+        </ul>
+      </section>
+
+      <!-- 关于 -->
+      <section class="panel about-panel">
+        <h2>ℹ️ 关于系统</h2>
+        <p>本系统不训练模型：通过结构化提示词调用大模型 API 完成情感、
+          攻击性、逻辑三个维度的分析，再用纯 Python 规则引擎得出确定性结论，
+          最后生成解释报告。</p>
+        <ul>
+          <li>三模块独立容错，单模块失败不影响整体</li>
+          <li>结论由确定性规则得出，不靠模型"自己当裁判"</li>
+          <li>谣言 Agent 模式：联网检索证据本（来源分级 + 立场判定）辅助谣言识别</li>
+          <li>接口文档：<a href="/docs" target="_blank">/docs</a></li>
+        </ul>
+      </section>
+    </aside>
+  </main>
+
+  <footer class="site-footer">
+    ⚠️ 免责声明：分析结果由 AI 模型基于文本特征初步生成，仅供参考，
+    最终判断权与事实核查请由用户自行把握。
+  </footer>
+
+  <script src="static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,5 @@
+{
+  "params": {"x0":100,"y0":1000000,"z0":10000,"w_x":0.25,"w_y":0.45,"w_z":0.30,"lambda":0.9,"epsilon":1e-06},
+  "bands": [{"min":66,"label":"高关注"},{"min":50,"label":"中关注"},{"min":33,"label":"低关注"},{"min":0,"label":"冷启动"}],
+  "deep_read_threshold": 66
+}

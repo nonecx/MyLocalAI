@@ -1,0 +1,55 @@
+{
+  "_comment": "信源分级名单（对齐检验报告 2026-10-14 发现 1/12：域名表不再写死在 sources.py 里）。改本文件即可增删来源；代码只读不写死。可用环境变量 RUMOR_SOURCES_PATH 指向别处的同名文件，或用 RUMOR_SOURCES_EXTRA_PATH 指定一个只含增量条目的 JSON（同样结构，合并覆盖）。匹配按域名的边界后缀、取最长命中，因此 xinhuanet.com.evil.com 不会命中 xinhuanet.com。",
+
+  "tiers": {
+    "官方权威": ["gov.cn", "gov", "mil.cn", "piyao.org.cn", "12377.cn", "who.int", "cdc.gov", "samr.gov.cn", "nhc.gov.cn", "chinacdc.cn"],
+    "权威媒体/辟谣平台": ["xinhuanet.com", "news.cn", "people.com.cn", "people.cn", "cctv.com", "cctv.cn", "cnr.cn", "chinanews.com.cn", "chinadaily.com.cn", "gmw.cn", "thepaper.cn", "caixin.com", "bjnews.com.cn", "jfdaily.com", "yicai.com", "cri.cn", "ce.cn", "legaldaily.com.cn", "xinhuanet.com.cn", "dxy.cn", "dxy.com", "guokr.com", "kepuchina.cn", "science.org.cn", "cas.cn", "reuters.com", "bbc.com", "apnews.com", "bbc.co.uk", "nytimes.com", "washingtonpost.com", "nature.com", "sciencemag.org", "nih.gov", "europa.eu"],
+    "一般门户媒体": ["sina.com.cn", "sohu.com", "163.com", "ifeng.com", "news.qq.com", "new.qq.com", "qq.com", "qianzhan.com", "bwchinese.com", "bwchinese.com.cn", "hangzhou.com.cn", "fh21.com.cn", "bohe.cn", "39.net", "haodf.com", "familydoctor.com.cn", "eastmoney.com", "cnr.com", "youth.cn", "china.com.cn", "huanqiu.com", "southcn.com", "ycwb.com"],
+    "自媒体/UGC": ["mp.weixin.qq.com", "weixin.qq.com", "baijiahao.baidu.com", "baike.baidu.com", "zhidao.baidu.com", "tieba.baidu.com", "baidu.com", "toutiao.com", "zhihu.com", "weibo.com", "weibo.cn", "douyin.com", "bilibili.com", "so.com", "xiaohongshu.com", "kuaishou.com", "douban.com", "sinaimg.cn", "mbd.baidu.com", "wenku.baidu.com", "blog.sina.com.cn"]
+  },
+
+  "_tiers_comment": "只有前两级算可靠来源（RELIABLE_TIERS）。名单是人工整理的、不完整：名单外的好来源会被归为「未知来源」，宁可低估也不把陌生域名当权威——这是有意的保守取向。",
+
+  "official_sites": {
+    "_comment": "用户指定的官方来源（报告与网站里标注「官方（站名）」）。",
+    "cctv.com": "央视新闻",
+    "cctv.cn": "央视新闻",
+    "xinhuanet.com": "新华网",
+    "news.cn": "新华网",
+    "cnr.cn": "央广网",
+    "people.com.cn": "人民网",
+    "people.cn": "人民网"
+  },
+
+  "commercial_sites": {
+    "_comment": "用户指定的非官方（门户/商业媒体），标注「非官方（站名）」。",
+    "sina.com.cn": "新浪网",
+    "k.sina.com.cn": "新浪网",
+    "qq.com": "腾讯网",
+    "news.qq.com": "腾讯网",
+    "new.qq.com": "腾讯网",
+    "qianzhan.com": "前瞻网",
+    "bwchinese.com": "BWCHINESE中文网",
+    "bwchinese.com.cn": "BWCHINESE中文网",
+    "baidu.com": "百度",
+    "baijiahao.baidu.com": "百度百家号"
+  },
+
+  "unknown_kind": "其他",
+  "_unknown_kind_comment": "名单外域名与空主机统一返回这个值（判定契约，tests/test_rumor_agent_offline.py 有锁定）。它既不是「官方」也不是「非官方」，因此伪装域名不会被当成官方来源——抗伪装的安全属性由「不等于官方」保证，不依赖它必须写成「非官方」。",
+
+  "_tier_roles_comment": "下面四项按**档名**声明哪些档算官方权威、哪些档算可靠来源、哪些档可抓全文、哪些档可向外扩链；档位的排序优先级直接取上面 tiers 的声明顺序。换行业把档位重命名时改这里即可，不要再把档名写进 Python（对齐检验报告 2026-10-15 发现 1）。四项都可以省略：省略时按 tiers 的声明顺序取前 1/2/3/2 档兜底，不会退化成「哪个档都不可靠」。channel_score 是各档的渠道权重（民间观点聚合的论据可信度用）。",
+
+  "official_tiers": ["官方权威"],
+  "reliable_tiers": ["官方权威", "权威媒体/辟谣平台"],
+  "fetch_tiers": ["官方权威", "权威媒体/辟谣平台", "一般门户媒体"],
+  "link_tiers": ["官方权威", "权威媒体/辟谣平台"],
+
+  "channel_score": {
+    "官方权威": 3.0,
+    "权威媒体/辟谣平台": 2.0,
+    "一般门户媒体": 1.5,
+    "自媒体/UGC": 1.0,
+    "未知来源": 0.5
+  }
+}

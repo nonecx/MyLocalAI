@@ -1,0 +1,118 @@
+{
+ "written_at": "2026-10-07 13:36:11",
+ "safe_concurrency": 4,
+ "safe_concurrency_note": "仅测到并发4；<=该值时错误率<5%，未观察到限流；更高并发未验证，不要外推",
+ "saw_429": false,
+ "s2_levels": [
+  {
+   "concurrency": 1,
+   "requests": 4,
+   "p50_s": 15.778,
+   "p95_s": 18.698,
+   "max_s": 19.032,
+   "error_rate": 0.0,
+   "throughput_req_per_min": 3.68,
+   "report_fallbacks": 0,
+   "error_types": {}
+  },
+  {
+   "concurrency": 2,
+   "requests": 4,
+   "p50_s": 20.304,
+   "p95_s": 22.275,
+   "max_s": 22.431,
+   "error_rate": 0.0,
+   "throughput_req_per_min": 5.48,
+   "report_fallbacks": 0,
+   "error_types": {}
+  },
+  {
+   "concurrency": 4,
+   "requests": 8,
+   "p50_s": 19.204,
+   "p95_s": 32.64,
+   "max_s": 37.914,
+   "error_rate": 0.0,
+   "throughput_req_per_min": 9.11,
+   "report_fallbacks": 0,
+   "error_types": {}
+  }
+ ],
+ "s2_stopped_early": null,
+ "s2_latency_scaling_p50_vs_c1": {
+  "1": 1.0,
+  "2": 1.29,
+  "4": 1.22
+ },
+ "s1_call_latency": {
+  "n": 9,
+  "min": 2.165,
+  "p50": 2.432,
+  "p95": 8.392,
+  "max": 11.131,
+  "mean": 3.715
+ },
+ "s1_by_module": {
+  "emotion": {
+   "n": 3,
+   "min": 2.418,
+   "p50": 2.981,
+   "p95": 10.316,
+   "max": 11.131,
+   "mean": 5.51
+  },
+  "aggression": {
+   "n": 3,
+   "min": 2.296,
+   "p50": 2.432,
+   "p95": 3.249,
+   "max": 3.34,
+   "mean": 2.689
+  },
+  "logic": {
+   "n": 3,
+   "min": 2.165,
+   "p50": 2.385,
+   "p95": 4.094,
+   "max": 4.284,
+   "mean": 2.945
+  }
+ },
+ "s3_emotion_score_range": 0.0,
+ "s4_api_error_inputs": {
+  "empty": {
+   "emotion": "输入文本为空，未调用分析",
+   "aggression": "输入文本为空，未调用分析",
+   "logic": "输入文本为空，未调用分析"
+  },
+  "whitespace": {
+   "emotion": "输入文本为空，未调用分析",
+   "aggression": "输入文本为空，未调用分析",
+   "logic": "输入文本为空，未调用分析"
+  },
+  "fake_chat_tokens": {
+   "aggression": "模型返回无法解析的JSON"
+  },
+  "lone_surrogate_combining": {
+   "emotion": "API 调用失败: UnicodeEncodeError: 'utf-8' codec can't encode character '\\ud800' in position 468: surrogates not allowed",
+   "aggression": "API 调用失败: UnicodeEncodeError: 'utf-8' codec can't encode character '\\ud800' in position 362: surrogates not allowed",
+   "logic": "API 调用失败: UnicodeEncodeError: 'utf-8' codec can't encode character '\\ud800' in position 682: surrogates not allowed"
+  },
+  "json_as_text": {
+   "emotion": "模型返回无法解析的JSON"
+  }
+ },
+ "s6_status": "ok",
+ "api_calls": {
+  "stageA_logical": {
+   "logical_calls": 139,
+   "http_requests": 0,
+   "http_429": 0,
+   "blocked_by_cap": 0,
+   "failed_logical": 3
+  },
+  "s6_estimated": 24,
+  "total_estimated_logical": 163,
+  "hard_limit": 200
+ }
+}

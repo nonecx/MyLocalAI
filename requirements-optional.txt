@@ -1,0 +1,31 @@
+# ============================================================
+# 可选依赖：本地备选推理链路（module_inference.py）
+#
+# 主链路（提示词工程 + 大模型 API）**不需要**这里任何一项，所以它们不在
+# requirements.txt 里——光是 torch 就有数 GB。
+#
+# 安装：pip install -r requirements-optional.txt
+#
+# 注意：本机实测这两个本地模型目前都不可用（见根 README 的"已知局限"）：
+#   - modelscope 模型缺 addict 依赖；直接 `pip install addict` 可补
+#   - HF 上的 ArdLi/ToxiTrace config.json 缺 model_type，与 transformers 5.x 不兼容
+# 也就是说装了依赖 ≠ 备选链路可用，纯规则引擎 local_logic 不受影响。
+#
+# 版本带上限（2026-10-22 修复 G6）：原先写 `transformers>=4.40.0` 没有上限，
+# 而 README 已记录 transformers 5.x 与本地模型不兼容——新 venv 会直接装到 5.x，
+# 让"已知局限"变成"装了也装错版本"。
+# ============================================================
+
+torch>=2.1.0,<3.0.0
+transformers>=4.40.0,<5.0.0
+modelscope>=1.9.0,<2.0.0
+tqdm>=4.66.0,<5.0.0
+addict>=2.4.0,<3.0.0
+
+# ---- 旧本地训练方案（已弃用，仅历史 module_*/train.py 需要；需要时取消注释） ----
+# peft>=0.10.0,<1.0.0
+# datasets>=2.19.0,<6.0.0
+# accelerate>=0.29.0,<2.0.0
+# scikit-learn>=1.4.0,<2.0.0
+# numpy>=1.24.0,<3.0.0
+# pandas>=2.0.0,<4.0.0

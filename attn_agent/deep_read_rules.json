@@ -1,0 +1,51 @@
+{
+  "_comment": "关注度深读口径外置配置：触发规则 + 受控生成参数 + 护栏禁词。写坏时 attn_agent.deep_read 会退回内置默认并留中文告警，不会崩溃。可用 DEEP_READ_RULES_PATH 整套替换、DEEP_READ_RULES_EXTRA_PATH 增量覆盖（与 rumor_agent / shared_core 的配置加载约定一致）。",
+  "trigger": {
+    "_comment": "触发规则。mode 取值：absolute=绝对阈值（E 严格大于阈值）；quantile=同批 Top-K%（当前话题在本批 E 中排进前 K%）；change_rate=预留（环比增幅，暂未实现，恒不触发）；any=absolute 与 quantile 任一满足即触发。by_profile 按参数档位（attn_rules.json 的 profile）覆盖顶层配置，未列出的档位沿用顶层。",
+    "mode": "absolute",
+    "absolute_threshold": 66,
+    "quantile_top_ratio": 0.1,
+    "change_rate_threshold": null,
+    "by_profile": {
+      "spec": {
+        "_comment": "默认档：保留 E>66 的原始口径（改造前行为，未指定档位时与此完全一致）。",
+        "mode": "absolute",
+        "absolute_threshold": 66
+      },
+      "reachable": {
+        "_comment": "候选档：实测 5 个真实头部话题 0/5 越过 66，绝对阈值在此档失效，故改同批分位。",
+        "mode": "quantile",
+        "quantile_top_ratio": 0.1
+      }
+    }
+  },
+  "deep_read": {
+    "_comment": "受控生成参数。max_words=输出总字数上限；require_counter_reading=是否强制反方解读；max_issue_tags=最多挂几个议题标签；allow_other_tag=是否允许清单外的 other 标签。",
+    "max_words": 300,
+    "require_counter_reading": true,
+    "max_issue_tags": 3,
+    "allow_other_tag": true
+  },
+  "banned_patterns": [
+    {
+      "id": "subject_blame",
+      "pattern": "(政府|官方|有关部门|部门|机关|公司|企业|某群体|某地人|当地人|相关部门)[^。！？；;\\n]{0,12}(在瞒|隐瞒|欺骗|撒谎|造假|篡改|压制|操控|漠视|放任|失职|渎职|打压|封锁|甩锅|遮丑|捂嘴)",
+      "note": "具体主体归因：主语是机构/公司/群体/地域 + 负面谓词"
+    },
+    {
+      "id": "universal_claim",
+      "pattern": "(全社会|普遍|必然|所有人|无一例外|人人都|谁都|无一幸免|都在|全在|统统|清一色)",
+      "note": "从样本推普遍性（含群体/地域整体化表述）"
+    },
+    {
+      "id": "value_judgment",
+      "pattern": "(可悲|落后|愚昧|无知|奴性|麻木|可笑|荒唐)",
+      "note": "价值判断词"
+    },
+    {
+      "id": "prediction",
+      "pattern": "(将引发|将会引发|必将引发|必然导致|迟早|终将|不可避免|长此以往)",
+      "note": "对未发生事件的预测"
+    }
+  ]
+}

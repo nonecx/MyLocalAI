@@ -1,0 +1,375 @@
+{
+  "version": "1",
+  "_comment": "社会议题清单（封闭集，供「关注度深读」的 LLM 受控生成使用）。本文件由 attn_agent.deep_read 通过 shared_core.config_loader 加载，与 rumor_agent / deep_read_rules.json 的配置加载约定一致：整套替换 + 增量覆盖 + 读取失败退回内置默认并留中文告警。设计意图见下面 _issues_comment。",
+
+  "_issues_comment": "这是**封闭式**清单：LLM 在受控生成里只能从 issues 里选 issue_tags，不得自创 id。为什么这么设计——深读要回答「这件事反映了什么社会问题」，如果放任模型自造议题名，同一件事两次跑会得到两个不同标签，标签就无法聚合、无法统计、无法回归测试；封闭集让标签成为可比对的枚举值。代价是清单一定不完整（新议题会先落到 other），因此：\n1. 每个条目都写 definition + tension_a_hint / tension_b_hint（供模型表述「A 与 B 之间的张力」，而不是直接下判断）、include（典型表现）、exclude（相邻议题的区分边界）。四样都写，模型才知道边界在哪，而不是靠猜。\n2. 命名保持中性：不写价值判断，不把某个机构/地域/群体写成负面标签。议题描述的是**张力本身**，不是问责。\n3. 改本文件即可增删议题，代码只读不写死。",
+
+  "_issue_fields_comment": "id=snake_case 英文唯一标识（LLM 只能回这个值）；label=中文短名；definition=一句话说明核心张力；tension_a_hint / tension_b_hint=张力两端提示词，各 4-10 字；include=至少 2 条典型表现；exclude=至少 2 条不属于本议题的情况（用来和相邻议题区分，比 include 更能防止贴错标签）。",
+
+  "_fallback_comment": "兜底标签 id。清单覆盖不了的高关注度话题一律落到这里，而不是硬塞进最接近的议题——为了归类而贴错标签，比承认「未归类」更糟。注意：它仍是合法标签，不是错误码。",
+
+  "issues": [
+    {
+      "id": "info_transparency_trust",
+      "label": "公共信息透明度与公众信任",
+      "definition": "围绕官方信息发布及时性、完整性与公众知情需求之间的张力",
+      "tension_a_hint": "信息发布节奏",
+      "tension_b_hint": "公众知情需求",
+      "include": ["通报与传闻不一致", "信息延迟引发的质疑"],
+      "exclude": ["单纯的情绪宣泄", "对具体个人的指责"]
+    },
+    {
+      "id": "public_safety_incident",
+      "label": "公共安全事件",
+      "definition": "围绕突发安全事件的风险感知与日常生活连续性之间的张力",
+      "tension_a_hint": "风险事件冲击",
+      "tension_b_hint": "日常安全预期",
+      "include": ["交通事故、工地事故等突发事件引发围观", "对同类场所安全状况的追问"],
+      "exclude": ["对责任认定的法律程序讨论（属法治程序）", "事件通报发布时间争议（属信息透明度）"]
+    },
+    {
+      "id": "emergency_response_rhythm",
+      "label": "应急处置节奏",
+      "definition": "围绕突发事件处置速度、次序与公众对处置充分度的期待之间的张力",
+      "tension_a_hint": "处置推进节奏",
+      "tension_b_hint": "处置充分期待",
+      "include": ["救援进展细节被反复追问", "处置步骤先后顺序引发讨论"],
+      "exclude": ["对处置人员的个人攻击", "与事件无关的日常应急演练报道"]
+    },
+    {
+      "id": "food_drug_safety",
+      "label": "食品药品安全",
+      "definition": "围绕食品药品质量风险与消费者放心使用之间的张力",
+      "tension_a_hint": "质量风险暴露",
+      "tension_b_hint": "放心使用需求",
+      "include": ["某类食品抽检结果引发关注", "用药安全提示被大量转发"],
+      "exclude": ["食品药品价格的正常波动", "对某个品牌营销方式的评价"]
+    },
+    {
+      "id": "medical_resource_access",
+      "label": "医疗资源可及",
+      "definition": "围绕优质医疗资源分布与患者就近就医需求之间的张力",
+      "tension_a_hint": "资源集中程度",
+      "tension_b_hint": "就近就医需求",
+      "include": ["跨城就医的时间与经济成本被讨论", "挂号难、候诊时长引发共鸣"],
+      "exclude": ["对医护个人服务态度的评价", "具体疾病治疗方案的专业探讨"]
+    },
+    {
+      "id": "healthcare_communication",
+      "label": "医患沟通体验",
+      "definition": "围绕医疗信息告知的充分度与患者理解期待之间的张力",
+      "tension_a_hint": "告知充分程度",
+      "tension_b_hint": "患者理解期待",
+      "include": ["检查结果解读不清引发的反复询问", "知情同意过程中的沟通摩擦"],
+      "exclude": ["医疗费用报销比例争议（属社会保障）", "医院设施环境体验"]
+    },
+    {
+      "id": "health_info_discernment",
+      "label": "健康信息辨识",
+      "definition": "围绕养生健康类信息的大量供给与公众辨识能力之间的张力",
+      "tension_a_hint": "健康信息供给",
+      "tension_b_hint": "信息辨识能力",
+      "include": ["相互矛盾的食疗说法被同时传播", "对体检指标含义的误读扩散"],
+      "exclude": ["经证实的诊疗技术进展介绍", "医保目录调整的政策解读"]
+    },
+    {
+      "id": "education_resource_allocation",
+      "label": "教育资源分配",
+      "definition": "围绕教育资源供给分布与家庭获得优质教育机会期待之间的张力",
+      "tension_a_hint": "资源分布格局",
+      "tension_b_hint": "机会获得期待",
+      "include": ["学区划分变化引发家长讨论", "不同学校办学条件差异被对比"],
+      "exclude": ["对单个教师教学风格的喜好", "学生课后兴趣班的选择"]
+    },
+    {
+      "id": "student_burden_growth",
+      "label": "学业负担成长",
+      "definition": "围绕学业任务密度与学生身心成长节奏之间的张力",
+      "tension_a_hint": "学业任务密度",
+      "tension_b_hint": "身心成长节奏",
+      "include": ["作业时长与睡眠时间冲突的讨论", "考试安排密集程度引发关注"],
+      "exclude": ["招生政策程序的解读（属法治程序）", "课程内容本身的学术讨论"]
+    },
+    {
+      "id": "employment_opportunity",
+      "label": "就业机会匹配",
+      "definition": "围绕岗位供给结构与求职者技能、地域预期之间的张力",
+      "tension_a_hint": "岗位供给结构",
+      "tension_b_hint": "求职预期结构",
+      "include": ["招聘需求与专业方向错配被讨论", "求职周期拉长带来的焦虑"],
+      "exclude": ["具体劳动合同纠纷的处理（属劳动权益）", "职场加班强度问题（属劳动权益）"]
+    },
+    {
+      "id": "labor_rights_workload",
+      "label": "劳动权益保障",
+      "definition": "围绕工作强度、薪酬结算安排与劳动者权益保障之间的张力",
+      "tension_a_hint": "工作强度安排",
+      "tension_b_hint": "权益保障期待",
+      "include": ["加班与休假安排引发讨论", "薪酬发放周期与计算方式争议"],
+      "exclude": ["岗位供需数量的讨论（属就业机会）", "行业薪资水平高低的横向比较"]
+    },
+    {
+      "id": "housing_cost_pressure",
+      "label": "居住成本压力",
+      "definition": "围绕住房购置与持有成本和家庭可支配收入之间的张力",
+      "tension_a_hint": "住房购置成本",
+      "tension_b_hint": "收入承受能力",
+      "include": ["首付与月供占比引发讨论", "买房与租房长期成本的比较"],
+      "exclude": ["房屋装修质量纠纷", "小区物业费定价争议（属社区环境）"]
+    },
+    {
+      "id": "rental_market_norms",
+      "label": "租赁市场规范",
+      "definition": "围绕租赁交易规则明确度与租客稳定居住期待之间的张力",
+      "tension_a_hint": "交易规则明确度",
+      "tension_b_hint": "稳定居住期待",
+      "include": ["押金退还条件引发争议", "租金调整与续约规则讨论"],
+      "exclude": ["购房贷款利率变化", "中介门店服务态度的评价"]
+    },
+    {
+      "id": "elderly_care_supply",
+      "label": "养老服务供给",
+      "definition": "围绕养老服务资源供给与家庭照护需求之间的张力",
+      "tension_a_hint": "照护资源供给",
+      "tension_b_hint": "家庭照护需求",
+      "include": ["养老机构床位与距离的讨论", "居家照护人手不足的讨论"],
+      "exclude": ["养老金金额高低的讨论（属社会保障）", "老年人健康体检指标解读"]
+    },
+    {
+      "id": "elderly_health_management",
+      "label": "老年健康管理",
+      "definition": "围绕慢性病长期管理要求与老年人日常执行便利度之间的张力",
+      "tension_a_hint": "长期管理要求",
+      "tension_b_hint": "日常执行便利",
+      "include": ["用药依从性与复诊便利性讨论", "慢性病监测设备适老性讨论"],
+      "exclude": ["医疗机构资源分布的讨论（属医疗资源）", "保健品价格与营销方式讨论"]
+    },
+    {
+      "id": "gender_equal_opportunity",
+      "label": "性别机会平等",
+      "definition": "围绕机会分配中的性别因素与个体公平发展期待之间的张力",
+      "tension_a_hint": "性别因素影响",
+      "tension_b_hint": "公平发展期待",
+      "include": ["招聘条件中的性别限制引发讨论", "晋升机会分布的讨论"],
+      "exclude": ["对个人性别表达的审美评价", "基于性别的情绪化对立言论"]
+    },
+    {
+      "id": "gender_role_expectation",
+      "label": "性别角色期待",
+      "definition": "围绕传统角色分工预期与个体自主选择之间的张力",
+      "tension_a_hint": "角色分工预期",
+      "tension_b_hint": "个体自主选择",
+      "include": ["家庭分工模式的讨论", "职业与家庭时间分配的讨论"],
+      "exclude": ["职场录用歧视的程序性争议（属性别机会平等）", "对某一性别整体能力的断言"]
+    },
+    {
+      "id": "regional_resource_gap",
+      "label": "区域资源差异",
+      "definition": "围绕公共资源在区域间分布差异与居民同等享有期待之间的张力",
+      "tension_a_hint": "区域分布差异",
+      "tension_b_hint": "同等享有期待",
+      "include": ["同类公共服务在不同地区的比较", "人口流动背后的资源因素讨论"],
+      "exclude": ["对某地居民整体性格的概括", "地方文化特色的介绍"]
+    },
+    {
+      "id": "regional_identity",
+      "label": "地域认同与标签",
+      "definition": "围绕地域身份认同表达与去标签化理性讨论之间的张力",
+      "tension_a_hint": "地域身份认同",
+      "tension_b_hint": "去标签化诉求",
+      "include": ["家乡发展变化的讨论", "地域标签被随意套用的讨论"],
+      "exclude": ["对具体地域资源数据的客观比较", "地方政策文件的解读"]
+    },
+    {
+      "id": "consumer_rights",
+      "label": "消费者维权",
+      "definition": "围绕交易信息不对称与消费者公平交易期待之间的张力",
+      "tension_a_hint": "交易信息不对称",
+      "tension_b_hint": "公平交易期待",
+      "include": ["预付费退款难的讨论", "商品与宣传不符的维权过程"],
+      "exclude": ["正常价格波动的讨论", "对商品外观设计的偏好评价"]
+    },
+    {
+      "id": "consumption_choice",
+      "label": "消费选择理性",
+      "definition": "围绕促销信息密度与消费者自主判断之间的张力",
+      "tension_a_hint": "促销信息密度",
+      "tension_b_hint": "自主判断空间",
+      "include": ["大促规则复杂度引发吐槽", "直播间下单冲动与退货讨论"],
+      "exclude": ["已确认质量问题的维权（属消费者维权）", "商品性价比的专业测评"]
+    },
+    {
+      "id": "environmental_action",
+      "label": "环境保护行动",
+      "definition": "围绕环境治理措施推进与公众参与期待之间的张力",
+      "tension_a_hint": "治理推进节奏",
+      "tension_b_hint": "公众参与期待",
+      "include": ["身边环境变化的观察与讨论", "垃圾分类等日常环保行为讨论"],
+      "exclude": ["极端天气本身的报道（属气候影响）", "环保产业投资价值分析"]
+    },
+    {
+      "id": "climate_weather_impact",
+      "label": "气候天气影响",
+      "definition": "围绕极端天气频发与生活生产安排连续性之间的张力",
+      "tension_a_hint": "极端天气影响",
+      "tension_b_hint": "生活安排连续",
+      "include": ["高温、暴雨对出行与农作的影响", "天气预警与日常安排的冲突"],
+      "exclude": ["长期气候政策的解读", "环保治理措施成效的讨论"]
+    },
+    {
+      "id": "tech_ethics_governance",
+      "label": "科技伦理治理",
+      "definition": "围绕技术应用速度与社会规则调适之间的张力",
+      "tension_a_hint": "技术应用速度",
+      "tension_b_hint": "规则调适进度",
+      "include": ["新技术应用边界引发讨论", "自动化决策带来影响的讨论"],
+      "exclude": ["具体产品功能的使用教程", "科技公司股价波动分析"]
+    },
+    {
+      "id": "ai_application_trust",
+      "label": "人工智能应用",
+      "definition": "围绕人工智能功能实际效果与使用者可靠预期之间的张力",
+      "tension_a_hint": "功能实际效果",
+      "tension_b_hint": "可靠使用预期",
+      "include": ["生成内容出错的讨论", "人工与自动处理方式的取舍讨论"],
+      "exclude": ["算法推荐机制的治理讨论（属科技伦理）", "编程技术细节讨论"]
+    },
+    {
+      "id": "personal_privacy",
+      "label": "个人隐私保护",
+      "definition": "围绕个人信息收集的便利与个人边界掌控之间的张力",
+      "tension_a_hint": "信息收集便利",
+      "tension_b_hint": "边界掌控需求",
+      "include": ["App 权限索取范围的讨论", "个人信息被随意展示的讨论"],
+      "exclude": ["账户被盗后的追偿程序讨论（属法治程序）", "实名制政策本身的解读"]
+    },
+    {
+      "id": "income_gap",
+      "label": "收入分配差距",
+      "definition": "围绕收入增长分化与公平分配期待之间的张力",
+      "tension_a_hint": "收入增长分化",
+      "tension_b_hint": "公平分配期待",
+      "include": ["行业间收入差距的讨论", "同一岗位不同时期薪酬变化"],
+      "exclude": ["个人职业选择的讨论", "具体薪酬计算纠纷（属劳动权益）"]
+    },
+    {
+      "id": "financial_risk",
+      "label": "理财风险防范",
+      "definition": "围绕投资收益预期与本金安全底线之间的张力",
+      "tension_a_hint": "收益预期高低",
+      "tension_b_hint": "本金安全底线",
+      "include": ["高收益承诺的风险提示讨论", "投资亏损后的应对讨论"],
+      "exclude": ["正常存款利率调整的新闻", "宏观货币政策的解读"]
+    },
+    {
+      "id": "family_relationship",
+      "label": "家庭关系调适",
+      "definition": "围绕家庭成员独立诉求与相互支持责任之间的张力",
+      "tension_a_hint": "个体独立诉求",
+      "tension_b_hint": "相互支持责任",
+      "include": ["家务分工引发的讨论", "亲属间边界感的讨论"],
+      "exclude": ["婚姻登记程序的咨询", "赡养费用的法律裁定（属法治程序）"]
+    },
+    {
+      "id": "marriage_childbearing",
+      "label": "婚育观念选择",
+      "definition": "围绕婚育时间与方式的外部期待与个人节奏安排之间的张力",
+      "tension_a_hint": "外部期待节奏",
+      "tension_b_hint": "个人安排节奏",
+      "include": ["适婚年龄的讨论", "生育数量与间隔的讨论"],
+      "exclude": ["托育机构费用的讨论（属社会保障）", "婚姻财产分割案例的解读"]
+    },
+    {
+      "id": "mental_health",
+      "label": "心理健康关注",
+      "definition": "围绕心理压力累积与心理调节资源可及之间的张力",
+      "tension_a_hint": "压力累积程度",
+      "tension_b_hint": "调节资源可及",
+      "include": ["情绪低谷经历的分享", "心理求助渠道信息的扩散"],
+      "exclude": ["对他人心理状态的专业诊断意见", "生理疾病症状的诊疗讨论"]
+    },
+    {
+      "id": "rule_of_law",
+      "label": "法治程序公正",
+      "definition": "围绕个案处理程序推进与公众对结果可预期期待之间的张力",
+      "tension_a_hint": "程序推进过程",
+      "tension_b_hint": "结果可预期性",
+      "include": ["案件审理进度的关注", "同类案件处理差异的讨论"],
+      "exclude": ["对当事人的道德评价", "法律条文专业含义的学术讨论"]
+    },
+    {
+      "id": "media_trust",
+      "label": "媒体信任建构",
+      "definition": "围绕信息渠道多元化与信息源可信度确认之间的张力",
+      "tension_a_hint": "渠道多元程度",
+      "tension_b_hint": "可信确认需求",
+      "include": ["同一事件不同信源表述差异", "消息溯源过程的讨论"],
+      "exclude": ["对具体机构职能的介绍", "信息发布时间争议（属信息透明度）"]
+    },
+    {
+      "id": "intergenerational_gap",
+      "label": "代际观念差异",
+      "definition": "围绕不同代际生活经验差异与相互理解期待之间的张力",
+      "tension_a_hint": "代际经验差异",
+      "tension_b_hint": "相互理解期待",
+      "include": ["消费观念差异的讨论", "育儿与养老观念差异的讨论"],
+      "exclude": ["同龄群体内部的兴趣分野", "历史事件的客观回顾"]
+    },
+    {
+      "id": "urban_rural_gap",
+      "label": "城乡差异流动",
+      "definition": "围绕城乡生活条件差异与双向流动选择之间的张力",
+      "tension_a_hint": "城乡条件差异",
+      "tension_b_hint": "双向流动选择",
+      "include": ["返乡发展机会的讨论", "进城后公共服务衔接的讨论"],
+      "exclude": ["城市内部社区治理讨论（属社区环境）", "农村文化活动的单纯介绍"]
+    },
+    {
+      "id": "online_violence",
+      "label": "网络暴力治理",
+      "definition": "围绕网络表达边界与人身攻击防控之间的张力",
+      "tension_a_hint": "表达边界模糊",
+      "tension_b_hint": "攻击防控需求",
+      "include": ["评论区人身攻击现象的讨论", "人肉搜索与信息扩散的讨论"],
+      "exclude": ["对公共政策的理性批评", "观点分歧的正常争论"]
+    },
+    {
+      "id": "community_living_env",
+      "label": "社区居住环境",
+      "definition": "围绕社区公共空间管理需求与居民生活便利之间的张力",
+      "tension_a_hint": "空间管理要求",
+      "tension_b_hint": "生活便利需求",
+      "include": ["停车与噪音管理的讨论", "公共设施维护与使用的讨论"],
+      "exclude": ["房租价格水平的讨论（属居住成本）", "住宅建筑质量验收问题"]
+    },
+    {
+      "id": "public_service",
+      "label": "公共服务体验",
+      "definition": "围绕公共服务流程设计与使用者便利期待之间的张力",
+      "tension_a_hint": "流程设计复杂度",
+      "tension_b_hint": "使用便利期待",
+      "include": ["办事材料与环节往返的讨论", "线上服务可用性的讨论"],
+      "exclude": ["服务窗口人员个人态度的评价", "政策适用范围的客观说明"]
+    },
+    {
+      "id": "social_security",
+      "label": "社会保障支持",
+      "definition": "围绕保障覆盖范围与待遇水平预期之间的张力",
+      "tension_a_hint": "保障覆盖范围",
+      "tension_b_hint": "待遇水平预期",
+      "include": ["参保条件与转移接续的讨论", "待遇申领流程的讨论"],
+      "exclude": ["商业保险产品的比较", "个人理财储备的规划"]
+    },
+    {
+      "id": "other",
+      "label": "其他/未归类议题",
+      "definition": "兜底标签，用于无法归入清单内任何既有议题的高关注度话题，避免为了归类而强行贴错标签",
+      "tension_a_hint": "清单覆盖范围",
+      "tension_b_hint": "议题多样可能",
+      "include": ["话题横跨多个领域、难以判定主议题", "清单中找不到贴合条目的高关注度话题"],
+      "exclude": ["可明确对应清单内任一议题的话题", "仅因表述生疏而暂未识别的话题"]
+    }
+  ],
+
+  "fallback": "other"
+}

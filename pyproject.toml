@@ -1,0 +1,26 @@
+# MyLocalAI 项目元数据与依赖约束
+#
+# 2026-10-22 修复 G6：补 pyproject.toml 声明 requires-python。
+# 依据：项目使用 `str | None` 之外的 3.10+ 语法（`X | None` 在函数签名里、
+# `from __future__ import annotations` 已加），并在 3.13 上实测通过；
+# 3.9 及更早的解释器跑不起来。
+#
+# 注意：这里只做**元数据与约束声明**，不改变安装方式——仓库没有可安装的包结构，
+# 依赖仍按 requirements.txt / requirements-optional.txt 安装。
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mylocalai"
+version = "1.0.0"
+description = "网络言论智能分析与谣言识别（提示词工程 + 大模型 API）"
+readme = "README.md"
+requires-python = ">=3.10,<3.15"
+license = { text = "MIT" }
+
+[project.optional-dependencies]
+agent = ["langchain>=1.0.0,<2.0.0", "langchain-openai>=1.0.0,<2.0.0"]
+web = ["fastapi>=0.110.0,<2.0.0", "uvicorn[standard]>=0.29.0,<1.0.0"]
+mcp = ["mcp>=2.0.0,<3.0.0"]
+local-inference = ["torch>=2.1.0,<3.0.0", "transformers>=4.40.0,<5.0.0", "modelscope>=1.9.0,<2.0.0"]

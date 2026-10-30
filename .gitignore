@@ -1,0 +1,27 @@
+# 敏感信息与本地环境，严禁上传
+.env
+
+# Python 运行产物
+__pycache__/
+*.pyc
+.venv/
+
+# IDE
+.idea/
+
+# 检验产物（2026-10-22 检验报告发现 10：端到端结果默认写 tests/；
+# 检验器可用 --out / RUMOR_E2E_OUT_DIR 改到临时目录，避免污染仓库）
+tests/rumor_agent_e2e_results*.json
+.tmp/
+
+# 重塑归档区（2026-10-30 决策 #3：遗留资产移 archive/，不入库）
+archive/
+
+# ZCode 工作区配置
+.zcode/
+
+# 日志
+*.log
+
+# Windows 保留名残留文件（git 无法索引，M1-1 删除）
+nul

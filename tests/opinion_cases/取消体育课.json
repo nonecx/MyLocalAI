@@ -1,0 +1,17 @@
+{
+  "triggered": false,
+  "skip_reason": "证据本没有条目",
+  "group_mode": "",
+  "groups": {
+    "支持": [],
+    "反驳": []
+  },
+  "sampled": {
+    "支持": [],
+    "反驳": []
+  },
+  "per_article": [],
+  "per_group": {},
+  "degraded": [],
+  "error": null
+}

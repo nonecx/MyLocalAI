@@ -1,0 +1,289 @@
+{
+  "triggered": true,
+  "skip_reason": "",
+  "group_mode": "single-sided",
+  "groups": {
+    "支持": [],
+    "反驳": [
+      "https://zhidao.baidu.com/question/1710764035611085500.html",
+      "https://www.thecover.cn/news/7228280"
+    ]
+  },
+  "sampled": {
+    "支持": [],
+    "反驳": [
+      "https://zhidao.baidu.com/question/1710764035611085500.html",
+      "https://www.thecover.cn/news/7228280"
+    ]
+  },
+  "per_article": [
+    {
+      "url": "https://zhidao.baidu.com/question/1710764035611085500.html",
+      "title": "我住在单元楼,怀疑有人往自来水里投毒,如果有人投毒,自来水会单独被投毒吗?_百度知道",
+      "stance": "反驳",
+      "domain_tier": "自媒体/UGC",
+      "source_kind": "非官方（百度）",
+      "arguments": [
+        {
+          "argument": "自来水不会单独被投毒",
+          "basis": "常识判断",
+          "source": "",
+          "channel": "网络传言",
+          "verifiable": "无法核实"
+        },
+        {
+          "argument": "怀疑投毒可能是心理紧张或胡思乱想所致，建议调整心情或咨询心理医生",
+          "basis": "一般性建议",
+          "source": "",
+          "channel": "网络传言",
+          "verifiable": "无法核实"
+        }
+      ],
+      "read_from": "摘要"
+    },
+    {
+      "url": "https://www.thecover.cn/news/7228280",
+      "title": "云辟谣|有人向小区水池里投毒?警方回应:投毒系谣言 - 封面新闻",
+      "stance": "反驳",
+      "domain_tier": "未知来源",
+      "source_kind": "其他",
+      "arguments": [
+        {
+          "argument": "警方初步调查确认小区水池投毒系谣言",
+          "basis": "官方通报",
+          "source": "警方",
+          "channel": "官方通报",
+          "verifiable": "可核实"
+        },
+        {
+          "argument": "水池出现异常是因物业为清理青苔水草投放硫酸铜",
+          "basis": "官方通报",
+          "source": "小区物业",
+          "channel": "官方通报",
+          "verifiable": "可核实"
+        },
+        {
+          "argument": "水池里的鱼都死了",
+          "basis": "传言",
+          "source": "",
+          "channel": "网络传言",
+          "verifiable": "无法核实"
+        }
+      ],
+      "read_from": "摘要"
+    }
+  ],
+  "per_group": {
+    "支持": {
+      "overlap": {
+        "items": [],
+        "method": "rule",
+        "error": null
+      },
+      "contradictions": {
+        "contradictions": [],
+        "error": null
+      },
+      "credibility": []
+    },
+    "反驳": {
+      "overlap": {
+        "items": [
+          {
+            "argument": "自来水不会单独被投毒",
+            "article_count": 1,
+            "article_ratio": 0.5,
+            "articles": [
+              0
+            ],
+            "sources": [],
+            "channels": [
+              "网络传言"
+            ],
+            "members": [
+              {
+                "argument": "自来水不会单独被投毒",
+                "basis": "常识判断",
+                "source": "",
+                "channel": "网络传言",
+                "verifiable": "无法核实"
+              }
+            ]
+          },
+          {
+            "argument": "怀疑投毒可能是心理紧张或胡思乱想所致，建议调整心情或咨询心理医生",
+            "article_count": 1,
+            "article_ratio": 0.5,
+            "articles": [
+              0
+            ],
+            "sources": [],
+            "channels": [
+              "网络传言"
+            ],
+            "members": [
+              {
+                "argument": "怀疑投毒可能是心理紧张或胡思乱想所致，建议调整心情或咨询心理医生",
+                "basis": "一般性建议",
+                "source": "",
+                "channel": "网络传言",
+                "verifiable": "无法核实"
+              }
+            ]
+          },
+          {
+            "argument": "警方初步调查确认小区水池投毒系谣言",
+            "article_count": 1,
+            "article_ratio": 0.5,
+            "articles": [
+              1
+            ],
+            "sources": [
+              "警方"
+            ],
+            "channels": [
+              "官方通报"
+            ],
+            "members": [
+              {
+                "argument": "警方初步调查确认小区水池投毒系谣言",
+                "basis": "官方通报",
+                "source": "警方",
+                "channel": "官方通报",
+                "verifiable": "可核实"
+              }
+            ]
+          },
+          {
+            "argument": "水池出现异常是因物业为清理青苔水草投放硫酸铜",
+            "article_count": 1,
+            "article_ratio": 0.5,
+            "articles": [
+              1
+            ],
+            "sources": [
+              "小区物业"
+            ],
+            "channels": [
+              "官方通报"
+            ],
+            "members": [
+              {
+                "argument": "水池出现异常是因物业为清理青苔水草投放硫酸铜",
+                "basis": "官方通报",
+                "source": "小区物业",
+                "channel": "官方通报",
+                "verifiable": "可核实"
+              }
+            ]
+          },
+          {
+            "argument": "水池里的鱼都死了",
+            "article_count": 1,
+            "article_ratio": 0.5,
+            "articles": [
+              1
+            ],
+            "sources": [],
+            "channels": [
+              "网络传言"
+            ],
+            "members": [
+              {
+                "argument": "水池里的鱼都死了",
+                "basis": "传言",
+                "source": "",
+                "channel": "网络传言",
+                "verifiable": "无法核实"
+              }
+            ]
+          }
+        ],
+        "method": "llm",
+        "error": null
+      },
+      "contradictions": {
+        "contradictions": [],
+        "error": null
+      },
+      "credibility": [
+        {
+          "argument": "警方初步调查确认小区水池投毒系谣言",
+          "level": "中",
+          "score": 0.5,
+          "channel": "未知来源",
+          "source_kind": "其他",
+          "reasons": [
+            "渠道 未知来源 记 0.5/3.0",
+            "论据提到的来源：警方",
+            "标注为可核实",
+            "被 1 篇抽样文章提及"
+          ]
+        },
+        {
+          "argument": "水池出现异常是因物业为清理青苔水草投放硫酸铜",
+          "level": "中",
+          "score": 0.5,
+          "channel": "未知来源",
+          "source_kind": "其他",
+          "reasons": [
+            "渠道 未知来源 记 0.5/3.0",
+            "论据提到的来源：小区物业",
+            "标注为可核实",
+            "被 1 篇抽样文章提及"
+          ]
+        },
+        {
+          "argument": "自来水不会单独被投毒",
+          "level": "低",
+          "score": 0.2,
+          "channel": "自媒体/UGC",
+          "source_kind": "非官方（百度）",
+          "reasons": [
+            "渠道 自媒体/UGC 记 1.0/3.0",
+            "论据未提具体来源",
+            "标注为无法核实",
+            "被 1 篇抽样文章提及"
+          ]
+        },
+        {
+          "argument": "怀疑投毒可能是心理紧张或胡思乱想所致，建议调整心情或咨询心理医生",
+          "level": "低",
+          "score": 0.2,
+          "channel": "自媒体/UGC",
+          "source_kind": "非官方（百度）",
+          "reasons": [
+            "渠道 自媒体/UGC 记 1.0/3.0",
+            "论据未提具体来源",
+            "标注为无法核实",
+            "被 1 篇抽样文章提及"
+          ]
+        },
+        {
+          "argument": "水池里的鱼都死了",
+          "level": "低",
+          "score": 0.1,
+          "channel": "未知来源",
+          "source_kind": "其他",
+          "reasons": [
+            "渠道 未知来源 记 0.5/3.0",
+            "论据未提具体来源",
+            "标注为无法核实",
+            "被 1 篇抽样文章提及"
+          ]
+        }
+      ]
+    }
+  },
+  "degraded": [
+    {
+      "url": "https://zhidao.baidu.com/question/1710764035611085500.html",
+      "reason": "抓取失败，改用摘要兜底"
+    },
+    {
+      "url": "https://www.thecover.cn/news/7228280",
+      "reason": "抓取失败，改用摘要兜底"
+    }
+  ],
+  "error": null
+}

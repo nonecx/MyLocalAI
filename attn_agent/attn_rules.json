@@ -1,0 +1,7 @@
+{
+  "_comment": "关注度口径外置配置。params/bands/deep_read_threshold 为生效口径，写坏时 attention.load_params 会退回内置默认并留告警。另可用 \"active_profile\" 指定内置参数档位（spec/reachable），显式传入的 --profile 优先于 active_profile，params 段优先于档位。",
+  "params": {"x0":100,"y0":100000,"z0":1000,"w_x":0.2,"w_y":0.5,"w_z":0.3,"lambda":0.7,"epsilon":1e-06},
+  "bands": [{"min":66,"label":"高关注"},{"min":50,"label":"中关注"},{"min":33,"label":"低关注"},{"min":0,"label":"冷启动"}],
+  "deep_read_threshold": 66,
+  "active_profile": "spec"
+}

@@ -1,0 +1,27 @@
+{
+  "_comment": "提供方表（2026-10-22 修复 G4）。密钥 / 接口地址 / 模型名按提供方成组绑定：换供应商只改 LLM_PROVIDER，不会出现'换了密钥、请求还发往旧家'的静默错配。supports_thinking_disable 表示该提供方是否接受 extra_body 关闭思维链（不是所有家都认这个参数，只有认的才发）。加一家新的提供方：在这里加一段（或在 LLM_PROVIDERS_EXTRA_PATH 指向的增量文件里加），再到 .env 里配它自己的三项密钥/地址/模型即可，不必改 Python。可用 LLM_PROVIDERS_PATH 整套替换。",
+  "longcat": {
+    "key_env": "LONGCAT_API_KEY",
+    "base_url_env": "LONGCAT_BASE_URL",
+    "model_env": "LONGCAT_MODEL",
+    "base_url": "https://api.longcat.chat/openai/v1",
+    "model": "LongCat-2.5-Preview",
+    "supports_thinking_disable": true
+  },
+  "deepseek": {
+    "key_env": "DEEPSEEK_API_KEY",
+    "base_url_env": "DEEPSEEK_BASE_URL",
+    "model_env": "DEEPSEEK_MODEL",
+    "base_url": "https://api.deepseek.com/v1",
+    "model": "deepseek-chat",
+    "supports_thinking_disable": false
+  },
+  "openai": {
+    "key_env": "OPENAI_API_KEY",
+    "base_url_env": "OPENAI_BASE_URL",
+    "model_env": "OPENAI_MODEL",
+    "base_url": "https://api.openai.com/v1",
+    "model": "gpt-4o-mini",
+    "supports_thinking_disable": false
+  }
+}

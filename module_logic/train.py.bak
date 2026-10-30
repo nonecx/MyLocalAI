@@ -1,0 +1,353 @@
+# 目标文件: MyLocalAI/module_logic/train.py
+# -*- coding: utf-8 -*-
+"""
+逻辑模块的独立训练脚本。
+
+数据加载来自 data_utils（input.txt / output.txt 8:2 划分，seed=42）。
+训练采用生成式文本相似度评估：
+  - 由于输出是 300-400 字文本，不能字符串精确匹配。
+  - calculate_accuracy 使用 difflib.SequenceMatcher 计算文本相似度，
+    相似度 >= 0.5 视为“正确”，返回正确比例作为 accuracy。
+
+训练循环（进度条与容错重启）：
+  - tqdm(total=100) 进度条。
+  - 每完成 10% 训练，在验证集上调用 calculate_accuracy。
+  - accuracy >= 0.5 -> 进度条推进，继续。
+  - accuracy <  0.5 -> restart_count<=5 时保存 restart_checkpoint、reset 进度条、
+    restart_count+=1、gc.collect()+empty_cache、break 回外层 while True 重启；
+    否则打印“达到最大重启限制，跳过本次测试”、restart_count=0、不重置进度条继续推进。
+  - 进度条达到 100% 后保存最终模型到 MODEL_DIR。
+
+用法：
+    python module_logic/train.py
+"""
+
+from __future__ import annotations
+
+import gc
+import os
+import random
+from difflib import SequenceMatcher
+
+import torch
+from datasets import Dataset
+from peft import LoraConfig, PeftModel, get_peft_model
+from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from data_utils import build_datasets
+
+# ---------------------------------------------------------------------------
+# 变量初始化（禁止绝对路径，全部基于当前文件目录拼接）
+# ---------------------------------------------------------------------------
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_DIR = os.path.join(CURRENT_DIR, "model")
+
+# 基座模型与 LoRA 超参数（全局工程约束）
+BASE_MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
+LORA_R = 8
+LORA_ALPHA = 32
+LORA_TARGET_MODULES = "all-linear"
+
+# 训练超参数
+BATCH_SIZE = 2          # 每批样本数（300-400 字长文，批次不宜过大）
+MAX_STEPS = 200         # 内层总步数（对应 100 个进度单位，每单位 2 步）
+LEARNING_RATE = 2e-4
+MAX_PROMPT_LEN = 512     # 输入 Prompt 最大长度
+MAX_NEW_TOKENS = 256     # 生成文本最大长度
+
+# 重启计数
+restart_count = 0
+
+
+def log(msg: str) -> None:
+    """统一格式打印日志。"""
+    print(f"[logic.train] {msg}", flush=True)
+
+
+def build_model_and_tokenizer():
+    """
+    检查 MODEL_DIR 是否存在 LoRA 权重，有则续训，无则新建。
+
+    返回 (model, tokenizer, resumed)。
+    """
+    adapter_config_path = os.path.join(MODEL_DIR, "adapter_config.json")
+    resumed = os.path.exists(adapter_config_path)
+
+    log(f"加载基座模型: {BASE_MODEL_NAME}")
+    base_model = AutoModelForCausalLM.from_pretrained(
+        BASE_MODEL_NAME,
+        torch_dtype=torch.float32,
+        trust_remote_code=True,
+    )
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_NAME, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    if resumed:
+        log(f"检测到已有 LoRA 权重，从 {MODEL_DIR} 恢复训练。")
+        model = PeftModel.from_pretrained(base_model, MODEL_DIR, is_trainable=True)
+    else:
+        log("未检测到已有权重，初始化新的 LoRA 模型。")
+        lora_config = LoraConfig(
+            r=LORA_R,
+            lora_alpha=LORA_ALPHA,
+            target_modules=LORA_TARGET_MODULES,
+            lora_dropout=0.1,
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+        model = get_peft_model(base_model, lora_config)
+        model.print_trainable_parameters()
+
+    model.train()
+    return model, tokenizer, resumed
+
+
+def calculate_accuracy(preds: list, targets: list) -> float:
+    """
+    基于文本相似度的准确率评估。
+
+    思路：
+      - 从 target 中切分并提取关键词（去除常用停用词后的词项）。
+      - 对每条 (pred, target) 用 difflib.SequenceMatcher 计算相似度；
+        相似度 >= 0.5 视为该样本“正确”。
+      - 返回“正确”样本占比作为 accuracy。
+
+    参数:
+        preds:   模型生成的文本列表。
+        targets: 标准答案文本列表。
+
+    返回:
+        [0, 1] 区间内的准确率。
+    """
+    if not preds or not targets or len(preds) != len(targets):
+        log(f"calculate_accuracy 输入无效: preds={len(preds)}, targets={len(targets)}")
+        return 0.0
+
+    # 常用中文停用词（用于从 target 中提取核心关键词）
+    stopwords = {
+        "的", "了", "是", "在", "和", "与", "或", "及", "被", "把",
+        "为", "以", "于", "对", "从", "到", "并", "而", "但", "之",
+        "着", "就", "都", "很", "也", "这个", "那个", "一个", "进行",
+        "属于", "以人废言", "论证错误", "典型", "发言者",
+    }
+
+    correct = 0
+    total = len(targets)
+
+    for pred, target in zip(preds, targets):
+        # 相似度计算（SequenceMatcher 处理中文字符序列）
+        similarity = SequenceMatcher(None, pred, target).ratio()
+        if similarity >= 0.5:
+            correct += 1
+
+    accuracy = correct / total if total else 0.0
+    log(f"计算准确率: 正确 {correct}/{total} = {accuracy:.4f}")
+    return accuracy
+
+
+def collate_fn(batch, tokenizer):
+    """
+    将一批 {"prompt","target_text"} 样本转成模型输入张量。
+    """
+    prompts = [item["prompt"] for item in batch]
+    encoded = tokenizer(
+        prompts,
+        padding=True,
+        truncation=True,
+        max_length=MAX_PROMPT_LEN,
+        return_tensors="pt",
+    )
+    labels = encoded["input_ids"].clone()
+    labels[encoded["attention_mask"] == 0] = -100
+    return {
+        "input_ids": encoded["input_ids"],
+        "attention_mask": encoded["attention_mask"],
+        "labels": labels,
+        "prompts": prompts,
+    }
+
+
+def evaluate_generation(model, tokenizer, eval_data, device) -> float:
+    """
+    在验证集上生成文本并计算准确率。
+
+    参数:
+        eval_data: 验证集（每项含 prompt / target_text）。
+
+    返回:
+        calculate_accuracy 的准确率。
+    """
+    model.eval()
+    preds = []
+    targets = []
+    try:
+        with torch.no_grad():
+            for item in eval_data:
+                prompt = item["prompt"]
+                target = item["target_text"]
+                inputs = tokenizer(
+                    prompt,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=MAX_PROMPT_LEN,
+                ).to(device)
+                outputs = model.generate(
+                    **inputs,
+                    max_new_tokens=MAX_NEW_TOKENS,
+                    do_sample=False,
+                )
+                generated = tokenizer.decode(
+                    outputs[0][inputs["input_ids"].shape[1]:],
+                    skip_special_tokens=True,
+                )
+                preds.append(generated)
+                targets.append(target)
+    except Exception as exc:  # noqa: BLE001
+        log(f"生成评估发生异常: {exc}，本次准确率按 0.0 处理。")
+        model.train()
+        return 0.0
+
+    model.train()
+    return calculate_accuracy(preds, targets)
+
+
+def run_training():
+    """核心训练主流程：加载模型 -> 加载数据 -> 重启式训练循环。"""
+    global restart_count
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    log(f"使用设备: {device}")
+
+    # ---- 1. 模型检查与加载 ----
+    model, tokenizer, _resumed = build_model_and_tokenizer()
+    model = model.to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
+
+    # ---- 2. 数据加载与 8:2 划分（seed=42，来自 data_utils） ----
+    train_data, test_data = build_datasets()
+    train_records = [dict(r) for r in train_data]
+    eval_records = [dict(r) for r in test_data]
+    log(f"训练集 {len(train_records)} 条 / 验证集 {len(eval_records)} 条")
+
+    # ---- 3. 训练循环（外层 while True 实现重启机制） ----
+    while True:
+        restart_pending = False
+
+        # 每次重启重新打乱并分批
+        random.seed(42)
+        shuffled = train_records[:]
+        random.shuffle(shuffled)
+        batches = [
+            shuffled[i:i + BATCH_SIZE]
+            for i in range(0, len(shuffled), BATCH_SIZE)
+        ]
+        if not batches:
+            raise RuntimeError("训练集为空，无法训练。")
+
+        steps_per_unit = max(1, MAX_STEPS // 100)
+        progress_bar = tqdm(total=100, desc="Logic Training Progress", unit="unit")
+
+        global_step = 0
+        last_eval_step = 0  # 记录上次评估时的进度单位（实现每 10% 评估）
+
+        try:
+            # 内层训练循环：推进进度条直到达到 100
+            while progress_bar.n < 100:
+                # 每训练 10% 步数（推进 10 个进度单位）后执行一次验证
+                if progress_bar.n >= last_eval_step + 10:
+                    last_eval_step = progress_bar.n
+                    acc = evaluate_generation(model, tokenizer, eval_records, device)
+                    log(f"验证集准确率: {acc:.4f}")
+
+                    if acc < 0.5:
+                        if restart_count <= 5:
+                            # ---- 保存断点 + 醒目警告 ----
+                            ckpt_dir = os.path.join(MODEL_DIR, "restart_checkpoint")
+                            os.makedirs(MODEL_DIR, exist_ok=True)
+                            model.save_pretrained(ckpt_dir)
+                            tokenizer.save_pretrained(ckpt_dir)
+                            log("=" * 60)
+                            log("!!! 警告：验证准确率低于 0.5，保存断点并重置进度条，准备重启训练 !!!")
+                            log("=" * 60)
+
+                            restart_pending = True   # 标记本次需要重启
+                            progress_bar.reset()     # 归零
+                            last_eval_step = 0
+                            restart_count += 1
+
+                            # 显存 / 内存回收
+                            gc.collect()
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+
+                            break  # 跳出内层循环，回到外层 while True 重新开始
+                        else:
+                            # ---- 达到最大重启限制，跳过本次测试 ----
+                            log("达到最大重启限制，跳过本次测试，计数器归零。")
+                            restart_count = 0
+                            # 不重置进度条，不保存模型，继续让进度条推进
+
+                # ---- 单步训练（遍历一个 batch） ----
+                for batch in batches:
+                    if progress_bar.n >= 100:
+                        break
+
+                    inputs = collate_fn(batch, tokenizer)
+                    inputs = {k: v.to(device) for k, v in inputs.items() if isinstance(v, torch.Tensor)}
+
+                    outputs = model(**inputs)
+                    loss = outputs.loss
+                    loss.backward()
+
+                    global_step += 1
+                    optimizer.step()
+                    optimizer.zero_grad()
+
+                    if global_step % steps_per_unit == 0:
+                        progress_bar.update(1)
+                        progress_bar.set_postfix({"loss": f"{loss.item():.4f}"})
+
+                    if progress_bar.n >= 100:
+                        break
+
+            # 若本次触发了重启，则不保存最终模型，直接回到外层 while True
+            if restart_pending:
+                log("本轮训练因验证准确率过低而重启，重新开始新的训练轮次。")
+                continue  # 回到外层 while True，重新初始化进度条
+
+            # ---- 4. 进度条达到 100%，保存最终模型 ----
+            log(f"训练完成，进度达到 100%，保存最终模型到 {MODEL_DIR}")
+            os.makedirs(MODEL_DIR, exist_ok=True)
+            model.save_pretrained(MODEL_DIR)
+            tokenizer.save_pretrained(MODEL_DIR)
+            log("模型保存成功。")
+            return
+
+        except KeyboardInterrupt:
+            log("训练被用户中断。")
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log(f"训练过程发生异常: {exc}")
+            try:
+                ckpt_dir = os.path.join(MODEL_DIR, "restart_checkpoint")
+                os.makedirs(MODEL_DIR, exist_ok=True)
+                model.save_pretrained(ckpt_dir)
+                log(f"异常时已保存断点到 {ckpt_dir}")
+            except Exception as save_exc:  # noqa: BLE001
+                log(f"断点保存失败: {save_exc}")
+            raise
+
+
+def main() -> None:
+    """脚本入口，集中捕获顶层异常。"""
+    try:
+        run_training()
+    except Exception as exc:  # noqa: BLE001
+        log(f"训练脚本运行失败: {exc}")
+        raise
+
+
+if __name__ == "__main__":
+    main()

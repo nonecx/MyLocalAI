@@ -1,0 +1,35 @@
+# ============================================================
+# 本地人工智能分析系统依赖清单
+# 主方案：纯提示词工程 + 大模型 API 调用（无需 GPU，CPU 即可运行）
+# 安装：pip install -r requirements.txt
+# 建议在虚拟环境（venv）中安装，避免污染系统 Python。
+# ============================================================
+# 版本都带上限：主链路（openai / langchain / fastapi / uvicorn）跨大版本会改接口，
+# 没有上限时新 venv 可能直接装到不兼容的版本（2026-10-22 修复 G6）。
+# 每条上限都写明了依据；升级前请先跑离线测试套件。
+
+# --- API 主链路（必需） ---
+openai>=1.30.0,<4.0.0
+python-dotenv>=1.0.0,<2.0.0
+
+# --- 谣言识别 Agent（rumor_agent/，基于 LangChain） ---
+# langchain 2.x 会改 agent/工具接口（本项目用 create_agent + @tool 的 1.x 形态）
+langchain>=1.0.0,<2.0.0
+langchain-openai>=1.0.0,<2.0.0
+
+# --- 联网证据检索（search.py 抓取网页 / browser.py 受控浏览 / evidence.py 证据本） ---
+requests>=2.28.0,<3.0.0
+
+# --- MCP 封装（rumor_agent/mcp_server.py，可选：供支持 MCP 的客户端接入） ---
+mcp>=2.0.0,<3.0.0
+
+# --- 展示网站（my_website/，可选） ---
+fastapi>=0.110.0,<2.0.0
+uvicorn[standard]>=0.29.0,<1.0.0
+
+# ============================================================
+# 可选依赖不写在本文件里：本地备选推理（torch/transformers/modelscope，数 GB）
+# 与主链路无关，装了只会拖慢安装。需要时单独装：
+#     pip install -r requirements-optional.txt
+# 旧本地训练方案（已弃用）同样见 requirements-optional.txt（全部注释）。
+# ============================================================

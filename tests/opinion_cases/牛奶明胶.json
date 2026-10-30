@@ -1,0 +1,323 @@
+{
+  "triggered": true,
+  "skip_reason": "",
+  "group_mode": "two-sided",
+  "groups": {
+    "支持": [
+      "https://www.toutiao.com/article/7611376294916030991/",
+      "https://www.toutiao.com/article/7686400141179240960/"
+    ],
+    "反驳": [
+      "http://news.sina.com.cn/c/2012-04-12/215824263383.shtml"
+    ]
+  },
+  "sampled": {
+    "支持": [
+      "https://www.toutiao.com/article/7611376294916030991/",
+      "https://www.toutiao.com/article/7686400141179240960/"
+    ],
+    "反驳": [
+      "http://news.sina.com.cn/c/2012-04-12/215824263383.shtml"
+    ]
+  },
+  "per_article": [
+    {
+      "url": "https://www.toutiao.com/article/7611376294916030991/",
+      "title": "医生提醒:别买!别吃!里面含有工业明胶,危害健康,别害了自己 - 今日头条",
+      "stance": "支持",
+      "domain_tier": "自媒体/UGC",
+      "source_kind": "非官方",
+      "arguments": [
+        {
+          "argument": "医生提醒:别买",
+          "basis": "",
+          "source": "",
+          "channel": "未知",
+          "verifiable": "无法核实"
+        }
+      ],
+      "read_from": "摘要"
+    },
+    {
+      "url": "https://www.toutiao.com/article/7686400141179240960/",
+      "title": "医生提醒:别买!别吃!里面含有工业明胶,危害健康, - 今日头条",
+      "stance": "支持",
+      "domain_tier": "自媒体/UGC",
+      "source_kind": "非官方",
+      "arguments": [
+        {
+          "argument": "医生提醒:别买",
+          "basis": "",
+          "source": "",
+          "channel": "未知",
+          "verifiable": "无法核实"
+        }
+      ],
+      "read_from": "摘要"
+    },
+    {
+      "url": "http://news.sina.com.cn/c/2012-04-12/215824263383.shtml",
+      "title": "调查:奶制品都有明胶 专家:工业明胶可致癌_新闻中心_新浪网",
+      "stance": "反驳",
+      "domain_tier": "一般门户媒体",
+      "source_kind": "非官方（新浪网）",
+      "arguments": [
+        {
+          "argument": "多家超市调查中发现不少品牌酸奶配料表中含有明胶成分",
+          "basis": "记者实地调查",
+          "source": "山东广播电视台电视生活频道《生活帮》",
+          "channel": "媒体报道",
+          "verifiable": "可核实"
+        },
+        {
+          "argument": "明胶主要原料是动物皮毛和骨骼熬制而成，分食用和工业两种",
+          "basis": "专家说法",
+          "source": "济南食品协会刘庆年秘书长",
+          "channel": "媒体报道",
+          "verifiable": "可核实"
+        },
+        {
+          "argument": "食用明胶是国家准许的食品添加剂，对人体无害",
+          "basis": "专家说法",
+          "source": "济南食品协会刘庆年秘书长",
+          "channel": "媒体报道",
+          "verifiable": "可核实"
+        },
+        {
+          "argument": "工业明胶重金属含量超标，长期食用会造成骨质疏松，严重会引起肿瘤",
+          "basis": "专家说法",
+          "source": "山东省千佛山医院杜慧真主任",
+          "channel": "媒体报道",
+          "verifiable": "可核实"
+        },
+        {
+          "argument": "工业明胶中的重金属对人体的伤害经过积累后会在两年后爆发",
+          "basis": "专家说法",
+          "source": "山东省千佛山医院杜慧真主任",
+          "channel": "媒体报道",
+          "verifiable": "可核实"
+        },
+        {
+          "argument": "皮革奶事件引起超市奶制品专柜冷清，购买酸奶的人大幅减少",
+          "basis": "记者实地观察",
+          "source": "",
+          "channel": "媒体报道",
+          "verifiable": "可核实"
+        }
+      ],
+      "read_from": "全文"
+    }
+  ],
+  "per_group": {
+    "支持": {
+      "overlap": {
+        "items": [
+          {
+            "argument": "医生提醒:别买",
+            "article_count": 2,
+            "article_ratio": 1.0,
+            "articles": [
+              0,
+              1
+            ],
+            "sources": [],
+            "channels": [
+              "未知"
+            ],
+            "members": [
+              {
+                "argument": "医生提醒:别买",
+                "basis": "",
+                "source": "",
+                "channel": "未知",
+                "verifiable": "无法核实"
+              },
+              {
+                "argument": "医生提醒:别买",
+                "basis": "",
+                "source": "",
+                "channel": "未知",
+                "verifiable": "无法核实"
+              }
+            ]
+          }
+        ],
+        "method": "llm",
+        "error": null
+      },
+      "contradictions": {
+        "contradictions": [],
+        "error": null
+      },
+      "credibility": [
+        {
+          "argument": "医生提醒:别买",
+          "level": "低",
+          "score": 0.2,
+          "channel": "自媒体/UGC",
+          "source_kind": "非官方",
+          "reasons": [
+            "渠道 自媒体/UGC 记 1.0/3.0",
+            "论据未提具体来源",
+            "标注为无法核实",
+            "被 2 篇抽样文章提及"
+          ]
+        }
+      ]
+    },
+    "反驳": {
+      "overlap": {
+        "items": [
+          {
+            "argument": "多家超市调查中发现不少品牌酸奶配料表中含有明胶成分",
+            "article_count": 1,
+            "article_ratio": 1.0,
+            "articles": [
+              0
+            ],
+            "sources": [
+              "山东广播电视台电视生活频道《生活帮》",
+              "济南食品协会刘庆年秘书长",
+              "山东省千佛山医院杜慧真主任"
+            ],
+            "channels": [
+              "媒体报道"
+            ],
+            "members": [
+              {
+                "argument": "多家超市调查中发现不少品牌酸奶配料表中含有明胶成分",
+                "basis": "记者实地调查",
+                "source": "山东广播电视台电视生活频道《生活帮》",
+                "channel": "媒体报道",
+                "verifiable": "可核实"
+              },
+              {
+                "argument": "明胶主要原料是动物皮毛和骨骼熬制而成，分食用和工业两种",
+                "basis": "专家说法",
+                "source": "济南食品协会刘庆年秘书长",
+                "channel": "媒体报道",
+                "verifiable": "可核实"
+              },
+              {
+                "argument": "工业明胶重金属含量超标，长期食用会造成骨质疏松，严重会引起肿瘤",
+                "basis": "专家说法",
+                "source": "山东省千佛山医院杜慧真主任",
+                "channel": "媒体报道",
+                "verifiable": "可核实"
+              },
+              {
+                "argument": "工业明胶中的重金属对人体的伤害经过积累后会在两年后爆发",
+                "basis": "专家说法",
+                "source": "山东省千佛山医院杜慧真主任",
+                "channel": "媒体报道",
+                "verifiable": "可核实"
+              }
+            ]
+          },
+          {
+            "argument": "食用明胶是国家准许的食品添加剂，对人体无害",
+            "article_count": 1,
+            "article_ratio": 1.0,
+            "articles": [
+              0
+            ],
+            "sources": [
+              "济南食品协会刘庆年秘书长"
+            ],
+            "channels": [
+              "媒体报道"
+            ],
+            "members": [
+              {
+                "argument": "食用明胶是国家准许的食品添加剂，对人体无害",
+                "basis": "专家说法",
+                "source": "济南食品协会刘庆年秘书长",
+                "channel": "媒体报道",
+                "verifiable": "可核实"
+              }
+            ]
+          },
+          {
+            "argument": "皮革奶事件引起超市奶制品专柜冷清，购买酸奶的人大幅减少",
+            "article_count": 1,
+            "article_ratio": 1.0,
+            "articles": [
+              0
+            ],
+            "sources": [],
+            "channels": [
+              "媒体报道"
+            ],
+            "members": [
+              {
+                "argument": "皮革奶事件引起超市奶制品专柜冷清，购买酸奶的人大幅减少",
+                "basis": "记者实地观察",
+                "source": "",
+                "channel": "媒体报道",
+                "verifiable": "可核实"
+              }
+            ]
+          }
+        ],
+        "method": "llm",
+        "error": null
+      },
+      "contradictions": {
+        "contradictions": [],
+        "error": null
+      },
+      "credibility": [
+        {
+          "argument": "多家超市调查中发现不少品牌酸奶配料表中含有明胶成分",
+          "level": "高",
+          "score": 0.7,
+          "channel": "一般门户媒体",
+          "source_kind": "非官方（新浪网）",
+          "reasons": [
+            "渠道 一般门户媒体 记 1.5/3.0",
+            "论据提到的来源：山东广播电视台电视生活频道《生活帮》",
+            "标注为可核实",
+            "被 1 篇抽样文章提及"
+          ]
+        },
+        {
+          "argument": "食用明胶是国家准许的食品添加剂，对人体无害",
+          "level": "高",
+          "score": 0.7,
+          "channel": "一般门户媒体",
+          "source_kind": "非官方（新浪网）",
+          "reasons": [
+            "渠道 一般门户媒体 记 1.5/3.0",
+            "论据提到的来源：济南食品协会刘庆年秘书长",
+            "标注为可核实",
+            "被 1 篇抽样文章提及"
+          ]
+        },
+        {
+          "argument": "皮革奶事件引起超市奶制品专柜冷清，购买酸奶的人大幅减少",
+          "level": "中",
+          "score": 0.45,
+          "channel": "一般门户媒体",
+          "source_kind": "非官方（新浪网）",
+          "reasons": [
+            "渠道 一般门户媒体 记 1.5/3.0",
+            "论据未提具体来源",
+            "标注为可核实",
+            "被 1 篇抽样文章提及"
+          ]
+        }
+      ]
+    }
+  },
+  "degraded": [
+    {
+      "url": "https://www.toutiao.com/article/7611376294916030991/",
+      "reason": "抓取失败，改用摘要兜底"
+    },
+    {
+      "url": "https://www.toutiao.com/article/7686400141179240960/",
+      "reason": "抓取失败，改用摘要兜底"
+    }
+  ],
+  "error": null
+}
