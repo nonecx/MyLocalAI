@@ -25,3 +25,6 @@ archive/
 
 # Windows 保留名残留文件（git 无法索引，M1-1 删除）
 nul
+
+# 档案库数据文件（M1-3）
+data/
