@@ -130,7 +130,7 @@ classic 的分析记录里带 `degraded_components`（哪些组件没给出可�
 
 ## 技术说明
 
-- 后端 FastAPI 只做"薄封装"：分析逻辑全部复用根目录 `core_judge.py`，
+- 后端 FastAPI 只做"薄封装"：分析逻辑全部复用根目录 `src/mylocalai/classic/judge.py`，
   网站侧不重复实现任何分析规则（高内聚、低耦合）。
 - 前端原生 HTML/CSS/JS，无需 Node/npm，双击无法运行（有跨域与接口依赖），
   请通过上面的 uvicorn 命令访问。

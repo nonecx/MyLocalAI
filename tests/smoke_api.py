@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""大模型 API 连通性冒烟测试（配置统一读自 shared_core.llm_client / .env）。
+"""大模型 API 连通性冒烟测试（配置统一读自 mylocalai.llm.llm_client / .env）。
 
 先做配置自检（密钥与服务商是否匹配），再真正发一次请求。
 """
@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from shared_core.llm_client import create_client, get_model, validate_config
+from mylocalai.llm.llm_client import create_client, get_model, validate_config
 
 ok, detail = validate_config()
 print(f"配置自检: {detail}")

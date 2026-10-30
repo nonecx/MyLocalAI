@@ -34,10 +34,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from attn_agent import attention as A  # noqa: E402
-from attn_agent import deep_read as D  # noqa: E402
-from attn_agent import deep_read_guard as G  # noqa: E402
-from shared_core import llm_client  # noqa: E402
+from mylocalai.attention import attention as A# noqa: E402
+from mylocalai.attention import deep_read as D# noqa: E402
+from mylocalai.attention import deep_read_guard as G# noqa: E402
+from mylocalai.llm import llm_client
 
 
 def detail_of(x, y, z, params=None):
@@ -446,7 +446,7 @@ class TestApplicableExit(unittest.TestCase):
         self.assertTrue(r["reason"])
 
     def test_deep_read_returns_not_applicable(self):
-        with mock.patch("shared_core.llm_client.chat_text",
+        with mock.patch("mylocalai.llm.llm_client.chat_text",
                         return_value=(json.dumps({"applicable": False,
                                                   "reason": "纯情绪宣泄"},
                                                  ensure_ascii=False), "")):
@@ -459,7 +459,7 @@ class TestApplicableExit(unittest.TestCase):
 
     def test_free_text_output_is_not_trusted(self):
         """模型返回自由文本（非 JSON）→ 判不合格 → 走模板回退。"""
-        with mock.patch("shared_core.llm_client.chat_text",
+        with mock.patch("mylocalai.llm.llm_client.chat_text",
                         return_value=("这反映了社会信任危机。", "")):
             r = D.deep_read("某话题", detail_of(1000, 1e8, 1e6), use_llm=True,
                             evidence=EVIDENCE)
@@ -519,7 +519,7 @@ class TestEndToEnd(unittest.TestCase):
     """给定固定 raw_output，sanitize 后字段与预期一致。"""
 
     def test_good_output_end_to_end(self):
-        with mock.patch("shared_core.llm_client.chat_text",
+        with mock.patch("mylocalai.llm.llm_client.chat_text",
                         return_value=(json.dumps(GOOD_OUTPUT, ensure_ascii=False), "")):
             r = D.deep_read("某地通报事件", detail_of(1000, 1e8, 1e6),
                             use_llm=True, evidence=EVIDENCE)
@@ -541,7 +541,7 @@ class TestEndToEnd(unittest.TestCase):
             seen["system"], seen["user"] = system, user
             return json.dumps(GOOD_OUTPUT, ensure_ascii=False), ""
 
-        with mock.patch("shared_core.llm_client.chat_text", side_effect=cap):
+        with mock.patch("mylocalai.llm.llm_client.chat_text", side_effect=cap):
             D.deep_read("某话题", detail_of(1000, 1e8, 1e6), use_llm=True, evidence=EVIDENCE)
         # 编号证据与议题清单必须进 prompt（受控生成的地基）
         self.assertIn("e1:", seen["user"])
@@ -556,7 +556,7 @@ class TestEndToEnd(unittest.TestCase):
             seen["user"] = user
             return json.dumps(GOOD_OUTPUT, ensure_ascii=False), ""
 
-        with mock.patch("shared_core.llm_client.chat_text", side_effect=cap):
+        with mock.patch("mylocalai.llm.llm_client.chat_text", side_effect=cap):
             D.deep_read("t", {**detail_of(1000, 1e8, 1e6), "estimated": True},
                         use_llm=True, evidence=EVIDENCE)
         for key in ("engagement_ratio", "spread", "resonance", "share_x",
@@ -571,7 +571,7 @@ class TestEndToEnd(unittest.TestCase):
             seen["user"] = user
             return json.dumps(GOOD_OUTPUT, ensure_ascii=False), ""
 
-        with mock.patch("shared_core.llm_client.chat_text", side_effect=cap):
+        with mock.patch("mylocalai.llm.llm_client.chat_text", side_effect=cap):
             D.deep_read("t", detail_of(1000, 1e8, 1e6), use_llm=True, evidence=EVIDENCE,
                         opinions_signals={"appeals": ["要求公开完整时间线"],
                                           "attribution_targets": ["信息发布方"],
@@ -586,7 +586,7 @@ class TestEndToEnd(unittest.TestCase):
             seen["user"] = user
             return json.dumps(GOOD_OUTPUT, ensure_ascii=False), ""
 
-        with mock.patch("shared_core.llm_client.chat_text", side_effect=cap):
+        with mock.patch("mylocalai.llm.llm_client.chat_text", side_effect=cap):
             D.deep_read("t", detail_of(1000, 1e8, 1e6), use_llm=True, evidence=None)
         self.assertIn("未提供编号证据", seen["user"])
 
@@ -601,7 +601,7 @@ class TestPhysicalIsolation(unittest.TestCase):
     def test_deep_read_does_not_import_verdict(self):
         """源码里不得 import verdict 相关模块（AST 检查，注释/文档串不算）。"""
         import ast
-        tree = ast.parse((ROOT / "attn_agent" / "deep_read.py").read_text(encoding="utf-8"))
+        tree = ast.parse((ROOT / "src" / "mylocalai" / "attention" / "deep_read.py").read_text(encoding="utf-8"))
         imported: List[str] = []
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -611,21 +611,21 @@ class TestPhysicalIsolation(unittest.TestCase):
         for name in imported:
             self.assertNotIn("verdict", name,
                              f"deep_read.py 不得 import verdict 相关模块，实际 import 了 {name}")
-            self.assertFalse(name.startswith("rumor_agent."),
+            self.assertFalse(name.startswith("mylocalai.rumor."),
                              f"deep_read.py 不得 import rumor_agent 的任何模块，实际 import 了 {name}")
 
     def test_deep_read_runs_with_verdict_mocked_away(self):
         """mock 掉 verdict 模块后 deep_read 仍能跑（证明不依赖它）。"""
         import sys as _sys
-        saved = _sys.modules.pop("rumor_agent.verdict", None)
+        saved = _sys.modules.pop("mylocalai.rumor.verdict", None)
         try:
-            with mock.patch("shared_core.llm_client.chat_text",
+            with mock.patch("mylocalai.llm.llm_client.chat_text",
                             return_value=("", "无密钥")):
                 r = D.deep_read("t", detail_of(1000, 1e8, 1e6), use_llm=True)
             self.assertTrue(r["triggered"])
         finally:
             if saved is not None:
-                _sys.modules["rumor_agent.verdict"] = saved
+                _sys.modules["mylocalai.rumor.verdict"] = saved
 
     def test_deep_read_uses_independent_cache_namespace(self):
         """深读必须用自己的缓存分区，且该分区与主分析的分区算出的键不同。
@@ -634,7 +634,7 @@ class TestPhysicalIsolation(unittest.TestCase):
         同一段 system + user，深读的键必须与主分析（无分区名）的键不同，
         否则两边会互相读到对方的结果。
         """
-        from shared_core import llm_client
+        from mylocalai.llm import llm_client
         prompts, _ = D.load_prompts()
         system = prompts["system"] + "\n\n" + prompts["fewshot"]
         user = "同一段用户文本"
@@ -653,7 +653,7 @@ class TestPhysicalIsolation(unittest.TestCase):
             seen["namespace"] = kw.get("namespace", "")
             return json.dumps(GOOD_OUTPUT, ensure_ascii=False), ""
 
-        with mock.patch("shared_core.llm_client.chat_text", side_effect=fake):
+        with mock.patch("mylocalai.llm.llm_client.chat_text", side_effect=fake):
             D.deep_read("某话题", detail_of(1000, 1e8, 1e6), use_llm=True,
                         evidence=EVIDENCE)
         self.assertEqual(seen.get("namespace"), D.CACHE_NAMESPACE,
@@ -666,7 +666,7 @@ class TestPhysicalIsolation(unittest.TestCase):
         `_chat_raw_providers`，这样缓存链路是真实执行的），再用主分析的口径
         （无分区名）去查**同一段** (system, user) —— 必须查不到。
         """
-        from shared_core import llm_cache
+        from mylocalai.llm import llm_cache
         prompts, _ = D.load_prompts()
         system = prompts["system"] + "\n\n" + prompts["fewshot"]
         calls = {"n": 0}
@@ -679,7 +679,7 @@ class TestPhysicalIsolation(unittest.TestCase):
 
         llm_cache.clear()
         try:
-            with mock.patch("shared_core.llm_client._chat_raw_providers",
+            with mock.patch("mylocalai.llm.llm_client._chat_raw_providers",
                             side_effect=fake_providers):
                 # 第一次：深读，真实走缓存写入
                 D.deep_read("某话题", detail_of(1000, 1e8, 1e6), use_llm=True,
@@ -705,7 +705,8 @@ class TestPhysicalIsolation(unittest.TestCase):
     def test_cache_namespace_empty_keeps_legacy_key(self):
         """分区名为空时缓存键必须与加参数之前一致（不能悄悄换掉全部缓存键）。"""
         import hashlib
-        from shared_core import llm_client, text_safety
+        from mylocalai.llm import llm_client
+        from mylocalai.util import text_safety
         blob = json.dumps([llm_client.get_provider(), llm_client.get_base_url(),
                            llm_client.get_model(), "S", "U", 0.3, 1600, False],
                           ensure_ascii=False)
@@ -716,7 +717,7 @@ class TestPhysicalIsolation(unittest.TestCase):
 
     def test_cache_namespace_changes_key(self):
         """分区名必须真的改变键（否则隔离是空话）。"""
-        from shared_core import llm_client
+        from mylocalai.llm import llm_client
         base = llm_client._cache_key("S", "U", 0.3, 1600, False)
         self.assertNotEqual(base, llm_client._cache_key("S", "U", 0.3, 1600, False, "ns_a"))
         self.assertNotEqual(llm_client._cache_key("S", "U", 0.3, 1600, False, "ns_a"),
@@ -724,7 +725,7 @@ class TestPhysicalIsolation(unittest.TestCase):
 
     def test_cache_namespace_survives_surrogates(self):
         """分区名参与键计算时不能因孤立代理项抛异常（键算不出就静默失去隔离）。"""
-        from shared_core import llm_client
+        from mylocalai.llm import llm_client
         key = llm_client._cache_key("S", "ok\ud800bad", 0.3, 1600, False,
                                     D.CACHE_NAMESPACE)
         self.assertIsInstance(key, str)
@@ -734,7 +735,7 @@ class TestPhysicalIsolation(unittest.TestCase):
         """深读内部炸掉时，主分析结论（score/band）一个字节都不能变。"""
         detail = detail_of(1000, 1e8, 1e6)
         before_score, before_band = detail["score"], detail["band"]
-        with mock.patch("shared_core.llm_client.chat_text",
+        with mock.patch("mylocalai.llm.llm_client.chat_text",
                         side_effect=RuntimeError("上游炸了")):
             r = D.deep_read("t", detail, use_llm=True, evidence=EVIDENCE)
         self.assertEqual(detail["score"], before_score)
@@ -756,7 +757,7 @@ class TestDegradation(unittest.TestCase):
     """LLM 不可用 → degraded=true 且模板字段完整。"""
 
     def test_llm_unavailable_degrades_with_reason(self):
-        with mock.patch("shared_core.llm_client.chat_text",
+        with mock.patch("mylocalai.llm.llm_client.chat_text",
                         return_value=("", "HTTP 401: Authentication Fails")):
             r = D.deep_read("某话题", detail_of(1000, 1e8, 1e6), use_llm=True,
                             evidence=EVIDENCE)
@@ -766,7 +767,7 @@ class TestDegradation(unittest.TestCase):
         self.assertTrue(any("大模型解读不可用" in w for w in r["warnings"]))
 
     def test_llm_exception_degrades(self):
-        with mock.patch("shared_core.llm_client.chat_text",
+        with mock.patch("mylocalai.llm.llm_client.chat_text",
                         side_effect=RuntimeError("网络炸了")):
             r = D.deep_read("t", detail_of(1000, 1e8, 1e6), use_llm=True, evidence=EVIDENCE)
         self.assertEqual(r["source"], "template")
@@ -804,7 +805,7 @@ class TestDegradation(unittest.TestCase):
                                          "evidence_ids": ["e1"]}],
                           "counter_reading": {"text": "迟早爆发", "evidence_ids": ["e1"]}},
                          ensure_ascii=False)
-        with mock.patch("shared_core.llm_client.chat_text", return_value=(bad, "")):
+        with mock.patch("mylocalai.llm.llm_client.chat_text", return_value=(bad, "")):
             r = D.deep_read("t", detail_of(1000, 1e8, 1e6), use_llm=True, evidence=EVIDENCE)
         self.assertEqual(r["source"], "template")
         self.assertIn("护栏", r["degraded_reason"])
@@ -873,7 +874,7 @@ class TestConfigWarnings(unittest.TestCase):
             bad = Path(tmp) / "bad.json"
             bad.write_text("[[[", encoding="utf-8")
             with mock.patch.object(D, "ISSUES_PATH", bad):
-                with mock.patch("shared_core.llm_client.chat_text",
+                with mock.patch("mylocalai.llm.llm_client.chat_text",
                                 return_value=("", "无密钥")):
                     r = D.deep_read("t", detail_of(1000, 1e8, 1e6), use_llm=True)
         self.assertTrue(r["triggered"])
@@ -910,7 +911,7 @@ class TestConfigWarnings(unittest.TestCase):
 
     def test_society_issues_json_structure(self):
         """外置 society_issues.json 必须结构合规（30-50 项、字段齐全）。"""
-        data = json.loads((ROOT / "attn_agent" / "society_issues.json")
+        data = json.loads((ROOT / "src" / "mylocalai" / "attention" / "society_issues.json")
                           .read_text(encoding="utf-8"))
         issues = data["issues"]
         self.assertGreaterEqual(len(issues), 30)

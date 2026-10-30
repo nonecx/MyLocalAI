@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""受控浏览（browser.py）、搜索可配置化（search.py）与 MCP 服务器（mcp_server.py）的离线测试。
+"""受控浏览（browser.py）、搜索可配置化（search.py）与 MCP 服务器（mcp.py）的离线测试。
 
 不访问任何真实网站：抓取/搜索全部用假函数或 monkeypatch 替身。
 
@@ -19,8 +19,8 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from rumor_agent.browser import BrowserSession, extract_links  # noqa: E402
-from rumor_agent.search import GenericAPIProvider, default_providers  # noqa: E402
+from mylocalai.retrieval.browser import BrowserSession, extract_links# noqa: E402
+from mylocalai.retrieval.search import GenericAPIProvider, default_providers# noqa: E402
 
 # ---------------------------------------------------------------------------
 # 假网页池：一个辟谣页（piyao），页内含媒体/门户/UGC/恶意四类链接
@@ -168,7 +168,7 @@ class TestSearchConfig(unittest.TestCase):
             captured.update(url=url, params=params, headers=headers)
             return FakeResp()
 
-        with mock.patch("rumor_agent.search.requests.get", side_effect=fake_get):
+        with mock.patch("mylocalai.retrieval.search.requests.get", side_effect=fake_get):
             p = GenericAPIProvider("https://api.example.com/search", key="k3y", name="test-api")
             results, err = p.search("隔夜茶 辟谣", 5)
         self.assertIsNone(err)
@@ -185,11 +185,11 @@ class TestSearchConfig(unittest.TestCase):
             status_code = 200
             def json(self):
                 raise ValueError("not json")
-        with mock.patch("rumor_agent.search.requests.get", return_value=Resp500()):
+        with mock.patch("mylocalai.retrieval.search.requests.get", return_value=Resp500()):
             results, err = GenericAPIProvider("https://x").search("q", 3)
             self.assertEqual(results, [])
             self.assertIn("500", err)
-        with mock.patch("rumor_agent.search.requests.get", return_value=RespBad()):
+        with mock.patch("mylocalai.retrieval.search.requests.get", return_value=RespBad()):
             results, err = GenericAPIProvider("https://x").search("q", 3)
             self.assertEqual(results, [])
             self.assertIn("JSON", err)
@@ -201,7 +201,7 @@ class TestSearchConfig(unittest.TestCase):
 
 def fake_search_all(query, k=6):
     """假搜索：返回与 piyao 页一致的证据条目（用真实 SearchResult，走 to_dict 路径）。"""
-    from rumor_agent.search import SearchResult
+    from mylocalai.retrieval.search import SearchResult
     return {
         "query": query,
         "results": [
@@ -222,7 +222,7 @@ class TestMCPServer(unittest.TestCase):
     async def _with_session(self, fn):
         from mcp import ClientSession
         from mcp.client._memory import InMemoryTransport
-        from rumor_agent.mcp_server import server
+        from mylocalai.rumor.mcp import server
         async with InMemoryTransport(server)._connect() as streams:
             async with ClientSession(streams[0], streams[1]) as session:
                 await session.initialize()
@@ -241,7 +241,7 @@ class TestMCPServer(unittest.TestCase):
 
     def test_search_web_tool(self):
         async def run(session):
-            with mock.patch("rumor_agent.mcp_server.search_all", side_effect=fake_search_all):
+            with mock.patch("mylocalai.rumor.mcp.search_all", side_effect=fake_search_all):
                 return await session.call_tool("search_web", {"query": "隔夜茶 辟谣", "k": 2})
         data = self._tool_json(self._call(self._with_session(run)))
         self.assertEqual(len(data["results"]), 2)
@@ -254,11 +254,11 @@ class TestMCPServer(unittest.TestCase):
         """
 
         async def run(session):
-            with mock.patch("rumor_agent.evidence.search_all", side_effect=fake_search_all), \
-                 mock.patch("rumor_agent.evidence.judge_stances_llm",
+            with mock.patch("mylocalai.rumor.evidence.search_all", side_effect=fake_search_all), \
+                 mock.patch("mylocalai.rumor.evidence.judge_stances_llm",
                             return_value=(["反驳", "支持"], None)), \
-                 mock.patch("rumor_agent.evidence.fetch_article", side_effect=fake_fetch), \
-                 mock.patch("rumor_agent.browser.fetch_article", side_effect=fake_fetch):
+                 mock.patch("mylocalai.rumor.evidence.fetch_article", side_effect=fake_fetch), \
+                 mock.patch("mylocalai.retrieval.browser.fetch_article", side_effect=fake_fetch):
                 opened = await session.call_tool("open_evidence_session",
                                                  {"text": "听说隔夜茶致癌，速转！"})
                 data = self._tool_json(opened)
@@ -293,9 +293,9 @@ class TestMCPServer(unittest.TestCase):
     def test_open_session_no_claim_skips(self):
         """无事实性声明：open_evidence_session 返回说明而不是开会话。"""
         async def run(session):
-            with mock.patch("rumor_agent.evidence.search_all", side_effect=fake_search_all), \
-                 mock.patch("rumor_agent.evidence.judge_stances_llm", return_value=(None, "x")), \
-                 mock.patch("rumor_agent.evidence.rule_stance", return_value="无关"):
+            with mock.patch("mylocalai.rumor.evidence.search_all", side_effect=fake_search_all), \
+                 mock.patch("mylocalai.rumor.evidence.judge_stances_llm", return_value=(None, "x")), \
+                 mock.patch("mylocalai.rumor.evidence.rule_stance", return_value="无关"):
                 return await session.call_tool("open_evidence_session", {"text": "哈哈哈哈哈"})
         data = self._tool_json(self._call(self._with_session(run)))
         self.assertIn("error", data)
@@ -312,7 +312,7 @@ class TestMCPServer(unittest.TestCase):
                         "degraded_components": [], "evidence_book": None}
 
         async def run(session):
-            with mock.patch("rumor_agent.agent.RumorAgent", StubAgent):
+            with mock.patch("mylocalai.rumor.agent.RumorAgent", StubAgent):
                 return await session.call_tool("analyze_rumor", {"text": "测试文本"})
         data = self._tool_json(self._call(self._with_session(run)))
         self.assertEqual(data["label"], "低风险")
@@ -320,7 +320,7 @@ class TestMCPServer(unittest.TestCase):
 
     def test_session_ttl_eviction(self):
         """超过 TTL 的会话在新建时被回收。"""
-        from rumor_agent import mcp_server as M
+        from mylocalai.rumor import mcp as M
         book = {"entries": [{"url": "https://www.piyao.org.cn/a1"}], "claim": "x",
                 "queries": [], "verdict_hint": "", "error": None, "skipped": None}
         with M._sessions_lock:

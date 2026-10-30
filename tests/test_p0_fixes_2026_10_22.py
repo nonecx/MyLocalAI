@@ -2,15 +2,15 @@
 """2026-10-22 检验报告 P0 修复的回归测试。
 
 对应关系：
-  P0-1  rumor_agent/rules.py       配置告警不再被形状校验抹掉
-  P0-2  rumor_agent/rules.py       阈值等标量写坏要留告警
-  P0-3  shared_core/llm_cache.py   关缓存不再连带关掉 single-flight
-  P0-4  shared_core/llm_cache.py   预算下限可配、等待者不再空等 30s
-  P0-5  shared_core/llm_client.py  瞬时故障不再被当成"参数不支持"；回落不再叠乘
-  P0-6  rumor_agent/tools.py       read_source 取消后不再抓取
-  P0-7  core_judge.py              空输入 0 次 API 调用；边界复核；degraded_components
-  P0-8  shared_core/console_io.py  非 UTF-8 控制台规整
-  P0-9  my_website/app.py          /api/health 暴露上游可用性
+  P0-1  src/mylocalai/rumor/rules.py       配置告警不再被形状校验抹掉
+  P0-2  src/mylocalai/rumor/rules.py       阈值等标量写坏要留告警
+  P0-3  mylocalai/llm/llm_cache.py   关缓存不再连带关掉 single-flight
+  P0-4  mylocalai/llm/llm_cache.py   预算下限可配、等待者不再空等 30s
+  P0-5  mylocalai/llm/llm_client.py  瞬时故障不再被当成"参数不支持"；回落不再叠乘
+  P0-6  src/mylocalai/rumor/tools.py       read_source 取消后不再抓取
+  P0-7  src/mylocalai/classic/judge.py              空输入 0 次 API 调用；边界复核；degraded_components
+  P0-8  src/mylocalai/util/console_io.py  非 UTF-8 控制台规整
+  P0-9  src/mylocalai/web/app.py          /api/health 暴露上游可用性
 """
 
 from __future__ import annotations
@@ -30,9 +30,11 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import core_judge  # noqa: E402
-from rumor_agent import rules  # noqa: E402
-from shared_core import console_io, llm_cache, llm_client  # noqa: E402
+import mylocalai.classic.judge as core_judge# noqa: E402
+from mylocalai.config import rules
+from mylocalai.util import console_io
+from mylocalai.llm import llm_cache
+from mylocalai.llm import llm_client
 
 
 def _write_json(data, name="case.json"):
@@ -281,8 +283,8 @@ class TestReadSourceAfterCancel(unittest.TestCase):
     """P0-6：Agent 超时后残留的 read_source 不得再发真实抓取。"""
 
     def test_read_source_does_not_fetch_after_cancel(self):
-        from rumor_agent.state import AnalysisState
-        from rumor_agent.tools import build_tools
+        from mylocalai.rumor.state import AnalysisState
+        from mylocalai.rumor.tools import build_tools
 
         fetched = []
 
@@ -319,7 +321,7 @@ class TestConsoleAndHealth(unittest.TestCase):
             sys.stdout = original
 
     def test_health_reports_llm_availability(self):
-        import my_website.app as app
+        import mylocalai.web.app as app
         body = app.health()
         self.assertIn("llm", body, "健康检查必须暴露上游可用性")
         self.assertIn("usable", body["llm"])

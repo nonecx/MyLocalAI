@@ -1,0 +1,16 @@
+
+[agent]
+langchain<2.0.0,>=1.0.0
+langchain-openai<2.0.0,>=1.0.0
+
+[local-inference]
+torch<3.0.0,>=2.1.0
+transformers<5.0.0,>=4.40.0
+modelscope<2.0.0,>=1.9.0
+
+[mcp]
+mcp<3.0.0,>=2.0.0
+
+[web]
+fastapi<2.0.0,>=0.110.0
+uvicorn[standard]<1.0.0,>=0.29.0

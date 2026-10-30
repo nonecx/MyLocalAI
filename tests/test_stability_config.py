@@ -26,14 +26,15 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-import core_judge  # noqa: E402
-import module_language.language_module as LM  # noqa: E402
-import module_logic.logic_module as LG  # noqa: E402
-import rumor_agent.sources as SRC  # noqa: E402
-import rumor_agent.verdict as V  # noqa: E402
-from rumor_agent import rules  # noqa: E402
-from rumor_agent.state import AnalysisState  # noqa: E402
-from shared_core import llm_cache, llm_client  # noqa: E402
+import mylocalai.classic.judge as core_judge# noqa: E402
+import mylocalai.classic.language as LM# noqa: E402
+import mylocalai.classic.logic as LG# noqa: E402
+import mylocalai.retrieval.sources as SRC# noqa: E402
+import mylocalai.rumor.verdict as V# noqa: E402
+from mylocalai.config import rules
+from mylocalai.rumor.state import AnalysisState  # noqa: E402
+from mylocalai.llm import llm_cache
+from mylocalai.llm import llm_client
 
 
 def _write_json(data) -> str:
@@ -114,7 +115,7 @@ class TestRulesAreConfigurable(unittest.TestCase):
         self.assertTrue(any("增量配置" in w for w in rules.load_warnings()))
 
     def test_missing_default_file_falls_back_with_warning(self):
-        os.environ["RUMOR_RULES_PATH"] = str(ROOT / "rumor_agent" / "no_such_file.json")
+        os.environ["RUMOR_RULES_PATH"] = str(ROOT / "src" / "mylocalai" / "config" / "no_such_file.json")
         self.addCleanup(os.environ.pop, "RUMOR_RULES_PATH", None)
         data = rules.load_rules()
         self.assertEqual(data["thresholds"]["suspect"], 45)
@@ -284,7 +285,7 @@ class TestLlmReplay(unittest.TestCase):
         emo = {"emotion_tendency": "情绪化宣泄", "emotion_score": 8.0, "keywords": []}
         atk = {"aggression_level": "高", "attack_target": "针对事件", "attack_type": "煽动对立"}
         lg = {"logic_relevance": "弱", "logic_fallacy": "诉诸情绪", "argument": "a", "conclusion": "c"}
-        with mock.patch("core_judge.generate_report", lambda *a, **k: "R"):
+        with mock.patch("mylocalai.classic.judge.generate_report", lambda *a, **k: "R"):
             out = {core_judge.judge("同一段文本", emotion=emo, attack=atk, logic=lg)["conclusion"]
                    for _ in range(10)}
         self.assertEqual(len(out), 1)
@@ -337,7 +338,7 @@ class TestRequestBudget(unittest.TestCase):
         fake.completions.create = dead
         t0 = time.perf_counter()
         with mock.patch.object(llm_client, "create_client", return_value=fake):
-            with mock.patch("core_judge.generate_report", lambda *a, **k: "R"):
+            with mock.patch("mylocalai.classic.judge.generate_report", lambda *a, **k: "R"):
                 out = core_judge.judge("一段文本", deadline_s=3.0)
         elapsed = time.perf_counter() - t0
         self.assertLess(elapsed, 30, f"应在预算内降级返回，实际 {elapsed:.1f}s")
@@ -444,7 +445,7 @@ class TestConcurrencyCap(unittest.TestCase):
     """发现 7：应用层并发上限 + health 不被拖住。"""
 
     def setUp(self):
-        import my_website.app as app
+        import mylocalai.web.app as app
         self.app = app
         self._timeout = app.ANALYZE_QUEUE_TIMEOUT_S
         app.ANALYZE_QUEUE_TIMEOUT_S = 0.05   # 测试里不等满 2 秒
@@ -502,7 +503,7 @@ class TestAgentCancellation(unittest.TestCase):
         self.assertEqual(len(started), 1, "取消后不应再开算新组件（尤其不再发 LLM/联网请求）")
 
     def test_agent_timeout_is_reported_and_bounded(self):
-        from rumor_agent.agent import RumorAgent
+        from mylocalai.rumor.agent import RumorAgent
         from tests.test_rumor_agent_offline import ScriptedModel, call_all_tools, honest_final, stub_funcs, RUMOR_TEXT
 
         agent = RumorAgent(llm=ScriptedModel(script=[call_all_tools, honest_final], delay=1.5),
@@ -515,7 +516,7 @@ class TestAgentCancellation(unittest.TestCase):
 
     def test_worker_thread_is_daemon(self):
         """后台线程必须是 daemon，否则短命 CLI 进程要等它跑完才退出。"""
-        import rumor_agent.agent as A
+        import mylocalai.rumor.agent as A
         captured = {}
 
         class SpyAgent(A.RumorAgent):
@@ -535,7 +536,7 @@ class TestAgentCancellation(unittest.TestCase):
         并行性用一个"四方屏障"判断，而不是墙钟：四个组件都在屏障上等齐才算并行，
         串行执行会让屏障超时（原先用 elapsed<0.35s 判断，机器满负载时会假红）。
         """
-        import rumor_agent.agent as A
+        import mylocalai.rumor.agent as A
         seen: list = []
         errors: list = []
         barrier = threading.Barrier(4, timeout=10)
@@ -582,8 +583,8 @@ class TestNoHardcodedPaths(unittest.TestCase):
         # 本文件自己也要被扫，所以待查字符串在这里拼出来，避免自我命中
         needles = ["D:" + "/MyLocalAI", "D:" + "\\MyLocalAI"]
         offenders = []
-        targets = [ROOT / "tests", ROOT / "my_website" / "static", ROOT / "my_website" / "app.py",
-                   ROOT / "my_website" / "README.md"]
+        targets = [ROOT / "tests", ROOT / "src" / "mylocalai" / "web" / "static", ROOT / "src" / "mylocalai" / "web" / "app.py",
+                   ROOT / "my_website" / "README.md", ROOT / "src" / "mylocalai" / "web" / "app.py"]
         for target in targets:
             files = [target] if target.is_file() else list(target.rglob("*"))
             for path in files:
@@ -596,7 +597,7 @@ class TestNoHardcodedPaths(unittest.TestCase):
 
     def test_project_root_is_derived_not_configured(self):
         """站点后端与四个测试入口都必须按自身位置推导项目根目录。"""
-        self.assertIn("__file__", (ROOT / "my_website" / "app.py").read_text(encoding="utf-8"))
+        self.assertIn("__file__", (ROOT / "src" / "mylocalai" / "web" / "app.py").read_text(encoding="utf-8"))
         for name in ("run_module_tests.py", "smoke_api.py", "verify_fixes.py"):
             text = (ROOT / "tests" / name).read_text(encoding="utf-8")
             self.assertIn("__file__", text, f"{name} 应按自身位置推导项目根目录")
@@ -630,7 +631,7 @@ class TestSurrogateSafety(unittest.TestCase):
     BAD = "ok\ud800bad"
 
     def test_sanitize_makes_text_encodable(self):
-        from shared_core.text_safety import has_surrogates, sanitize_text
+        from mylocalai.util.text_safety import has_surrogates, sanitize_text
         self.assertTrue(has_surrogates(self.BAD))
         fixed = sanitize_text(self.BAD)
         fixed.encode("utf-8")                       # 不抛即通过
@@ -656,7 +657,7 @@ class TestSurrogateSafety(unittest.TestCase):
             self.assertIn(key, out, fn.__name__)
 
     def test_agent_sanitizes_before_analysis(self):
-        from rumor_agent.agent import RumorAgent
+        from mylocalai.rumor.agent import RumorAgent
         seen = {}
 
         def fake_emotion(text):
@@ -679,7 +680,7 @@ class TestSurrogateSafety(unittest.TestCase):
         json.dumps(out, ensure_ascii=False)          # 结果可序列化（MCP/网站同路径）
 
     def test_web_entry_rejects_surrogates_with_400(self):
-        import my_website.app as app
+        import mylocalai.web.app as app
         from fastapi import HTTPException
         with self.assertRaises(HTTPException) as ctx:
             app.analyze(app.AnalyzeRequest(text=self.BAD, mode="classic"))
@@ -836,9 +837,9 @@ class TestConfigShapeContract(unittest.TestCase):
         修前：档名一改，classify_domain 认得新档名，但可靠/可抓/可扩链三套集合仍是旧档名 → 静默失效。
         """
         import importlib
-        from rumor_agent import browser as B
-        from rumor_agent import search as SE
-        from rumor_agent import opinions as O
+        from mylocalai.retrieval import browser as B
+        from mylocalai.retrieval import search as SE
+        from mylocalai.rumor import opinions as O
 
         path = _write_json({
             "tiers": {"医疗权威": ["nhc.gov.cn"], "专业医学媒体": ["dxy.cn"],
@@ -914,7 +915,7 @@ class TestConfigShapeContract(unittest.TestCase):
     def test_stale_role_names_fall_back_to_declaration_order(self):
         """整套替换名单、但档位角色段还写着旧档名时，不得退化成"哪个档都不可靠"。"""
         import importlib
-        from rumor_agent import search as SE
+        from mylocalai.retrieval import search as SE
 
         path = _write_json({
             "tiers": {"医疗权威": ["nhc.gov.cn"], "专业医学媒体": ["dxy.cn"], "健康门户": ["haodf.com"]},

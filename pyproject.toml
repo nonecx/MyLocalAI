@@ -5,8 +5,8 @@
 # `from __future__ import annotations` 已加），并在 3.13 上实测通过；
 # 3.9 及更早的解释器跑不起来。
 #
-# 注意：这里只做**元数据与约束声明**，不改变安装方式——仓库没有可安装的包结构，
-# 依赖仍按 requirements.txt / requirements-optional.txt 安装。
+# 注意：2026-10-30 M1-2 起为 **src 布局可编辑安装包**（src/mylocalai/），
+# `pip install -e .` 后 `import mylocalai.*` 全仓库可用，生产代码不再有 sys.path hack。
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
@@ -24,3 +24,9 @@ agent = ["langchain>=1.0.0,<2.0.0", "langchain-openai>=1.0.0,<2.0.0"]
 web = ["fastapi>=0.110.0,<2.0.0", "uvicorn[standard]>=0.29.0,<1.0.0"]
 mcp = ["mcp>=2.0.0,<3.0.0"]
 local-inference = ["torch>=2.1.0,<3.0.0", "transformers>=4.40.0,<5.0.0", "modelscope>=1.9.0,<2.0.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+mylocalai = ["**/*.json"]

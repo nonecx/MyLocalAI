@@ -3,9 +3,9 @@
 MyLocalAI 全模块测试执行器（只读测试，不修改项目源码）。
 
 对 12 条内置测试用例逐条调用并记录：
-  a) module_language.language_module.analyze_emotion(text)   -> "emotion"
-  b) module_language.language_module.analyze_aggression(text)-> "aggression"
-  c) module_logic.logic_module.analyze_logic(text)           -> "logic_api"
+  a) mylocalai.classic.language.analyze_emotion(text)   -> "emotion"
+  b) mylocalai.classic.language.analyze_aggression(text)-> "aggression"
+  c) mylocalai.classic.logic.analyze_logic(text)           -> "logic_api"
      （module_inference 本地备选链路已于 2026-10-30 归档至 archive/，不再纳入）
   - 用例 1-8、12 另调用 core_judge.judge(text, emotion=..., attack=..., logic=...)
     -> "judge"（完整返回 dict；传入步骤 a/b/c 的预计算结果，judge 内部复用不再重复调 API）
@@ -105,34 +105,34 @@ def timed_call(fn, *args, **kwargs):
 _IMPORT_ERRORS = {}
 
 try:
-    from module_language import language_module
+    from mylocalai.classic import language as language_module
 except Exception as exc:  # noqa: BLE001
     language_module = None
     _IMPORT_ERRORS["module_language"] = f"{type(exc).__name__}: {exc}"
 
 try:
-    from module_logic import logic_module
+    from mylocalai.classic import logic as logic_module
 except Exception as exc:  # noqa: BLE001
     logic_module = None
     _IMPORT_ERRORS["module_logic"] = f"{type(exc).__name__}: {exc}"
 
 try:
-    import core_judge
+    import mylocalai.classic.judge as core_judge
 except Exception as exc:  # noqa: BLE001
     core_judge = None
     _IMPORT_ERRORS["core_judge"] = f"{type(exc).__name__}: {exc}"
 
 try:
-    import report_generator
+    import mylocalai.classic.report as report_generator
 except Exception as exc:  # noqa: BLE001
     report_generator = None
     _IMPORT_ERRORS["report_generator"] = f"{type(exc).__name__}: {exc}"
 
 try:
-    import shared_core.llm_client as llm_client_mod
+    import mylocalai.llm.llm_client as llm_client_mod
 except Exception as exc:  # noqa: BLE001
     llm_client_mod = None
-    _IMPORT_ERRORS["shared_core.llm_client"] = f"{type(exc).__name__}: {exc}"
+    _IMPORT_ERRORS["mylocalai.llm.llm_client"] = f"{type(exc).__name__}: {exc}"
 
 
 def _import_error_result(module_name: str) -> dict:
@@ -245,13 +245,13 @@ save_results()
 # ===========================================================================
 # main.py CLI 子进程测试（在 report_fallback 之前跑，避免任何污染；独立进程互不影响）
 # ===========================================================================
-print("---- main.py CLI 子进程测试 ----", flush=True)
+print("---- mylocalai.cli CLI 子进程测试 ----", flush=True)
 _env = dict(os.environ)
 _env["PYTHONIOENCODING"] = "utf-8"
 _t0 = time.perf_counter()
 try:
     proc = subprocess.run(
-        [sys.executable, "main.py", "--text", "你真是个蠢货，滚开！"],
+        [sys.executable, "-m", "mylocalai.cli", "--text", "你真是个蠢货，滚开！"],
         cwd=PROJECT_ROOT,
         env=_env,
         capture_output=True,
@@ -286,7 +286,7 @@ if report_generator is not None and llm_client_mod is not None:
     _orig_create_client = llm_client_mod.create_client
     llm_client_mod.create_client = lambda: None
     try:
-        import shared_core.llm_cache as _cache_mod
+        import mylocalai.llm.llm_cache as _cache_mod
         _cache_mod.clear()
         _t0 = time.perf_counter()
         results["report_fallback"] = report_generator.generate_report(
@@ -305,7 +305,7 @@ if report_generator is not None and llm_client_mod is not None:
     has_marker = "本地模板回退" in results["report_fallback"]
     print(f"report_fallback 是否包含'本地模板回退': {has_marker}", flush=True)
 else:
-    results["report_fallback"] = "<跳过: report_generator 或 shared_core.llm_client 导入失败>"
+    results["report_fallback"] = "<跳过: report_generator 或 mylocalai.llm.llm_client 导入失败>"
     print(results["report_fallback"], flush=True)
 save_results()
 

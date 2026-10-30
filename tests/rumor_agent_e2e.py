@@ -39,7 +39,7 @@ FAULT = "--fault" in sys.argv
 if FAULT:
     os.environ["LONGCAT_BASE_URL"] = "http://127.0.0.1:9/v1"  # 9 号端口无服务，连接立即被拒
 
-from rumor_agent import RumorAgent  # noqa: E402
+from mylocalai.rumor import RumorAgent
 
 SAMPLES = [
     ("rumor_poison", "气死了！听说自来水被人下毒了，所有人都被骗了，官方根本不敢说！速转！",

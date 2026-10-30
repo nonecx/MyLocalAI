@@ -22,9 +22,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import core_judge  # noqa: E402
-from rumor_agent import verdict  # noqa: E402
-from shared_core import llm_cache, llm_client  # noqa: E402
+import mylocalai.classic.judge as core_judge# noqa: E402
+from mylocalai.rumor import verdict
+from mylocalai.llm import llm_cache
+from mylocalai.llm import llm_client
 
 
 class TestParallelModules(unittest.TestCase):
@@ -132,16 +133,16 @@ class TestExplanationConsistency(unittest.TestCase):
     """F7：Agent 解释与确定性结论一致才采用。"""
 
     def test_negated_sentence_is_not_a_match(self):
-        from rumor_agent.agent import _explanation_matches
+        from mylocalai.rumor.agent import _explanation_matches
         self.assertFalse(_explanation_matches("这条消息不是高风险谣言，请勿转发。", "高风险谣言"))
         self.assertFalse(_explanation_matches("经核实，并非高风险谣言。", "高风险谣言"))
 
     def test_plain_match_is_used(self):
-        from rumor_agent.agent import _explanation_matches
+        from mylocalai.rumor.agent import _explanation_matches
         self.assertTrue(_explanation_matches("结论：高风险谣言，风险分 85。建议不要转发。", "高风险谣言"))
 
     def test_explanation_from_agent_is_used_when_consistent(self):
-        from rumor_agent.agent import RumorAgent
+        from mylocalai.rumor.agent import RumorAgent
         from tests.test_rumor_agent_offline import (ScriptedModel, call_all_tools,
                                                     honest_final, stub_funcs, RUMOR_TEXT)
 
@@ -157,7 +158,7 @@ class TestWebsiteAgentDimensions(unittest.TestCase):
     """F8：agent 模式记录带三维字段，前端可复用同一套渲染。"""
 
     def test_agent_result_carries_three_dimensions(self):
-        from rumor_agent.agent import RumorAgent
+        from mylocalai.rumor.agent import RumorAgent
         from tests.test_rumor_agent_offline import (ScriptedModel, call_all_tools,
                                                     honest_final, stub_funcs, RUMOR_TEXT)
 
@@ -171,7 +172,7 @@ class TestWebsiteAgentDimensions(unittest.TestCase):
         self.assertIn("logic_relevance", r["logic"])
 
     def test_health_exposes_cache_instance(self):
-        import my_website.app as app
+        import mylocalai.web.app as app
         body = app.health()
         self.assertIn("instance", body["llm_cache"], "多进程部署要靠 instance 判断统计归属")
         self.assertTrue(str(body["llm_cache"]["instance"]).split(":")[0].isdigit())
@@ -199,7 +200,7 @@ class TestAgentLlmTimeout(unittest.TestCase):
         llm_client.reset_cache()
 
     def test_build_llm_uses_classic_timeout_and_retries(self):
-        import rumor_agent.llm as agent_llm
+        import mylocalai.llm.adapter as agent_llm
         with mock.patch("langchain_openai.ChatOpenAI") as cls:
             agent_llm.build_llm()
         kwargs = cls.call_args.kwargs
@@ -207,7 +208,7 @@ class TestAgentLlmTimeout(unittest.TestCase):
         self.assertEqual(kwargs["max_retries"], 3)
 
     def test_build_llm_defaults_match_the_shared_config(self):
-        import rumor_agent.llm as agent_llm
+        import mylocalai.llm.adapter as agent_llm
         os.environ.pop("LLM_TIMEOUT_S", None)
         os.environ.pop("LLM_MAX_RETRIES", None)
         llm_client.reset_cache()
@@ -218,7 +219,7 @@ class TestAgentLlmTimeout(unittest.TestCase):
         self.assertEqual(kwargs["max_retries"], llm_client.get_max_retries())
 
     def test_build_llm_does_not_send_thinking_flag_to_providers_without_support(self):
-        import rumor_agent.llm as agent_llm
+        import mylocalai.llm.adapter as agent_llm
         os.environ["LLM_PROVIDER"] = "openai"
         os.environ["OPENAI_API_KEY"] = "test-openai"
         llm_client.reset_cache()
@@ -332,7 +333,7 @@ class TestLauncherScripts(unittest.TestCase):
         self.assertIn("${PORT:-8000}", text)
         self.assertIn("${PYTHON:-}", text)
         self.assertIn("--no-browser", text)
-        self.assertIn("uvicorn app:app", text)
+        self.assertIn("uvicorn mylocalai.web.app:app", text)
 
     def test_start_sh_passes_bash_syntax_check_when_bash_is_available(self):
         import shutil

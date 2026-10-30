@@ -3,7 +3,7 @@
 
 覆盖三件事：
   1. 后端 /api/attention 与 /api/attention/search 的行为（含非法输入、检索失败降级）
-  2. attn_agent.estimate 的参数估计口径（x/y/z 的来源、estimated 标记、解析边界）
+  2. mylocalai.attention.estimate 的参数估计口径（x/y/z 的来源、estimated 标记、解析边界）
   3. 前端三件套与后端接口的自洽性：HTML 里的元素 id 必须被 app.js 引用、
      接口路径必须与后端路由一致——这类"改了后端忘了改前端"的错只有这种测试能抓到。
 
@@ -24,12 +24,12 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "my_website"))   # 让 `import app` 能找到 my_website/app.py
+sys.path.insert(0, str(ROOT / "src" / "mylocalai" / "web"))   # 让 `import app` 能找到包化后的 web/app.py
 
-from attn_agent import attention as A  # noqa: E402
-from attn_agent.estimate import estimate_from_search  # noqa: E402
+from mylocalai.attention import attention as A# noqa: E402
+from mylocalai.attention.estimate import estimate_from_search# noqa: E402
 
-STATIC = ROOT / "my_website" / "static"
+STATIC = ROOT / "src" / "mylocalai" / "web" / "static"
 APP_JS = STATIC / "app.js"
 INDEX_HTML = STATIC / "index.html"
 
@@ -121,7 +121,7 @@ class TestAttentionApi(unittest.TestCase):
             ],
             "engines": {"fake": {"ok": True, "count": 2, "error": None}},
         }
-        with mock.patch("rumor_agent.search.search_all", return_value=fake):
+        with mock.patch("mylocalai.retrieval.search.search_all", return_value=fake):
             resp = self.client.post("/api/attention/search", json={"query": "测试话题"})
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
@@ -140,13 +140,13 @@ class TestAttentionApi(unittest.TestCase):
             {"url": "https://a.example.com/1/", "title": "t", "snippet": "s"},   # 尾斜杠
             {"url": "https://A.EXAMPLE.COM/1", "title": "t", "snippet": "s"},   # 大小写
         ], "engines": {}}
-        with mock.patch("rumor_agent.search.search_all", return_value=fake):
+        with mock.patch("mylocalai.retrieval.search.search_all", return_value=fake):
             data = self.client.post("/api/attention/search", json={"query": "q"}).json()
         self.assertEqual(data["x"], 1)
 
     def test_search_empty_results_is_missing_not_error(self):
         """检索没结果时按缺失处理，不报错、不编数字。"""
-        with mock.patch("rumor_agent.search.search_all", return_value={"results": [], "engines": {}}):
+        with mock.patch("mylocalai.retrieval.search.search_all", return_value={"results": [], "engines": {}}):
             resp = self.client.post("/api/attention/search", json={"query": "不存在的话题"})
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
@@ -156,7 +156,7 @@ class TestAttentionApi(unittest.TestCase):
 
     def test_search_failure_degrades_gracefully(self):
         """检索整体抛异常也必须 200 + 缺失标记，不能让页面 500。"""
-        with mock.patch("rumor_agent.search.search_all", side_effect=RuntimeError("网络不可达")):
+        with mock.patch("mylocalai.retrieval.search.search_all", side_effect=RuntimeError("网络不可达")):
             resp = self.client.post("/api/attention/search", json={"query": "任何话题"})
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
@@ -215,7 +215,7 @@ class TestAttentionApi(unittest.TestCase):
         fake = {"query": "q", "results": [
             {"url": "https://a.example/1", "title": "t", "snippet": "s"}],
             "engines": {}}
-        with mock.patch("rumor_agent.search.search_all", return_value=fake):
+        with mock.patch("mylocalai.retrieval.search.search_all", return_value=fake):
             resp = self.client.post("/api/attention/search",
                                     json={"query": "q", "profile": "reachable"})
         self.assertEqual(resp.status_code, 200)
@@ -224,7 +224,7 @@ class TestAttentionApi(unittest.TestCase):
 
 # ---------------------------------------------------------------- 2. 参数估计
 class TestEstimate(unittest.TestCase):
-    """attn_agent.estimate 的口径。"""
+    """mylocalai.attention.estimate 的口径。"""
 
     def test_extracts_reads_and_comments(self):
         est = estimate_from_search("q", [
@@ -281,7 +281,7 @@ class TestEstimate(unittest.TestCase):
 
     def test_search_result_objects_supported(self):
         """既接受 dict 也接受 SearchResult 对象（真实链路传的是对象）。"""
-        from rumor_agent.search import SearchResult
+        from mylocalai.retrieval.search import SearchResult
         est = estimate_from_search("q", [
             SearchResult(engine="e", rank=1, title="t",
                          url="https://a.example/1", snippet="阅读量 300 万"),
@@ -413,7 +413,7 @@ class TestFrontendBackendConsistency(unittest.TestCase):
     def test_threshold_constant_matches_backend(self):
         """后端深读阈值常量必须仍是 66（spec 档默认口径，改造不许悄悄改掉）。"""
         self.assertIn(f'DEEP_READ_THRESHOLD: float = {A.DEEP_READ_THRESHOLD}',
-                      _read(ROOT / "attn_agent" / "attention.py"))
+                      _read(ROOT / "src" / "mylocalai" / "attention" / "attention.py"))
         self.assertEqual(A.DEEP_READ_THRESHOLD, 66.0)
 
     def test_frontend_does_not_hardcode_threshold(self):
@@ -457,7 +457,7 @@ class TestFrontendBackendConsistency(unittest.TestCase):
     def test_rules_json_bands_match_module(self):
         """外置 attn_rules.json 的档位表必须与模块 DEFAULT_BANDS 一致。"""
         import json as _json
-        data = _json.loads(_read(ROOT / "attn_agent" / "attn_rules.json"))
+        data = _json.loads(_read(ROOT / "src" / "mylocalai" / "attention" / "attn_rules.json"))
         self.assertEqual(data["bands"], A.DEFAULT_BANDS)
         self.assertEqual(data["deep_read_threshold"], A.DEEP_READ_THRESHOLD)
 

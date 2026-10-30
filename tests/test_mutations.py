@@ -18,11 +18,11 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-import rumor_agent.browser as B  # noqa: E402
-import rumor_agent.evidence as E  # noqa: E402
-import rumor_agent.search as S  # noqa: E402
-import rumor_agent.sources as SRC  # noqa: E402
-import rumor_agent.verdict as V  # noqa: E402
+import mylocalai.retrieval.browser as B# noqa: E402
+import mylocalai.rumor.evidence as E# noqa: E402
+import mylocalai.retrieval.search as S# noqa: E402
+import mylocalai.retrieval.sources as SRC# noqa: E402
+import mylocalai.rumor.verdict as V# noqa: E402
 
 
 class TestBrowserMutations(unittest.TestCase):

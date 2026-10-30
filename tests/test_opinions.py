@@ -17,8 +17,8 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from rumor_agent import opinions as O  # noqa: E402
-from rumor_agent import sources as SRC  # noqa: E402
+from mylocalai.rumor import opinions as O
+from mylocalai.retrieval import sources as SRC
 
 
 def entry(url, stance, tier=SRC.TIER_UGC, title="标题", snippet="摘要内容", **kw):
@@ -179,7 +179,7 @@ class TestOverlap(unittest.TestCase):
             article("https://a/2", [arg("自来水被人下毒")]),
             article("https://a/3", [arg("自来水很干净")]),
         ]
-        with mock.patch("shared_core.llm_client.chat_json",
+        with mock.patch("mylocalai.llm.llm_client.chat_json",
                         side_effect=FakeLLM(clusters=[[0, 1, 2, 3], [4]])):
             merged = O.merge_arguments(articles, "支持")
         self.assertEqual(merged["method"], "llm")
@@ -225,7 +225,7 @@ class TestMergeFallback(unittest.TestCase):
     def test_out_of_range_clusters_fall_back_to_rule(self):
         articles = [article("https://a/0", [arg("论据一")]),
                     article("https://a/1", [arg("论据二")])]
-        with mock.patch("shared_core.llm_client.chat_json",
+        with mock.patch("mylocalai.llm.llm_client.chat_json",
                         return_value=({"clusters": [[0, 1, 9]]}, "")):
             merged = O.merge_arguments(articles, "支持")
         self.assertEqual(merged["method"], "rule")
@@ -235,7 +235,7 @@ class TestMergeFallback(unittest.TestCase):
     def test_duplicate_index_falls_back(self):
         articles = [article("https://a/0", [arg("论据一")]),
                     article("https://a/1", [arg("论据二")])]
-        with mock.patch("shared_core.llm_client.chat_json",
+        with mock.patch("mylocalai.llm.llm_client.chat_json",
                         return_value=({"clusters": [[0, 0], [1]]}, "")):
             merged = O.merge_arguments(articles, "反驳")
         self.assertEqual(merged["method"], "rule")
@@ -243,7 +243,7 @@ class TestMergeFallback(unittest.TestCase):
     def test_missing_index_falls_back(self):
         articles = [article("https://a/0", [arg("论据一")]),
                     article("https://a/1", [arg("论据二")])]
-        with mock.patch("shared_core.llm_client.chat_json",
+        with mock.patch("mylocalai.llm.llm_client.chat_json",
                         return_value=({"clusters": [[0]]}, "")):
             merged = O.merge_arguments(articles, "支持")
         self.assertEqual(merged["method"], "rule")
@@ -251,7 +251,7 @@ class TestMergeFallback(unittest.TestCase):
     def test_llm_false_skips_call(self):
         articles = [article("https://a/0", [arg("自来水被人下毒")]),
                     article("https://a/1", [arg("自来水被人下毒了")])]
-        with mock.patch("shared_core.llm_client.chat_json") as m:
+        with mock.patch("mylocalai.llm.llm_client.chat_json") as m:
             merged = O.merge_arguments(articles, "支持", llm=False)
         self.assertEqual(m.call_count, 0)
         self.assertEqual(merged["method"], "rule")
@@ -302,14 +302,14 @@ class TestCredibility(unittest.TestCase):
 
 class TestExtractArguments(unittest.TestCase):
     def test_success(self):
-        with mock.patch("shared_core.llm_client.chat_json",
+        with mock.patch("mylocalai.llm.llm_client.chat_json",
                         return_value=({"arguments": [arg("论据", source="专家", verifiable="可核实")]}, "")):
             res = O.extract_arguments("正文内容")
         self.assertEqual(res["error"], None)
         self.assertEqual(res["arguments"][0]["argument"], "论据")
 
     def test_failure_returns_empty_with_error(self):
-        with mock.patch("shared_core.llm_client.chat_json", return_value=(None, "超时")):
+        with mock.patch("mylocalai.llm.llm_client.chat_json", return_value=(None, "超时")):
             res = O.extract_arguments("正文内容")
         self.assertEqual(res["arguments"], [])
         self.assertEqual(res["error"], "超时")
@@ -321,7 +321,7 @@ class TestExtractArguments(unittest.TestCase):
 
     def test_caps_max_arguments(self):
         many = [arg(f"论据{i}") for i in range(10)]
-        with mock.patch("shared_core.llm_client.chat_json", return_value=({"arguments": many}, "")):
+        with mock.patch("mylocalai.llm.llm_client.chat_json", return_value=({"arguments": many}, "")):
             res = O.extract_arguments("正文")
         self.assertEqual(len(res["arguments"]), O.MAX_ARGUMENTS_PER_ARTICLE)
 
@@ -330,7 +330,7 @@ class TestContradictions(unittest.TestCase):
     def test_parses_and_normalizes(self):
         articles = [article("https://a/0", [arg("论据A"), arg("论据B")])]
         merged = {"items": [{"argument": "A"}, {"argument": "B"}]}
-        with mock.patch("shared_core.llm_client.chat_json",
+        with mock.patch("mylocalai.llm.llm_client.chat_json",
                         return_value=({"contradictions": [
                             {"kind": "互相矛盾", "a": "A", "b": "B", "why": "冲突"}]}, "")):
             res = O.find_contradictions(articles, merged)
@@ -338,7 +338,7 @@ class TestContradictions(unittest.TestCase):
         self.assertEqual(res["contradictions"][0]["kind"], "互相矛盾")
 
     def test_failure_is_not_raised(self):
-        with mock.patch("shared_core.llm_client.chat_json", return_value=(None, "超时")):
+        with mock.patch("mylocalai.llm.llm_client.chat_json", return_value=(None, "超时")):
             res = O.find_contradictions([], {"items": [{"argument": "A"}]})
         self.assertEqual(res["contradictions"], [])
         self.assertEqual(res["error"], "超时")
@@ -353,14 +353,14 @@ class TestContradictions(unittest.TestCase):
             seen["user"] = user_text
             return {"contradictions": []}, ""
 
-        with mock.patch("shared_core.llm_client.chat_json", side_effect=fake):
+        with mock.patch("mylocalai.llm.llm_client.chat_json", side_effect=fake):
             O.find_contradictions(articles, merged)
         self.assertIn("水管流黑水", seen["user"])
         self.assertIn("水其实很干净", seen["user"])
         self.assertIn("文章0", seen["user"])
 
     def test_llm_false_skips_call(self):
-        with mock.patch("shared_core.llm_client.chat_json") as m:
+        with mock.patch("mylocalai.llm.llm_client.chat_json") as m:
             res = O.find_contradictions([], {"items": [{"argument": "A"}]}, llm=False)
         self.assertEqual(m.call_count, 0)
         self.assertEqual(res["contradictions"], [])
@@ -374,7 +374,7 @@ class TestCollectPipeline(unittest.TestCase):
 
     def test_two_sided_full_run(self):
         fake = FakeLLM()
-        with mock.patch("shared_core.llm_client.chat_json", side_effect=fake):
+        with mock.patch("mylocalai.llm.llm_client.chat_json", side_effect=fake):
             res = O.collect_opinion_analysis("自来水被人下毒了", evidence_book=self._book(),
                                              fetch_fn=lambda u: None, llm=True)
         self.assertTrue(res["triggered"])
@@ -388,13 +388,13 @@ class TestCollectPipeline(unittest.TestCase):
         # 规格 §复用 的工程约定：evidence_book=None 且不传 search_fn/fetch_fn 时，
         # 调用期解析为模块级 search_all/fetch_article —— 必须能被 mock.patch 替换。
         with mock.patch.object(O, "collect_evidence", return_value=self._book()) as ce, \
-             mock.patch("shared_core.llm_client.chat_json", side_effect=FakeLLM()):
+             mock.patch("mylocalai.llm.llm_client.chat_json", side_effect=FakeLLM()):
             res = O.collect_opinion_analysis("自来水被人下毒了")
         self.assertTrue(ce.called)
         self.assertTrue(res["triggered"])
         # 模块级 fetch_article 被用作默认抓取实现（patch 后返回 None → 走摘要兜底）
         with mock.patch.object(O, "fetch_article", return_value=None) as mf, \
-             mock.patch("shared_core.llm_client.chat_json", side_effect=FakeLLM()):
+             mock.patch("mylocalai.llm.llm_client.chat_json", side_effect=FakeLLM()):
             res2 = O.collect_opinion_analysis("自来水被人下毒了", evidence_book=self._book())
         self.assertTrue(mf.called, "未显式传 fetch_fn 时应调用模块级 fetch_article")
         self.assertEqual(res2["per_article"][0]["read_from"], "摘要")
@@ -408,7 +408,7 @@ class TestCollectPipeline(unittest.TestCase):
             return self._book()
 
         with mock.patch.object(O, "collect_evidence", side_effect=fake_collect), \
-             mock.patch("shared_core.llm_client.chat_json") as m:
+             mock.patch("mylocalai.llm.llm_client.chat_json") as m:
             O.collect_opinion_analysis("自来水被下毒", llm=False,
                                        search_fn=lambda q, k: {"results": [], "engines": {}},
                                        fetch_fn=lambda u: None)
@@ -417,7 +417,7 @@ class TestCollectPipeline(unittest.TestCase):
 
     def test_single_sided_per_group_has_both_keys(self):
         book = {"entries": [entry("https://zhihu.com/a", "支持")], "skipped": None, "error": None}
-        with mock.patch("shared_core.llm_client.chat_json", side_effect=FakeLLM()):
+        with mock.patch("mylocalai.llm.llm_client.chat_json", side_effect=FakeLLM()):
             res = O.collect_opinion_analysis("自来水被下毒", evidence_book=book,
                                              fetch_fn=lambda u: None)
         self.assertEqual(res["group_mode"], "single-sided")
@@ -428,7 +428,7 @@ class TestCollectPipeline(unittest.TestCase):
         self.assertEqual(res["per_group"]["反驳"]["credibility"], [])
 
     def test_llm_failure_degrades_and_still_overlaps(self):
-        with mock.patch("shared_core.llm_client.chat_json", return_value=(None, "超时")):
+        with mock.patch("mylocalai.llm.llm_client.chat_json", return_value=(None, "超时")):
             res = O.collect_opinion_analysis("自来水被人下毒了", evidence_book=self._book(),
                                              fetch_fn=lambda u: None, llm=True)
         self.assertTrue(res["triggered"])
@@ -449,7 +449,7 @@ class TestCollectPipeline(unittest.TestCase):
         book = {"entries": [entry("https://zhihu.com/a", "支持",
                                   title="自来水真的有问题", snippet="我亲眼见到水管流出黑水")],
                 "skipped": None, "error": None}
-        with mock.patch("shared_core.llm_client.chat_json", side_effect=FakeLLM()):
+        with mock.patch("mylocalai.llm.llm_client.chat_json", side_effect=FakeLLM()):
             res = O.collect_opinion_analysis("自来水被下毒", evidence_book=book,
                                              fetch_fn=lambda u: None)
         self.assertTrue(res["triggered"])
@@ -461,7 +461,7 @@ class TestCollectPipeline(unittest.TestCase):
 
     def test_fetch_success_reads_full_text(self):
         book = {"entries": [entry("https://zhihu.com/a", "支持")], "skipped": None, "error": None}
-        with mock.patch("shared_core.llm_client.chat_json", side_effect=FakeLLM()):
+        with mock.patch("mylocalai.llm.llm_client.chat_json", side_effect=FakeLLM()):
             res = O.collect_opinion_analysis("自来水被下毒", evidence_book=book,
                                              fetch_fn=lambda u: {"url": u, "text": "正文" * 20})
         self.assertEqual(res["per_article"][0]["read_from"], "全文")
@@ -469,7 +469,7 @@ class TestCollectPipeline(unittest.TestCase):
     def test_same_seed_reproducible(self):
         book = {"entries": [entry(f"https://zhihu.com/{i}", "支持") for i in range(8)],
                 "skipped": None, "error": None}
-        with mock.patch("shared_core.llm_client.chat_json", side_effect=FakeLLM()):
+        with mock.patch("mylocalai.llm.llm_client.chat_json", side_effect=FakeLLM()):
             a = O.collect_opinion_analysis("x", evidence_book=book, seed=42, fetch_fn=lambda u: None)
             b = O.collect_opinion_analysis("x", evidence_book=book, seed=42, fetch_fn=lambda u: None)
         self.assertEqual(a["sampled"]["支持"], b["sampled"]["支持"])
@@ -477,7 +477,7 @@ class TestCollectPipeline(unittest.TestCase):
 
     def test_llm_false_makes_no_llm_calls(self):
         # llm=False 必须完全不调用大模型（离线/无密钥部署），且仍给出规则聚类结果
-        with mock.patch("shared_core.llm_client.chat_json") as m:
+        with mock.patch("mylocalai.llm.llm_client.chat_json") as m:
             res = O.collect_opinion_analysis("自来水被下毒了", evidence_book=self._book(),
                                              fetch_fn=lambda u: None, llm=False)
         self.assertEqual(m.call_count, 0)
@@ -492,7 +492,7 @@ class TestCollectPipeline(unittest.TestCase):
         book = {"entries": [{"title": "听说下毒", "snippet": "内容", "stance": "支持",
                              "domain_tier": "", "url": None}],
                 "skipped": None, "error": None}
-        with mock.patch("shared_core.llm_client.chat_json", side_effect=FakeLLM()):
+        with mock.patch("mylocalai.llm.llm_client.chat_json", side_effect=FakeLLM()):
             res = O.collect_opinion_analysis("自来水被下毒", evidence_book=book,
                                              fetch_fn=lambda u: None)
         self.assertTrue(res["triggered"])

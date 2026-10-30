@@ -23,15 +23,15 @@ from langchain_core.language_models.chat_models import BaseChatModel  # noqa: E4
 from langchain_core.messages import AIMessage  # noqa: E402
 from langchain_core.outputs import ChatGeneration, ChatResult  # noqa: E402
 
-import core_judge  # noqa: E402
-from rumor_agent import evidence as E  # noqa: E402
-from rumor_agent import search as S  # noqa: E402
-from rumor_agent import sources as SRC  # noqa: E402
-from rumor_agent import verdict as V  # noqa: E402
-from rumor_agent.agent import RumorAgent  # noqa: E402
-from rumor_agent.patterns import scan_markers  # noqa: E402
-from rumor_agent.state import AnalysisState  # noqa: E402
-from rumor_agent.tools import build_tools  # noqa: E402
+import mylocalai.classic.judge as core_judge# noqa: E402
+from mylocalai.rumor import evidence as E
+from mylocalai.retrieval import search as S
+from mylocalai.retrieval import sources as SRC
+from mylocalai.rumor import verdict as V
+from mylocalai.rumor.agent import RumorAgent  # noqa: E402
+from mylocalai.rumor.patterns import scan_markers  # noqa: E402
+from mylocalai.rumor.state import AnalysisState  # noqa: E402
+from mylocalai.rumor.tools import build_tools  # noqa: E402
 
 RUMOR_TEXT = "气死了！听说自来水被人下毒了，所有人都被骗了，官方根本不敢说！速转！"
 RATIONAL_TEXT = "根据统计数据，因为样本量超过一万份，所以这个结论具有较高的可信度，证据比较充分。"
@@ -552,7 +552,7 @@ class TestEvidence(unittest.TestCase):
         # 6 条分两批（每批 5 条）：第 1 批成功、第 2 批失败 → 该批条目为 None，错误说明返回
         entries = [{"domain_tier": SRC.TIER_OFFICIAL, "title": f"报道{i}", "snippet": "内容",
                     "url": "", "full_text": None} for i in range(6)]
-        with mock.patch("shared_core.llm_client.chat_json",
+        with mock.patch("mylocalai.llm.llm_client.chat_json",
                         side_effect=[({"stances": ["反驳"] * 5}, ""), (None, "API 调用失败: ConnectionError")]):
             stances, err = E.judge_stances_llm("某主张", entries)
         self.assertEqual(stances, ["反驳"] * 5 + [None])
@@ -560,7 +560,7 @@ class TestEvidence(unittest.TestCase):
 
     def test_judge_stances_llm_all_batches_fail(self):
         entries = [{"domain_tier": SRC.TIER_OFFICIAL, "title": "t", "snippet": "s", "url": "", "full_text": None}]
-        with mock.patch("shared_core.llm_client.chat_json", return_value=(None, "超时")):
+        with mock.patch("mylocalai.llm.llm_client.chat_json", return_value=(None, "超时")):
             stances, err = E.judge_stances_llm("某主张", entries)
         self.assertIsNone(stances)
         self.assertEqual(err, "超时")
@@ -569,7 +569,7 @@ class TestEvidence(unittest.TestCase):
         # 回归：模型偶尔把键名写歪（实测 "_instances"），内容正确时不应整批作废
         entries = [{"domain_tier": SRC.TIER_OFFICIAL, "title": "t", "snippet": "s", "url": "", "full_text": None}
                    for _ in range(3)]
-        with mock.patch("shared_core.llm_client.chat_json",
+        with mock.patch("mylocalai.llm.llm_client.chat_json",
                         return_value=({"_instances": ["反驳", "支持", "无关"]}, "")):
             stances, err = E.judge_stances_llm("某主张", entries)
         self.assertEqual(stances, ["反驳", "支持", "无关"])
@@ -664,7 +664,7 @@ class TestScopeAnchors(unittest.TestCase):
         self.assertIn("最近", weak)
 
     def test_classify_scope_phenomenon_skips_llm(self):
-        with mock.patch("shared_core.llm_client.chat_json") as j:
+        with mock.patch("mylocalai.llm.llm_client.chat_json") as j:
             s = E.classify_scope("网传喝隔夜茶会致癌，我朋友说有人确诊了")
         self.assertEqual(s["scope"], E.SCOPE_PHENOMENON)
         self.assertFalse(j.called, "泛现象不应调用大模型判定范围")
@@ -675,14 +675,14 @@ class TestScopeAnchors(unittest.TestCase):
         self.assertTrue(any(a["text"] == "杭州余杭区" for a in s["anchors"]))
 
     def test_llm_can_downgrade_rule_event_to_phenomenon(self):
-        with mock.patch("shared_core.llm_client.chat_json",
+        with mock.patch("mylocalai.llm.llm_client.chat_json",
                         return_value=({"scope": "phenomenon", "event": "", "why": "泛指一类说法"}, "")):
             s = E.classify_scope("听说咱们小区自来水被人下毒了")
         self.assertEqual(s["scope"], E.SCOPE_PHENOMENON)
         self.assertEqual(s["method"], "llm")
 
     def test_llm_failure_keeps_rule_result(self):
-        with mock.patch("shared_core.llm_client.chat_json", return_value=(None, "超时")):
+        with mock.patch("mylocalai.llm.llm_client.chat_json", return_value=(None, "超时")):
             s = E.classify_scope("网传杭州余杭区自来水出现异味")
         self.assertEqual(s["scope"], E.SCOPE_EVENT)
         self.assertEqual(s["method"], "rule")
@@ -791,7 +791,7 @@ class TestScopeFilterIntegration(unittest.TestCase):
             n = user.count("[")                             # 立场判定：按实际条数返回
             return {"stances": ["反驳"] * n}, ""
 
-        with mock.patch("shared_core.llm_client.chat_json", side_effect=fake_chat):
+        with mock.patch("mylocalai.llm.llm_client.chat_json", side_effect=fake_chat):
             book = E.collect_evidence("网传杭州余杭区自来水被人下毒", claims=self._claims(claim),
                                       search_fn=fn, llm_judge=True)
         # 模型放行第 2 条；第 2 条的立场"反驳"使其通过只留支持/反驳的过滤

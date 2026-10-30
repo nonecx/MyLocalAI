@@ -41,4 +41,4 @@ if [ "${1:-}" != "--no-browser" ]; then
   ) &
 fi
 
-exec "$PYTHON" -m uvicorn app:app --host 127.0.0.1 --port "$PORT"
+exec "$PYTHON" -m uvicorn mylocalai.web.app:app --host 127.0.0.1 --port "$PORT"

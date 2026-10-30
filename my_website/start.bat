@@ -37,7 +37,7 @@ if not defined PYRUN (
     exit /b 1
 )
 
-"%PYRUN%" %PYEXTRA% -m uvicorn app:app --host 127.0.0.1 --port %PORT%
+"%PYRUN%" %PYEXTRA% -m uvicorn mylocalai.web.app:app --host 127.0.0.1 --port %PORT%
 
 echo.
 echo Server stopped.

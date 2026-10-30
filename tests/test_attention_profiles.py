@@ -21,7 +21,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from attn_agent import attention as A  # noqa: E402
+from mylocalai.attention import attention as A# noqa: E402
 
 # 2026-10-26 实测的五个真实话题（x, y, z）
 TOPICS = [
@@ -125,7 +125,7 @@ class TestCliProfileFlag(unittest.TestCase):
         import subprocess
         import sys as _sys
         proc = subprocess.run(
-            [_sys.executable, "-X", "utf8", "-m", "attn_agent.attention"] + argv,
+            [_sys.executable, "-X", "utf8", "-m", "mylocalai.attention.attention"] + argv,
             capture_output=True, text=True, timeout=120, cwd=str(ROOT))
         return proc.returncode, proc.stdout, proc.stderr
 

@@ -24,8 +24,8 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from attn_agent import attention as A  # noqa: E402
-from attn_agent import deep_read as D  # noqa: E402
+from mylocalai.attention import attention as A# noqa: E402
+from mylocalai.attention import deep_read as D# noqa: E402
 
 
 def detail_of(x, y, z, params=None):
@@ -526,7 +526,7 @@ class TestDeepReadSignalsWiring(unittest.TestCase):
             seen["user"] = user
             return "解读", ""
 
-        with mock.patch("shared_core.llm_client.chat_text", side_effect=fake):
+        with mock.patch("mylocalai.llm.llm_client.chat_text", side_effect=fake):
             D.deep_read("t", {**detail_of(1000, 1e8, 1e6), "estimated": True},
                         use_llm=True, profile="spec")
         for key in ("engagement_ratio", "spread", "resonance", "share_x",
@@ -605,7 +605,7 @@ class TestBackwardCompatibility(unittest.TestCase):
             "uncertainty": [],
         }, ensure_ascii=False)
         evidence = [{"text": f"发言{i}"} for i in range(12)]
-        with mock.patch("shared_core.llm_client.chat_text", return_value=(good, "")):
+        with mock.patch("mylocalai.llm.llm_client.chat_text", return_value=(good, "")):
             r = D.deep_read("某话题", detail_of(1000, 1e8, 1e6), use_llm=True,
                             evidence=evidence)
         self.assertTrue(r["triggered"])
@@ -614,7 +614,7 @@ class TestBackwardCompatibility(unittest.TestCase):
         self.assertIn("信息发布节奏", r["text"])
 
     def test_llm_failure_falls_back(self):
-        with mock.patch("shared_core.llm_client.chat_text",
+        with mock.patch("mylocalai.llm.llm_client.chat_text",
                         return_value=("", "HTTP 401")):
             r = D.deep_read("某话题", detail_of(1000, 1e8, 1e6), use_llm=True)
         self.assertEqual(r["source"], "template")
@@ -622,7 +622,7 @@ class TestBackwardCompatibility(unittest.TestCase):
         self.assertTrue(any("大模型解读不可用" in w for w in r["warnings"]))
 
     def test_llm_exception_does_not_propagate(self):
-        with mock.patch("shared_core.llm_client.chat_text",
+        with mock.patch("mylocalai.llm.llm_client.chat_text",
                         side_effect=RuntimeError("网络炸了")):
             r = D.deep_read("t", detail_of(1000, 1e8, 1e6), use_llm=True)
         self.assertEqual(r["source"], "template")

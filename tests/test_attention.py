@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """attn_agent 关注度（Attention）评分离线测试：不联网、不调用大模型、结果可复现。
 
-被测公式（attn_agent/attention.py 必须逐字实现）：
+被测公式（src/mylocalai/attention/attention.py 必须逐字实现）：
     E = 100 * (1 - exp(-lambda * S))
     S = w_x*ln(1+x)/ln(1+x0) + w_y*ln(1+y)/ln(1+y0) + w_z*ln(1+z)/ln(1+z0) + epsilon
     默认 x0=100, y0=100000, z0=1000, w_x=0.2, w_y=0.5, w_z=0.3, lambda=0.7, epsilon=1e-6
@@ -29,7 +29,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from attn_agent import attention as A  # noqa: E402
+from mylocalai.attention import attention as A# noqa: E402
 
 # ---------------------------------------------------------------- 规格常量（照抄规格，不读实现）
 X0, Y0, Z0 = 100.0, 100000.0, 1000.0
@@ -202,7 +202,7 @@ class TestConstants(unittest.TestCase):
 
 
 class TestRulesFile(unittest.TestCase):
-    """attn_agent/attn_rules.json 的内容必须与规格一致、可被 UTF-8 解析。"""
+    """src/mylocalai/attention/attn_rules.json 的内容必须与规格一致、可被 UTF-8 解析。"""
 
     def test_rules_file_exists_and_parses(self):
         """规则文件存在、是合法 JSON、结构为 params/bands/deep_read_threshold。"""
@@ -314,7 +314,7 @@ class TestCalibrationPoints(unittest.TestCase):
         import subprocess
         code = (
             "import sys; sys.path.insert(0, %r);"
-            "from attn_agent.attention import attention_score;"
+            "from mylocalai.attention.attention import attention_score;"
             "s = attention_score(1e300, 1e300, 1e300);"
             "print(s)"
         ) % str(ROOT)

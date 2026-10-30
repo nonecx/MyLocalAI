@@ -18,11 +18,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from module_language import language_module as LM  # noqa: E402
-from module_logic import logic_module as LG  # noqa: E402
-from rumor_agent import patterns, tiering  # noqa: E402
-from shared_core import config_loader, llm_client, prompt_config  # noqa: E402
-import report_generator  # noqa: E402
+from mylocalai.classic import language as LM# noqa: E402
+from mylocalai.classic import logic as LG# noqa: E402
+from mylocalai.rumor import patterns
+from mylocalai.core import tiering
+from mylocalai.config import config_loader
+from mylocalai.llm import llm_client
+from mylocalai.config import prompt_config
+import mylocalai.classic.report as report_generator# noqa: E402
 
 
 def _write(data, name):
@@ -174,7 +177,7 @@ class TestTieringAndWeights(unittest.TestCase):
                 os.environ[key] = value
 
     def test_core_judge_and_speech_tier_share_one_implementation(self):
-        from rumor_agent import verdict
+        from mylocalai.rumor import verdict
         cases = [
             ({"emotion_score": 9.0}, {"aggression_level": "高"}, {"logic_relevance": "弱"}),
             ({"emotion_score": 6.0}, {"aggression_level": "低"}, {"logic_relevance": "弱"}),
@@ -190,7 +193,7 @@ class TestTieringAndWeights(unittest.TestCase):
         self.addCleanup(os.remove, extra)
         os.environ["RUMOR_RULES_EXTRA_PATH"] = str(extra)
         import importlib
-        from rumor_agent import verdict
+        from mylocalai.rumor import verdict
         importlib.reload(verdict)
         try:
             emo = {"emotion_score": 9.0}

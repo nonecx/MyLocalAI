@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""attn_agent.deep_read 离线测试：不联网、不调用大模型。
+"""mylocalai.attention.deep_read 离线测试：不联网、不调用大模型。
 
 覆盖三件事：
   1. 触发判定必须由确定性代码决定（deep_read_triggered），解读文本不改动任何分数
@@ -19,8 +19,8 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from attn_agent import attention as A  # noqa: E402
-from attn_agent import deep_read as D  # noqa: E402
+from mylocalai.attention import attention as A# noqa: E402
+from mylocalai.attention import deep_read as D# noqa: E402
 
 
 def detail_of(x, y, z):
@@ -80,7 +80,7 @@ class TestLlmPath(unittest.TestCase):
             "uncertainty": [],
         }, ensure_ascii=False)
         evidence = [{"text": f"发言{i}", "stance": "质疑"} for i in range(12)]
-        with mock.patch("shared_core.llm_client.chat_text", return_value=(good, "")):
+        with mock.patch("mylocalai.llm.llm_client.chat_text", return_value=(good, "")):
             r = D.deep_read("某话题", detail_of(1000, 1e8, 1e6), use_llm=True,
                             evidence=evidence)
         self.assertTrue(r["triggered"])
@@ -92,7 +92,7 @@ class TestLlmPath(unittest.TestCase):
 
     def test_llm_free_text_is_not_trusted(self):
         """模型返回自由文本（非 JSON）时必须走模板回退，不能把自由发挥当解读。"""
-        with mock.patch("shared_core.llm_client.chat_text",
+        with mock.patch("mylocalai.llm.llm_client.chat_text",
                         return_value=("一、为什么关注\n因为与就业相关。", "")):
             r = D.deep_read("某话题", detail_of(1000, 1e8, 1e6), use_llm=True)
         self.assertTrue(r["triggered"])
@@ -101,7 +101,7 @@ class TestLlmPath(unittest.TestCase):
         self.assertTrue(any("未通过护栏" in w for w in r["warnings"]))
 
     def test_llm_failure_falls_back_to_template(self):
-        with mock.patch("shared_core.llm_client.chat_text",
+        with mock.patch("mylocalai.llm.llm_client.chat_text",
                         return_value=("", "HTTP 401: Authentication Fails")):
             r = D.deep_read("某话题", detail_of(1000, 1e8, 1e6), use_llm=True)
         self.assertTrue(r["triggered"])
@@ -110,7 +110,7 @@ class TestLlmPath(unittest.TestCase):
         self.assertTrue(any("大模型解读不可用" in w for w in r["warnings"]))
 
     def test_llm_exception_does_not_propagate(self):
-        with mock.patch("shared_core.llm_client.chat_text",
+        with mock.patch("mylocalai.llm.llm_client.chat_text",
                         side_effect=RuntimeError("网络炸了")):
             r = D.deep_read("t", detail_of(1000, 1e8, 1e6), use_llm=True)
         self.assertTrue(r["triggered"])
@@ -124,7 +124,7 @@ class TestLlmPath(unittest.TestCase):
             seen["user"] = user
             return "解读内容", ""
 
-        with mock.patch("shared_core.llm_client.chat_text", side_effect=fake):
+        with mock.patch("mylocalai.llm.llm_client.chat_text", side_effect=fake):
             r = D.deep_read("t", {**detail_of(1000, 1e8, 1e6), "estimated": True},
                             use_llm=True)
         self.assertIn("代理", seen["user"])
@@ -138,7 +138,7 @@ class TestLlmPath(unittest.TestCase):
             seen["system"] = system
             return "x", ""
 
-        with mock.patch("shared_core.llm_client.chat_text", side_effect=fake):
+        with mock.patch("mylocalai.llm.llm_client.chat_text", side_effect=fake):
             D.deep_read("t", detail_of(1000, 1e8, 1e6), use_llm=True)
         for kw in ("不得自创", "张力", "evidence_id", "L1", "L3",
                    "applicable", "counter_reading", "严格 JSON"):
@@ -152,7 +152,7 @@ class TestLlmPath(unittest.TestCase):
             seen["system"] = system
             return "x", ""
 
-        with mock.patch("shared_core.llm_client.chat_text", side_effect=fake):
+        with mock.patch("mylocalai.llm.llm_client.chat_text", side_effect=fake):
             D.deep_read("t", detail_of(1000, 1e8, 1e6), use_llm=True)
         self.assertIn("这反映了社会信任危机", seen["system"])
         self.assertIn("坏在", seen["system"])
@@ -165,7 +165,7 @@ class TestLlmPath(unittest.TestCase):
             seen["user"] = user
             return "x", ""
 
-        with mock.patch("shared_core.llm_client.chat_text", side_effect=fake):
+        with mock.patch("mylocalai.llm.llm_client.chat_text", side_effect=fake):
             D.deep_read("测试话题", detail_of(1000, 1e8, 1e6), use_llm=True)
         self.assertIn("测试话题", seen["user"])
         self.assertIn("关注度 E", seen["user"])

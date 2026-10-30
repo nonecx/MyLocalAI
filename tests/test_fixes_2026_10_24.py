@@ -17,9 +17,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import report_generator  # noqa: E402
-from rumor_agent import evidence as E  # noqa: E402
-from rumor_agent import tiering, verdict  # noqa: E402
+import mylocalai.classic.report as report_generator# noqa: E402
+from mylocalai.rumor import evidence as E
+from mylocalai.core import tiering
+from mylocalai.rumor import verdict
 
 
 EMOTION = {"emotion_score": 6.0, "emotion_tendency": "情绪化宣泄", "keywords": ["气死"]}
