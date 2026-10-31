@@ -9,7 +9,8 @@
   - shingles：字符 k-shingle 的稳定哈希集合（内置 hash() 每进程随机化、落库后跨进程
     不可复现，必须用 blake2b 稳定哈希）；
   - jaccard：两个 shingle 集的 Jaccard 相似度（§6 M3-1 的相似口径）；
-  - best_match：从候选行里挑 Jaccard 最高且达阈值的最佳命中（loop 指纹闸的纯函数核）。
+  - best_match：从候选行里挑 Jaccard 最高且达阈值的最佳命中（参考实现核；生产路径
+    store.find_fingerprints 走同口径 _fp_* 副本——本模块是口径的权威定义与对拍基准）。
 
 注意（依赖方向）：dossier 包禁 import assistant（test_import_rules），dossier/store.py
 的 find_fingerprints 有一份**逐字节同口径**的最小副本（_fp_* 前缀），两处一致性由

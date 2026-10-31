@@ -465,7 +465,8 @@ class TestFingerprintAskAndResolve(LoopTestBase):
         self.assertEqual(out["action"], "verify_claim")
 
     def test_unrelated_reply_after_ask_routes_normally(self):
-        """问句之后用户没表态（说了别的）→ 普通路由，待决保留。"""
+        """问句之后用户没表态（说了别的）→ 普通路由，且待决立即关闭（复核 P2-2：
+        待决只对紧随下一轮生效，防此后任意"重查/秒回"字样被陈年待决劫持）。"""
         self.seed_hit()
         self.run_turn({"route_llm": stub_route("verify_claim", text=VERIFY_TEXT_NEAR),
                        "verify": stub_verify(), "narrate_llm": stub_narrate()},
@@ -475,7 +476,14 @@ class TestFingerprintAskAndResolve(LoopTestBase):
                                "先别管这个，你好")
         self.assertEqual(len(route.calls), 1)
         self.assertEqual(out["action"], "chitchat")
-        self.assertTrue(self.system_notes()[-1]["content"].startswith("[指纹待决]"))
+        self.assertTrue(self.system_notes()[-1]["content"].startswith("[指纹已决]"),
+                        "未表态也必须关闭待决窗口")
+        # 关闭后含"重查"字样的消息不再被旁过：走正常路由且不重查旧档案原文
+        route2 = stub_route("chitchat", reply="好的。")
+        out2, _ = self.run_turn({"route_llm": route2, "narrate_llm": stub_narrate()},
+                                "帮我重查一下档案#1")
+        self.assertEqual(len(route2.calls), 1, "待决关闭后'重查'必须走正常路由")
+        self.assertEqual(out2["action"], "chitchat")
 
     def test_no_hit_normal_verify_unchanged(self):
         """无命中：verify 正常执行建档，result 无 fingerprint_hit，返回键集不变。"""
@@ -668,7 +676,10 @@ class TestRealChapterServices(LoopTestBase):
                                          profile="spec",
                                          proxy_flags=["y_proxy", "z_proxy"])
         svc = self.make_real_loop().services["deep_read"]
-        with mock.patch.object(dr, "deep_read", wraps=dr.deep_read) as spy:
+        real_deep_read = dr.deep_read   # 先取真函数：wraps 桩会遮蔽 inspect 探测（复核 P2-1）
+        supported = "snapshot_history" in inspect.signature(real_deep_read).parameters
+        self.assertTrue(supported, "引擎契约：deep_read 应支持 snapshot_history")
+        with mock.patch.object(dr, "deep_read", wraps=real_deep_read) as spy:
             payload = svc(did, use_llm=False)   # 离线变体：模板回退，零 LLM
             self.assertTrue(payload["triggered"])
             self.assertTrue(payload["text"], "模板回退也有正文，不空转")
@@ -682,9 +693,9 @@ class TestRealChapterServices(LoopTestBase):
             self.assertEqual(kwargs["query"], "自来水被下毒的说法")
             self.assertEqual(kwargs["detail"]["score"], 80.0)
             self.assertEqual(kwargs["detail"]["band"], "高关注")
-            # 规格②：snapshot_history 引擎签名支持（inspect 探测）才传
-            supported = "snapshot_history" in inspect.signature(dr.deep_read).parameters
-            self.assertEqual("snapshot_history" in kwargs, supported)
+            # 规格②（复核 P2-1 改为实断言）：快照历史真传给引擎，e_score 升序提取
+            self.assertIn("snapshot_history", kwargs)
+            self.assertEqual(list(kwargs["snapshot_history"]), [80.0])
             # 规格③：观点章节不存在 → 不传 opinions_signals
             self.assertNotIn("opinions_signals", kwargs)
         # 规格③正向：观点行带结构化信号字段时透传（"有什么取什么"）

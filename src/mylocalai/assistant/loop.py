@@ -25,7 +25,6 @@ error，会话不崩；叙述失败 → 卡片 + 固定模板收尾，**永不�
 
 from __future__ import annotations
 
-import inspect
 import json
 import os
 import re
@@ -313,16 +312,11 @@ def _real_service(name: str, rules: Dict[str, Any],
             #    三键全空不传（空信号不喂给模型当原料）。
             signals = _opinions_signals_from_rows(store.opinions(int(dossier_id)))
             sig_arg: Dict[str, Any] = {"opinions_signals": signals} if any(signals.values()) else {}
-            # ② snapshot_history：并行交付中的引擎参数——按 e_score 序列传（change_rate
-            #    触发判定的原料）。用 inspect.signature 探测：引擎签名已支持才传，
-            #    不支持不传（向后兼容，参数未落地时行为与旧版逐位一致）。
-            hist_arg: Dict[str, Any] = {}
-            try:
-                if "snapshot_history" in inspect.signature(dr.deep_read).parameters:
-                    hist_arg["snapshot_history"] = [
-                        float(s.get("e_score", 0.0) or 0.0) for s in snaps]
-            except Exception:  # noqa: BLE001  签名探测失败按不支持处理
-                hist_arg = {}
+            # ② snapshot_history：e_score 升序序列（change_rate 触发判定的原料）。
+            #    引擎参数已落地（M3-4），恒传——不再用 inspect 探测（探测在测试打桩
+            #    场景会看到 mock 签名而漏传，M3 复核 P2-1）。
+            hist_arg: Dict[str, Any] = {
+                "snapshot_history": [float(s.get("e_score", 0.0) or 0.0) for s in snaps]}
             return dr.deep_read(query=str(row.get("title") or ""), detail=detail,
                                 use_llm=bool(use_llm), profile=profile,
                                 **ev_arg, **sig_arg, **hist_arg)
@@ -749,8 +743,8 @@ class AssistantLoop:
         #     最后一条 system_note）。拒绝预检命中时不旁过（安全闸最优先）。
         plan: Optional[Dict[str, Any]] = None
         skip_fp = False
+        pending = self._pending_fingerprint(session_id)   # 只读探测，拒绝预检仍最优先
         if refusal is None:
-            pending = self._pending_fingerprint(session_id)
             if pending is not None:
                 intent = self._fingerprint_intent(user_text)
                 did = int(pending.get("dossier_id") or 0)
@@ -776,6 +770,17 @@ class AssistantLoop:
             history_hint, last_dossier_id = self._route_context(session_id, history)
             plan = self._route_plan(user_text, history_hint=history_hint,
                                     id_fallback=last_dossier_id)
+
+        if pending is not None and plan.get("kind") != "tools":
+            # 复核修复（M3 P2-2）：待决只对**紧随的下一轮**生效。本回合没有被消费
+            # （没表态/表态但档案已删/拒绝预检命中）→ 立即落 [指纹已决] 关闭劫持窗口——
+            # 否则此后任意含"重查/秒回"字样的消息都会被陈年待决旁过、当前请求被静默
+            # 丢弃。问句与档案卡仍在对话上下文里，用户之后换种说法总能经正常路由
+            # 拿到同样结果。
+            sessions.add_message(session_id, "system_note",
+                                 f"{_FP_RESOLVED_PREFIX} dossier_id="
+                                 f"{int(pending.get('dossier_id') or 0)}"
+                                 f" action=expired", kind="text")
 
         if plan["kind"] == "refusal":
             events.emit("meta", session_id=session_id, run_id=None)

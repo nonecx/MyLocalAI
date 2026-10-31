@@ -45,13 +45,15 @@
 │   │   ├── attn_rules.json / deep_read_rules.json / society_issues.json / prompts.json
 │   │   └── README.md           关注度与深读的完整说明（公式、触发、护栏、隔离）
 │   ├── dossier/                档案库（SQLite 单文件 + WAL）
-│   │   ├── store.py            连接工厂、schema_version 顺序迁移、档案域七表 + 会话域三表
-│   │   └── service.py          建档编排：结论卡片化落库、证据批次、recheck 版本化、章节写入
+│   │   ├── store.py            连接工厂、schema_version 顺序迁移（v3 含谣言库指纹表）、档案域七表 + 会话域三表
+│   │   └── service.py          建档编排：结论卡片化落库、证据批次、recheck 版本化、六章节聚合与导出
 │   ├── assistant/              智能助手核心（对话 → 路由 → 工具 → 叙述 → 落库）
 │   │   ├── loop.py             外层工具循环（事件流、单轮上限、轮预算 CHAT_TURN_DEADLINE_S、取消链）
 │   │   ├── router.py           意图路由（chat_json + 封闭枚举 + 四层防护链，绝不猜）
 │   │   ├── registry.py         工具注册表（schema 校验、权限分级、成本/延迟元数据）
-│   │   ├── tools_verify.py / tools_heat.py / tools_memory.py
+│   │   ├── tools_verify.py / tools_heat.py / tools_memory.py / tools_chapters.py
+│   │   ├── fingerprint.py      话术指纹纯函数（归一化/shingle/Jaccard——谣言库秒回的地基）
+│   │   ├── reminders.py        被动提醒纯函数（档案年龄/热度变化 → 一行提示）
 │   │   ├── context.py          上下文窗口构建器（12k 字符预算、裁剪与摘要）
 │   │   ├── events.py           SSE 事件协议（封闭枚举：meta…done/error）
 │   │   ├── session_store.py    会话域三表读写（sessions/messages/tool_runs）
@@ -294,15 +296,14 @@ python -m mylocalai.cli --attention-online "某段待分析的文本"
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 858 个用例（unittest discover 全量，2026-10-31 M2 实测；M4 起由用例计数自动校验测试守护此数字）：
-M1 前的全部回归（Agent 流程与注入免疫、浏览与 MCP 约束、变异测试、民间观点聚合、
-两轮修复验收、10-22 P0 回归、P1/P2 回归、10-24 复核补修、10-26 关注度、10-29 深读受控生成），
-加上重塑 M1-M2 的新增模块：
-档案库（CRUD/迁移/JSON 往返/并发/持久化）、结论卡片派生与**防污染变异**（LLM 输出进不了打分链）、
-进度回调钩子（不传回调逐位不变守卫）、会话三表、路由四层防护链、助手主循环（事件序列快照/单轮上限/轮预算/取消）、
-工具封装正反例、对话层**注入变异 15 例**（词表/schema/枚举/白名单/纯函数边界/上下文裁剪六层拦截）、
-SSE 端点与断开取消、chat 前端**前后端自洽断言**、MCP 同核对照、端到端（对话→卡片→档案落库→recheck v2）、
-复核修复回归（引擎级协作取消、活跃档案卡路由兜底、import 方向新包覆盖、卡片规则形状校验）。
+离线套件共 976 个用例（unittest discover 全量，2026-10-31 M3 实测；M4 起由用例计数自动校验测试守护此数字）：
+M1-M2 的全部回归（详见 git 历史），加上 M3 新增模块：
+**声明指纹秒回**（归一化+shingle/Jaccard 纯函数、schema v3 谣言库、verify"先问再查"、
+秒回/重查确定性旁过、核查落库自动沉淀——越用越聪明）、attention 趋势线（纯 SVG）与
+**change_rate 触发实现**（同档案快照环比、单快照不触发、不传历史逐位不变守卫）、
+档案库六章节聚合与页面（版本对比/证据批次/观点光谱/背景解读）、Markdown 六章节导出
+（免责语+as_of 页脚+徽章）、被动提醒纯函数（规则外置，打开会话时一行呈现）、
+opinions/deep_read 章节工具（真实引擎集成：护栏证据集=档案证据集、空证据回退、信号接线）。
 另有 `tests/run_module_tests.py`（12 条内置用例全模块跑一遍并落盘）、
 `tests/smoke_api.py`（配置自检 + 连通性）。
 
@@ -363,6 +364,19 @@ SSE 端点与断开取消、chat 前端**前后端自洽断言**、MCP 同核对
   前端 AbortController → SSE 断开 → 协作取消（agent 轮询 cancel_check、judge 四取消位），
   超时/取消都诚实降级、已有卡片照发。
 - **MCP 同期交付**：见下节。
+
+## 记忆与完整性（2026-10-31，M3）
+
+- **谣言库指纹秒回**：每次核查把原文归一化指纹（NFKC+去标点+blake2b shingle）沉淀进
+  `claim_fingerprints` 表；相似说法再次出现时**先问再查**（"查过相似说法，秒回旧结论还是重查？"），
+  绝不擅自断言同一谣言。阈值/ shingle 外置 `assistant_rules.json`。待决问句只对紧随的下一轮生效；
+  "重查"按旧档案原文新建档案（不自动版本化到旧档案——避免擅自断言同一谣言），用户当轮的新措辞
+  可在问句后直接发消息正常核查。
+- **档案库页**：左栏档案入口 → 六章节视图（核查结论版本对比、证据批次、言论土壤、热度趋势
+  SVG、观点光谱、背景解读），缺章如实标 absent。
+- **Markdown 导出**：`GET /api/dossiers/{id}/export?format=md` 六章节+徽章+免责语+as_of 页脚。
+- **被动提醒**：档案年龄/热度变化超阈值时，打开会话以一行浅色提示呈现（规则外置），无推送无打扰。
+- **change_rate 触发**：同一档案的快照序列环比增幅达阈值即触发深读（单快照不触发）。
 
 ## 智能助手 MCP 接入（2026-10-31，M2-9）
 

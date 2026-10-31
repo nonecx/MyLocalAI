@@ -46,7 +46,7 @@ w=(0.2,0.5,0.3), λ=0.7, ε=1e-6`。硬约束：`w_x+w_y+w_z=1`、各权重 `>0`
 | --- | --- |
 | `absolute` | E 严格大于阈值（等于不算） |
 | `quantile` | 同批 Top-K%：当前话题在本批 E 里排进前 K%（K 至少取 1） |
-| `change_rate` | 环比增幅，**预留未实现**，恒不触发 |
+| `change_rate` | 环比增幅（M3-4 实现）：调用方传入同档案快照 e_score 序列（snapshot_history）且规则配置了 change_rate_threshold 时生效；单快照/不传历史恒不触发，回落既有规则 |
 | `any` | absolute 或 quantile 任一满足 |
 
 `by_profile` 可按档位覆盖顶层配置。默认口径：`spec` 档 `absolute`/66（与改造前
