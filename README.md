@@ -335,3 +335,21 @@ python -m mylocalai.cli --attention-online "某段待分析的文本"
 - `docs/opinions_module_spec.md` —— 民间观点聚合模块的规格说明。
 - `src/mylocalai/rumor/README.md` —— 谣言 Agent 的架构、证据本、受控浏览、MCP 与降级行为。
 - `my_website/README.md` —— 展示网站的启动方式与页面功能。
+
+## 智能助手 MCP 接入（2026-10-31，M2-9）
+
+把助手核心（AssistantLoop）暴露成 MCP 工具，与网页端对话共用同一 loop 核心（同核：同一输入得到同一卡片）：
+
+    .venv/Scripts/python.exe -m mylocalai.assistant.mcp_server    # stdio 传输
+
+需要 mcp 包：`pip install mylocalai[mcp]`。暴露三个工具：
+
+- `assistant_chat(message, session_id?)` —— 与助手对话一回合，同步返回结构化 JSON：
+  reply（叙述）/ card（结论卡片载荷，与 web 端卡片事件同形状）/ action / dossier_id /
+  degraded / cost / events（事件名序列）。传回返回值里的 session_id 可延续会话上下文。
+- `assistant_sessions(limit)` —— 列出会话（id 可回传 assistant_chat）。
+- `assistant_dossiers(query?, limit?)` —— 列出核查档案。
+
+口径：助手**不判真假、只述证据**——汇总可核实的证据与来源立场并给出确定性结论卡片，
+真伪裁决留给用户；降级时如实说明，不编造。库路径与网页端同库（data/dossier.db，
+DOSSIER_DB_PATH 可覆盖）。测试：`tests.test_mcp_assistant`（同核对照、工具清单、守护路径）。
