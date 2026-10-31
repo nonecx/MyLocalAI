@@ -25,6 +25,7 @@ error，会话不崩；叙述失败 → 卡片 + 固定模板收尾，**永不�
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import re
@@ -34,9 +35,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from mylocalai.llm import llm_cache
 from mylocalai.assistant import router as router_mod
-from mylocalai.assistant import tools_heat, tools_memory, tools_verify
+from mylocalai.assistant import tools_chapters, tools_heat, tools_memory, tools_verify
 from mylocalai.assistant.context import build_context
 from mylocalai.assistant.events import EventStream
+from mylocalai.assistant.fingerprint import DEFAULT_SHINGLE_SIZE
 from mylocalai.assistant.registry import MAX_TEXT_LENGTH, ToolRegistry
 
 __all__ = ["AssistantLoop"]
@@ -46,6 +48,14 @@ _SENTENCE_RE = re.compile(r"[^。！？!?…\n]*[。！？!?…\n]+|[^。！？!
 
 #: 会话摘要落库的前缀（system_note）；下次 build_context 从最近一条取 cached_summary。
 _SUMMARY_PREFIX = "[早期对话摘要]"
+
+#: 指纹待决标记（M3-1"先问再查"，system_note 机器可读前缀）与消费标记。
+#: 待决：上一回合以指纹问句收尾，等用户"秒回/重查"表态；已决：表态已消费，
+#: 防止几轮之后用户随口说"重查"误触发陈年待决（见 _pending_fingerprint）。
+_FP_PENDING_PREFIX = "[指纹待决]"
+_FP_RESOLVED_PREFIX = "[指纹已决]"
+#: 待决标记的解析式：dossier_id=<正整数> score=<小数>（_fingerprint_ask_turn 落库）。
+_FP_PENDING_RE = re.compile(r"dossier_id=(\d+)(?:.*?score=([0-9.]+))?", re.S)
 
 #: 工具 → 卡片类型（card 事件的 card_type；web cards.js 按它分发渲染器）。
 _CARD_TYPE = {
@@ -70,30 +80,99 @@ def _split_sentences(text: str) -> List[str]:
     return parts or ([str(text)] if str(text or "").strip() else [])
 
 
+def _safe_format(tpl: Any, fallback: str, **kwargs: Any) -> str:
+    """外置文案模板的安全 format：模板写坏/缺键退 fallback，不让文案挡业务。"""
+    try:
+        return str(tpl or "").format(**kwargs)
+    except Exception:  # noqa: BLE001  KeyError/IndexError/ValueError 统一兜底
+        return fallback
+
+
+def _opinions_payload(res: Any) -> Dict[str, Any]:
+    """opinions 引擎结果 → 章节服务契约 payload（tools_chapters 消费形状）。
+
+    - distribution：按引擎分组的立场计数（{"支持": n, "反驳": m}，来自证据条目的
+      既有立场判定，不新打分）；未触发时为 {}；
+    - summary：各侧可信度 Top1 论据的一行要点（无论据如实空串，不编）；
+    - degraded：引擎的降级记录**列表**原样透传（handler 对 bool/list 两种形状都认）；
+    - triggered/skip_reason/group_mode 原样带出（未触发的"为什么"要能落库）。
+    永不抛：引擎结果形状坏按"未触发+降级"处理。
+    """
+    if not isinstance(res, dict):
+        return {"triggered": False, "skip_reason": "观点分析引擎无输出",
+                "distribution": {}, "summary": "", "degraded": True}
+    distribution = {str(side): len(urls or [])
+                    for side, urls in (res.get("groups") or {}).items()
+                    if isinstance(urls, list)}
+    parts: List[str] = []
+    for side, grp in (res.get("per_group") or {}).items():
+        cred = (grp or {}).get("credibility") if isinstance(grp, dict) else None
+        for item in (cred or [])[:1]:
+            arg = str((item or {}).get("argument") or "").strip()
+            if arg:
+                level = str((item or {}).get("level") or "").strip()
+                parts.append(f"{side}方主要说法：{arg[:60]}"
+                             + (f"（可信度{level}）" if level else ""))
+    return {"triggered": bool(res.get("triggered")),
+            "skip_reason": str(res.get("skip_reason") or ""),
+            "group_mode": str(res.get("group_mode") or ""),
+            "distribution": distribution,
+            "summary": "；".join(parts),
+            "degraded": list(res.get("degraded") or []),
+            "error": res.get("error")}
+
+
+def _opinions_signals_from_rows(rows: Any) -> Dict[str, List[str]]:
+    """已存观点章节行 → 深读的 opinions_signals（规格③："形状按 opinions payload 有什么取什么"）。
+
+    三键与 deep_read prompt 的消费键对齐（appeals/attribution_targets/action_tendencies）。
+    当前章节存储只保留 distribution/summary/degraded 三列（record_opinions 契约），
+    诉求/归因/行动倾向没有专列——按"有什么取什么"：行里出现同名字段（list[str]）就
+    透传（前向兼容未来加列），没有就空列表。三键恒在；全空的 signals 不传（调用方
+    用 any(signals.values()) 判断），避免把空信号当原料喂给模型（空列表在 deep_read
+    prompt 侧也会被跳过）。
+    """
+    signals: Dict[str, List[str]] = {key: [] for key in
+                                     ("appeals", "attribution_targets", "action_tendencies")}
+    latest = rows[-1] if rows else None
+    for key in signals:
+        value = (latest or {}).get(key) if isinstance(latest, dict) else None
+        if isinstance(value, list):
+            # 只收非空字符串（prompt 原料；数字/None 等脏值按"没有"处理，不 str 硬转）
+            signals[key] = [v for v in value if isinstance(v, str) and v.strip()]
+    return signals
+
+
 class _ServiceBox:
     """服务注入盒（编排者契约）：注入优先，缺省键惰性 import 真实引擎。
 
     测试只注入 stub（全离线）；生产构造 AssistantLoop() 时不 import 任何重引擎，
     首次真正用到某服务才装配。handler 统一经 ctx.services[name] 取服务。
+    owner 是装配本盒的 AssistantLoop：章节类真实服务（opinions/deep_read）要从
+    档案库取 input_text/证据行/快照，经 owner.dossiers 惰性解析（注入优先的
+    同一来源），构造期不触发任何装配。
     """
 
-    def __init__(self, overrides: Optional[Dict[str, Any]], rules: Dict[str, Any]) -> None:
+    def __init__(self, overrides: Optional[Dict[str, Any]], rules: Dict[str, Any],
+                 owner: Optional["AssistantLoop"] = None) -> None:
         self._over: Dict[str, Any] = dict(overrides or {})
         self._rules = rules or {}
+        self._owner = owner
         self._real: Dict[str, Any] = {}
 
     def __getitem__(self, name: str) -> Callable:
         if name in self._over:
             return self._over[name]
         if name not in self._real:
-            self._real[name] = _real_service(name, self._rules)
+            self._real[name] = _real_service(name, self._rules, self._owner)
         return self._real[name]
 
     def __contains__(self, name: str) -> bool:
         return True  # 所有契约内服务都可取（缺省走真实引擎）
 
 
-def _real_service(name: str, rules: Dict[str, Any]) -> Callable:
+def _real_service(name: str, rules: Dict[str, Any],
+                  owner: Optional["AssistantLoop"] = None) -> Callable:
     """真实引擎的惰性装配（只在生产路径被触发；测试注入 stub 后永不到这里）。"""
     if name == "verify":
         def _verify(text: str, deep: bool = False, on_component_done: Optional[Callable] = None,
@@ -160,6 +239,94 @@ def _real_service(name: str, rules: Dict[str, Any]) -> Callable:
             return {"results": raw.get("results") or [], "engines": engines,
                     "degraded": degraded}
         return _search
+
+    if name == "opinions":
+        def _opinions(dossier_id: int, llm: bool = True) -> Dict[str, Any]:
+            """真实观点光谱服务（§5.2 M3-3，tools_chapters 顶部规格）。
+
+            档案证据行直接组证据本（章节化：证据本复用，不重新采集）→
+            collect_opinion_analysis（检索/取文函数用引擎模块默认，调用期解析，
+            测试可 mock 模块属性）→ 换算成章节服务契约 payload。
+            llm 形参供离线冒烟走 llm=False 变体（handler 走缺省 True 的生产路径）。
+            """
+            from mylocalai.rumor.opinions import collect_opinion_analysis
+            store = owner.dossiers.store
+            row = store.get_dossier(int(dossier_id)) or {}
+            if not row:
+                return {"triggered": False, "skip_reason": f"档案 #{dossier_id} 不存在",
+                        "distribution": {}, "summary": "", "degraded": False}
+            text = str(row.get("input_text") or "")
+            entries = [{"url": r.get("url"), "title": r.get("title"),
+                        "snippet": r.get("snippet"), "stance": r.get("stance"),
+                        "domain_tier": r.get("domain_tier"),
+                        "source_kind": r.get("source_kind")}
+                       for r in store.evidence(int(dossier_id))]
+            book = {"claim": text, "entries": entries}
+            res = collect_opinion_analysis(text, evidence_book=book, llm=bool(llm))
+            return _opinions_payload(res)
+        return _opinions
+
+    if name == "deep_read":
+        def _deep_read(dossier_id: int, use_llm: bool = True) -> Dict[str, Any]:
+            """真实深读服务（§5.2 M3-5；装配顺序 = tools_chapters 顶部《章节化调用方规格》①→④）。
+
+            use_llm 形参供离线冒烟走 use_llm=False 变体（模板回退，handler 走缺省 True）。
+            """
+            from mylocalai.attention import attention as attn
+            from mylocalai.attention import deep_read as dr
+            store = owner.dossiers.store
+            row = store.get_dossier(int(dossier_id)) or {}
+            if not row:
+                return {"triggered": False, "applicable": False, "text": "", "source": "",
+                        "degraded": False, "warnings": [],
+                        "reason": f"档案 #{dossier_id} 不存在，无法做背景解读",
+                        "result": {}, "guard_dropped": []}
+            snaps = store.snapshots(int(dossier_id))
+            latest = snaps[-1] if snaps else None
+            score = float(latest.get("e_score", 0.0) or 0.0) if latest else 0.0
+            try:
+                band = str(attn.classify(score) or "")
+            except Exception:  # noqa: BLE001  档位算不出退空串（attention 语义下最小可用）
+                band = ""
+            # detail：最新快照的 E 分 + x/y/z/profile（有快照如实带全；无快照 score=0.0
+            # 最小可用——未做过热度检查的档案按 E=0 评估，通常如实不触发深读）。
+            detail: Dict[str, Any] = {"score": score, "band": band}
+            profile: Optional[str] = None
+            if latest is not None:
+                detail.update({"x": latest.get("x", 0), "y": latest.get("y", 0),
+                               "z": latest.get("z", 0),
+                               "proxy_flags": latest.get("proxy_flags") or []})
+                profile = str(latest.get("profile") or "") or None
+            # ① 证据本复用：档案证据行按行序编号成受控生成的编号证据；空 snippet 行
+            #    不进编号（空行占号会让 e 引用与正文错位）。
+            evidence = [{"text": str(r.get("snippet") or ""),
+                         "stance": str(r.get("stance") or ""),
+                         "source": str(r.get("domain") or ""),
+                         "title": str(r.get("title") or ""),
+                         "url": str(r.get("url") or "")}
+                        for r in store.evidence(int(dossier_id))
+                        if str(r.get("snippet") or "").strip()]
+            ev_arg: Dict[str, Any] = {"evidence": evidence} if evidence else {}
+            # ④ 空证据本回退：不传 evidence——引擎侧按"未提供编号证据"处理（模型如实
+            #    判 applicable=false，不硬编）；引擎版本内建独立搜索路径时自然走该路径。
+            # ③ opinions_signals：已有观点章节才组装（"有什么取什么"，见辅助函数注释）；
+            #    三键全空不传（空信号不喂给模型当原料）。
+            signals = _opinions_signals_from_rows(store.opinions(int(dossier_id)))
+            sig_arg: Dict[str, Any] = {"opinions_signals": signals} if any(signals.values()) else {}
+            # ② snapshot_history：并行交付中的引擎参数——按 e_score 序列传（change_rate
+            #    触发判定的原料）。用 inspect.signature 探测：引擎签名已支持才传，
+            #    不支持不传（向后兼容，参数未落地时行为与旧版逐位一致）。
+            hist_arg: Dict[str, Any] = {}
+            try:
+                if "snapshot_history" in inspect.signature(dr.deep_read).parameters:
+                    hist_arg["snapshot_history"] = [
+                        float(s.get("e_score", 0.0) or 0.0) for s in snaps]
+            except Exception:  # noqa: BLE001  签名探测失败按不支持处理
+                hist_arg = {}
+            return dr.deep_read(query=str(row.get("title") or ""), detail=detail,
+                                use_llm=bool(use_llm), profile=profile,
+                                **ev_arg, **sig_arg, **hist_arg)
+        return _deep_read
 
     if name == "route_llm":
         cfg = (rules or {}).get("route_model") or {}
@@ -245,6 +412,9 @@ class AssistantLoop:
             tools_verify.register_all(reg, None)
             tools_heat.register_all(reg, None)
             tools_memory.register_all(reg, None)
+            # M3 章节类工具（read_opinions/deep_read，§5.2 M3-3/M3-5）进缺省注册表——
+            # 路由枚举（router.TOOL_ACTIONS）与 allowlist 已同步补两项。
+            tools_chapters.register_all(reg, None)
             self._registry = reg
         return self._registry
 
@@ -265,7 +435,7 @@ class AssistantLoop:
     @property
     def services(self) -> _ServiceBox:
         if self._service_box is None:
-            self._service_box = _ServiceBox(self._services, self.rules)
+            self._service_box = _ServiceBox(self._services, self.rules, owner=self)
         return self._service_box
 
     # ---- 对外主入口 ----
@@ -416,6 +586,143 @@ class AssistantLoop:
             meta = "尚无结论"
         return f"#{int(dossier_id)}《{title}》({meta})"
 
+    # ---- 指纹先问再查（M3-1 首要验收项：谣言库沉淀 + 相似说法秒回） ----
+
+    def _fingerprint_hit(self, plan: Dict[str, Any], rules: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """verify_claim 执行前查指纹库：命中返回最高分行（含 score），未命中/故障返回 None。
+
+        只看首个计划步骤（M2 路由恒单步；多槽位是 M3 预留）：verify_claim 才查——
+        recheck_dossier 是对已有档案的显式重查，用户点名旧档案，无"先问"可言。
+        指纹是增益层：库读失败/规则写坏一律按"不命中"降级，绝不挡正常核查。
+        """
+        steps = plan.get("steps") or []
+        if not steps:
+            return None
+        first = steps[0]
+        if str(first.get("action")) != "verify_claim":
+            return None
+        text = str((first.get("args") or {}).get("text") or "")
+        if not text.strip():
+            return None
+        try:
+            threshold = float(rules.get("fingerprint_threshold", 0.72))
+            k = int((rules.get("fingerprint") or {}).get("shingle_size",
+                                                         DEFAULT_SHINGLE_SIZE))
+            hits = self.dossiers.store.find_fingerprints(text, threshold, k=k)
+        except Exception:  # noqa: BLE001  指纹闸故障 ≠ 核查故障：放行
+            return None
+        return hits[0] if hits else None
+
+    def _fingerprint_ask_turn(self, session_id: int, hit: Dict[str, Any],
+                              events: EventStream, result: Dict[str, Any],
+                              cost: Dict[str, int]) -> None:
+        """指纹命中先问再查的整回合收尾：不执行工具、不建档、零叙述调用。
+
+        回复 = prompts.fingerprint_hit 固定话术（narrative 事件 + 同文落库）；机器可读
+        的待决标记落 system_note（"[指纹待决] dossier_id=<X> score=<s>"）——下一轮
+        _pending_fingerprint 靠它旁过路由。刻意不调 _maybe_summarize：待决标记必须
+        保持为会话最后一条 system_note。事件形状与 refusal/meta 回合同族：
+        meta{run_id=None} → status → narrative* → done。
+        """
+        did = int(hit.get("dossier_id") or 0)
+        score = float(hit.get("score") or 0.0)
+        reply = _safe_format(
+            self.prompts.get("fingerprint_hit"),
+            f"查过相似的说法（档案 #{did}）。秒回旧结论，还是重新查一遍？（回复'秒回'或'重查'）",
+            dossier_id=did, title=self._dossier_title(did), score=score)
+        events.emit("meta", session_id=session_id, run_id=None)
+        events.emit("status", stage="routing")
+        self._say(events, reply)
+        self.sessions.add_message(session_id, "assistant", reply, kind="text")
+        self.sessions.add_message(session_id, "system_note",
+                                  f"{_FP_PENDING_PREFIX} dossier_id={did} score={score:.4f}",
+                                  kind="text")
+        result.update(action="verify_claim", reply=reply)
+        result["fingerprint_hit"] = {"dossier_id": did, "score": score}
+        events.emit("done", cost=cost)
+
+    def _pending_fingerprint(self, session_id: int) -> Optional[Dict[str, Any]]:
+        """下一轮解析（路由前）：会话最后一条 system_note 是指纹待决标记 → 解析出档案。
+
+        只认**最后一条** system_note：其后落了别的 system_note（摘要/已决标记）即视为
+        待决已消费或覆盖，不再旁过。解析失败（标记写坏/无 score）按无待决处理——
+        标记坏了绝不挡路由。返回 {"dossier_id": int, "score": float} 或 None。
+        """
+        try:
+            msgs = self.sessions.messages(session_id)
+        except Exception:  # noqa: BLE001  会话库读失败 → 无待决
+            return None
+        for m in reversed(msgs):
+            if m.get("role") != "system_note":
+                continue
+            content = str(m.get("content") or "")
+            if not content.startswith(_FP_PENDING_PREFIX):
+                return None   # 最后一条 system_note 不是待决（摘要/已决/别的备注）
+            match = _FP_PENDING_RE.search(content)
+            if not match:
+                return None
+            try:
+                score = float(match.group(2)) if match.group(2) else 0.0
+            except ValueError:
+                score = 0.0
+            return {"dossier_id": int(match.group(1)), "score": score}
+        return None
+
+    @staticmethod
+    def _fingerprint_intent(user_text: str) -> str:
+        """用户对指纹问句的表态：含"秒回"→reuse；含"重查"→recheck；否则 ""（普通路由）。
+
+        刻意只认问句文案里明示的两个词（"回复'秒回'或'重查'"），不做同义词猜测——
+        猜错的代价是查错档案/漏查，多问一句比猜一个强（§5.1 防护链同一哲学）。
+        """
+        t = str(user_text or "")
+        if "秒回" in t:
+            return "reuse"
+        if "重查" in t:
+            return "recheck"
+        return ""
+
+    def _dossier_text(self, dossier_id: int) -> str:
+        """档案原文（"重查"构造 verify_claim 参数用）；读失败/档案没了返回空串。"""
+        try:
+            row = self.dossiers.store.get_dossier(int(dossier_id))
+        except Exception:  # noqa: BLE001
+            return ""
+        return str((row or {}).get("input_text") or "")
+
+    def _dossier_title(self, dossier_id: int) -> str:
+        """档案标题（指纹问句文案用）；读失败/空标题退"档案 #X"占位，不让文案空一块。"""
+        try:
+            row = self.dossiers.store.get_dossier(int(dossier_id))
+        except Exception:  # noqa: BLE001
+            row = None
+        title = str((row or {}).get("title") or "").strip()
+        return title or f"档案 #{int(dossier_id)}"
+
+    def _deposit_fingerprint(self, dossier_id: int, step: Dict[str, Any],
+                             out: Dict[str, Any], rules: Dict[str, Any]) -> None:
+        """核查结论落库成功后沉淀声明指纹（record_analysis 成功后的谣言库积累，§2.5）。
+
+        只认 verify_claim / recheck_dossier 且 out 里 dossier_id+version 都在
+        （version 在 = record_analysis 确实写进了结论，档案可被"秒回"）。verify 的
+        原文取参数 text；recheck 参数只有 id，原文回档案库取。沉淀是纯增益：
+        任何失败静默放过，绝不影响已完成的核查回合。
+        """
+        try:
+            if out.get("dossier_id") is None or out.get("version") is None:
+                return
+            text = str((step.get("args") or {}).get("text") or "")
+            if not text.strip():
+                text = self._dossier_text(int(out["dossier_id"]))
+            if not text.strip():
+                return
+            k = int((rules.get("fingerprint") or {}).get("shingle_size",
+                                                         DEFAULT_SHINGLE_SIZE))
+            self.dossiers.store.add_claim_fingerprint(
+                int(out["dossier_id"]), text, label=str(out.get("label") or ""), k=k)
+        except Exception:  # noqa: BLE001  沉淀失败不影响主流程
+            pass
+
     def _turn(self, session_id: int, user_text: str, events: EventStream,
               cancel_check: Optional[Callable[[], bool]], result: Dict[str, Any]) -> None:
         rules, prompts = self.rules, self.prompts
@@ -426,12 +733,45 @@ class AssistantLoop:
         sessions.add_message(session_id, "user", user_text)
         history = sessions.messages(session_id)
 
-        # ② 拒绝词表预检：注入指令在进路由模型之前就被拦下（§5.6 对话层第一道闸）
+        # ② 拒绝词表预检：注入指令在进路由模型之前就被拦下（§5.6 对话层第一道闸）。
+        #    优先级最高：待决旁过也不豁免拒绝预检。
         refusal = router_mod.pre_refuse(user_text, rules, prompts)
+
+        # ②' 指纹待决解析（M3-1"先问再查"的下一轮，路由前）：上一回合以指纹问句收尾、
+        #     本回合用户表了态——
+        #     含"秒回" → 直接构造 get_dossier(旧档案) 旁过路由 LLM（旧结论秒回，零路由成本）；
+        #     含"重查" → 直接构造 verify_claim(档案原文)，且本回合跳过指纹闸——同文会
+        #                再次命中，不跳过就是"问了又问"死循环；档案已被删 → 放弃旁过，
+        #                落回普通路由；
+        #     没表态   → 普通路由（待决标记保留，用户之后随时可表态）。
+        #     表态被消费时落 "[指纹已决]" system_note：待决标记不再是最末 system_note，
+        #     防止几轮之后用户随口说"重查"误触发陈年待决（_pending_fingerprint 只认
+        #     最后一条 system_note）。拒绝预检命中时不旁过（安全闸最优先）。
+        plan: Optional[Dict[str, Any]] = None
+        skip_fp = False
+        if refusal is None:
+            pending = self._pending_fingerprint(session_id)
+            if pending is not None:
+                intent = self._fingerprint_intent(user_text)
+                did = int(pending.get("dossier_id") or 0)
+                if intent == "reuse" and did > 0:
+                    plan = {"kind": "tools",
+                            "steps": [{"action": "get_dossier", "args": {"id": did}}]}
+                elif intent == "recheck" and did > 0:
+                    text = self._dossier_text(did)
+                    if text:
+                        plan = {"kind": "tools",
+                                "steps": [{"action": "verify_claim", "args": {"text": text}}]}
+                        skip_fp = True   # 用户已表态重查：本回合跳过指纹检查（防死循环）
+                if plan is not None:
+                    sessions.add_message(session_id, "system_note",
+                                         f"{_FP_RESOLVED_PREFIX} dossier_id={did}"
+                                         f" action={intent}", kind="text")
+
         if refusal is not None:
             # 预检是纯词表子串匹配（零 LLM 成本）；拒绝不进路由模型
-            plan: Dict[str, Any] = {"kind": "refusal", "reply": refusal["reply"], "error": ""}
-        else:
+            plan = {"kind": "refusal", "reply": refusal["reply"], "error": ""}
+        elif plan is None:
             cost["requests"] += 1  # 路由模型被咨询一次（失败也算一次尝试，M4 接真实计数）
             history_hint, last_dossier_id = self._route_context(session_id, history)
             plan = self._route_plan(user_text, history_hint=history_hint,
@@ -465,6 +805,23 @@ class AssistantLoop:
             self._maybe_summarize(session_id, cost)
             events.emit("done", cost=cost)
             return
+
+        # ②'' 指纹先问再查（M3-1 首要验收项）：verify_claim 执行前查谣言库相似声明。
+        #    命中且 ask_before_reuse（缺省开）→ 本回合不执行工具不建档：以指纹问句收尾
+        #    （零工具、零叙述调用），待用户下一轮"秒回/重查"表态（见 _pending_fingerprint）。
+        #    ask_before_reuse=False → 不问，直接旁过为 get_dossier 秒回旧结论（自动复用）。
+        #    "重查"构造的回合（skip_fp=True）不进本闸——否则同文再次命中、问了又问。
+        if not skip_fp:
+            hit = self._fingerprint_hit(plan, rules)
+            if hit is not None:
+                if bool((rules.get("fingerprint") or {}).get("ask_before_reuse", True)):
+                    self._fingerprint_ask_turn(session_id, hit, events, result, cost)
+                    return
+                result["fingerprint_hit"] = {
+                    "dossier_id": int(hit.get("dossier_id") or 0),
+                    "score": float(hit.get("score") or 0.0)}
+                plan = {"kind": "tools", "steps": [
+                    {"action": "get_dossier", "args": {"id": int(hit.get("dossier_id") or 0)}}]}
 
         # ③ 工具回合：先 start_run 拿 run_id，meta 永远是第一个事件（run_id 回传给前端绑定）
         max_calls = max(1, int(rules.get("max_tool_calls_per_turn", 2) or 2))
@@ -564,6 +921,12 @@ class AssistantLoop:
             result["degraded"] = bool(result["degraded"] or out.get("degraded")
                                       or status in ("error", "timeout", "degraded"))
             result["tool_run_id"] = run_id
+
+            # ⑤'' 指纹沉淀（M3-1 谣言库，§2.5）：核查结论落库成功后把声明指纹入档——
+            # 下次相似说法命中即可"先问再查"秒回。放在每步收尾处（早于叙述/取消路径），
+            # 结论既已落库，后续取消也不丢这条积累。
+            if str(step["action"]) in ("verify_claim", "recheck_dossier"):
+                self._deposit_fingerprint(int(out.get("dossier_id") or 0), step, out, rules)
 
             if timed_out and not tool_error:
                 # 轮预算在工具执行期间耗尽：已有 card 照发（上方），error 后不再开新工具，

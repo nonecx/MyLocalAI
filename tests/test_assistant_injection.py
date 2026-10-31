@@ -152,6 +152,9 @@ class InjectionTestBase(unittest.TestCase):
         self.dossiers = DossierService(DossierStore(db))
         self.addCleanup(self.dossiers.close)
         self.rules = load_json("assistant_rules.json")
+        # M3-1 指纹闸与本模块无关（本模块验证注入面，不是"先问再查"语义）；
+        # 阈值 >1.0 永不达阈 = 关闸，避免同文本二次核查被指纹拦住干扰断言。
+        self.rules["fingerprint_threshold"] = 1.1
         self.prompts = load_json("prompts.json")
 
     def make_loop(self, services, rules=None):

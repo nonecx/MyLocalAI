@@ -110,6 +110,9 @@ class MCPAssistantTestBase(unittest.TestCase):
         self.dossiers = DossierService(DossierStore(db))
         self.addCleanup(self.dossiers.close)
         self.rules = load_json("assistant_rules.json")
+        # M3-1 指纹闸与本模块的"同核对照"无关；阈值 >1.0 永不达阈 = 关闸，
+        # 避免同文本二次核查被"先问再查"拦住破坏对照断言。
+        self.rules["fingerprint_threshold"] = 1.1
         self.prompts = load_json("prompts.json")
         self.services: dict = {}
         self.server = mcp_mod.create_server(

@@ -18,13 +18,15 @@ import json
 import os
 import sqlite3
 import threading
+import unicodedata
+import hashlib
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 __all__ = ["SCHEMA_VERSION", "DEFAULT_DB_PATH", "connect", "migrate",
            "DossierStore", "default_db_path"]
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 #: 顺序迁移：索引 i 的脚本把库从版本 i 升到 i+1。永不修改已发布的条目，只允许追加。
 MIGRATIONS: List[str] = [
@@ -143,6 +145,21 @@ MIGRATIONS: List[str] = [
     );
     CREATE INDEX IF NOT EXISTS idx_tool_runs_session ON tool_runs(session_id, id);
     """,
+    # v3：声明指纹表（M3-1 谣言库沉淀，§2.5/§6 M3-1）。相似说法"先问再查"的存储面：
+    # 每条已核查声明一行，normalized 是规整声明、shingles 是 k-shingle 稳定哈希的
+    # JSON 数组（写入时算好，比对时直接读，不在 SQL 里算相似度）。
+    # 幂等口径（同 dossier 同 normalized 不重插）由应用层保证（add_claim_fingerprint）。
+    """
+    CREATE TABLE IF NOT EXISTS claim_fingerprints (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        dossier_id  INTEGER NOT NULL REFERENCES dossiers(id) ON DELETE CASCADE,
+        normalized  TEXT NOT NULL DEFAULT '',
+        shingles    TEXT NOT NULL DEFAULT '[]',
+        label       TEXT NOT NULL DEFAULT '',
+        created_at  TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_claim_fp_normalized ON claim_fingerprints(normalized);
+    """,
 ]
 
 
@@ -190,6 +207,78 @@ def _load(raw: Any, default: Any) -> Any:
         return default
 
 
+# ---------------------------------------------------------------------------
+# 声明指纹的最小实现（M3-1 谣言库，§2.5/§6 M3-1）
+# ---------------------------------------------------------------------------
+# 算法与 mylocalai/assistant/fingerprint.py 的 normalize_claim/shingles/jaccard
+# **逐字节同口径**。不能 import：依赖方向禁 dossier → assistant（见
+# tests/test_import_rules.py 的 FORBIDDEN），故在此落一份最小副本；两处一致性由
+# tests/test_fingerprint.py 的对拍用例（TestStoreFingerprintParity）锁定，改动必须两处同步。
+
+#: 引导前缀（剥 rumor 话术包装；**按长度降序**——"据网传"先于"网传"尝试）。
+_FP_LEAD_PREFIXES = tuple(sorted(
+    ("网传", "据网传", "据传", "据说", "听说", "惊爆", "曝"), key=len, reverse=True))
+_FP_MAX_PREFIX_STRIPS = 3
+#: 缺省 shingle 窗口（与 assistant_rules.json 的 fingerprint.shingle_size 同值）。
+FP_DEFAULT_SHINGLE_SIZE = 4
+
+
+def _fp_normalize(text: Any) -> str:
+    """与 assistant.fingerprint.normalize_claim 同口径：NFKC/小写/去标点空白/剥引导前缀。"""
+    try:
+        s = unicodedata.normalize("NFKC", str(text or ""))
+    except Exception:  # noqa: BLE001
+        return ""
+    s = s.lower()
+    s = "".join(ch for ch in s if ch.isalnum())
+    for _ in range(_FP_MAX_PREFIX_STRIPS):
+        stripped = False
+        for prefix in _FP_LEAD_PREFIXES:
+            if s.startswith(prefix) and len(s) > len(prefix):
+                s = s[len(prefix):]
+                stripped = True
+                break
+        if not stripped:
+            break
+    return s
+
+
+def _fp_stable_hash(text: str) -> int:
+    """与 assistant.fingerprint._stable_hash 同口径（blake2b 8B，跨进程稳定）。"""
+    return int.from_bytes(hashlib.blake2b(text.encode("utf-8"), digest_size=8).digest(), "big")
+
+
+def _fp_shingle_hashes(text: str, k: int = FP_DEFAULT_SHINGLE_SIZE) -> frozenset:
+    """与 assistant.fingerprint.shingles 同口径（短文本整串一个 shingle，空文本空集）。"""
+    s = str(text or "")
+    try:
+        k = int(k)
+    except (TypeError, ValueError):
+        k = FP_DEFAULT_SHINGLE_SIZE
+    if k <= 0:
+        k = FP_DEFAULT_SHINGLE_SIZE
+    if not s:
+        return frozenset()
+    if len(s) < k:
+        return frozenset({_fp_stable_hash(s)})
+    return frozenset(_fp_stable_hash(s[i:i + k]) for i in range(len(s) - k + 1))
+
+
+def _fp_jaccard(a: Any, b: Any) -> float:
+    """与 assistant.fingerprint.jaccard 同口径（空集按 0.0，坏输入按 0.0，不抛）。"""
+    try:
+        sa = frozenset(a) if a is not None else frozenset()
+        sb = frozenset(b) if b is not None else frozenset()
+    except TypeError:
+        return 0.0
+    if not sa or not sb:
+        return 0.0
+    union = len(sa | sb)
+    if union == 0:
+        return 0.0
+    return len(sa & sb) / union
+
+
 def migrate(conn: sqlite3.Connection) -> int:
     """把库迁到 SCHEMA_VERSION；返回应用了的迁移数。幂等，可重复调用。"""
     conn.execute("""CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -209,13 +298,15 @@ def migrate(conn: sqlite3.Connection) -> int:
 
 
 class DossierStore:
-    """档案域七表的读写门面。线程安全：内部一把写锁 + 独立连接（WAL 单写者）。
+    """档案域存储的读写门面（七张业务表 + 声明指纹表）。线程安全：内部一把写锁 + 独立连接（WAL 单写者）。
 
     方法分三类：
       - 档案本体：create / get / touch / list / delete
       - 结论（版本化）：add_conclusion（自动取下一版本号）/ conclusions
       - 章节/批次数据：add_evidence / evidence、add_snapshot / snapshots、
         add_opinions / opinions、add_deep_read / deep_reads、add_run / runs
+      - 声明指纹（M3-1 谣言库）：add_claim_fingerprint（幂等沉淀）/
+        find_fingerprints（相似召回）/ claims_for_dossier
     """
 
     def __init__(self, db_path: Optional[os.PathLike | str] = None) -> None:
@@ -423,4 +514,85 @@ class DossierStore:
             d = dict(r)
             d["degraded"] = bool(d["degraded"])
             out.append(d)
+        return out
+
+    # ---- 声明指纹（M3-1 谣言库沉淀；表结构见 MIGRATIONS v3） ----
+
+    def add_claim_fingerprint(self, dossier_id: int, text: str, label: str = "",
+                              k: int = FP_DEFAULT_SHINGLE_SIZE) -> int:
+        """沉淀一条声明指纹（幂等）：同 dossier 同 normalized 不重插，返回行 id。
+
+        调用方（loop）在核查结论落库成功后调用：dossier_id 是承载结论的档案，
+        text 是**原文**（归一化在本方法内做，调用方传原文即可），label 透传结论标签。
+        k 须与写入库的 shingles 口径一致（shingle_size 改动只影响之后新沉淀的行，
+        旧行不迁移——个人库量级下可接受；必要时删档重查会自动重新沉淀）。
+        """
+        normalized = _fp_normalize(text)
+        if not normalized:
+            return 0   # 规整后为空（如纯标点）没有可比对性：如实不沉淀，返回 0
+        shingle_list = sorted(_fp_shingle_hashes(normalized, k))
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT id FROM claim_fingerprints WHERE dossier_id = ? AND normalized = ?",
+                (int(dossier_id), normalized)).fetchone()
+            if row:
+                return int(row["id"])
+            cur = self._conn.execute(
+                "INSERT INTO claim_fingerprints (dossier_id, normalized, shingles, label,"
+                " created_at) VALUES (?, ?, ?, ?, ?)",
+                (int(dossier_id), normalized, _dump(shingle_list), str(label or ""), _now()))
+            return int(cur.lastrowid)
+
+    def find_fingerprints(self, query_text: str, threshold: float, limit: int = 5,
+                          k: int = FP_DEFAULT_SHINGLE_SIZE) -> List[Dict[str, Any]]:
+        """相似声明召回：返回 Jaccard ≥ threshold 的行，按分数降序、最多 limit 条。
+
+        规模假设（注释即契约）：本库是**单机个人档案库**，已核查声明量级在千条以内，
+        全表读出后在内存算 Jaccard 足够（<10ms/千条）；若未来上万条再换倒排索引，
+        不预先建。查询侧归一化/shingle 与写入侧同用 _fp_* 最小副本（对拍锁定）。
+
+        返回行形状：{id, dossier_id, normalized, label, created_at, score}；
+        库故障由调用方处理（本方法不吞异常——调用方的指纹闸对故障按"不命中"降级）。
+        """
+        query_norm = _fp_normalize(query_text)
+        if not query_norm:
+            return []
+        query_shingles = _fp_shingle_hashes(query_norm, k)
+        if not query_shingles:
+            return []
+        th = float(threshold)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, dossier_id, normalized, shingles, label, created_at"
+                " FROM claim_fingerprints").fetchall()
+        hits: List[Dict[str, Any]] = []
+        for r in rows:
+            stored = _load(r["shingles"], [])
+            if not isinstance(stored, list):
+                continue
+            score = _fp_jaccard(query_shingles, stored)
+            if score >= th:
+                hits.append({"id": int(r["id"]), "dossier_id": int(r["dossier_id"]),
+                             "normalized": str(r["normalized"] or ""),
+                             "label": str(r["label"] or ""),
+                             "created_at": str(r["created_at"] or ""),
+                             "score": score})
+        hits.sort(key=lambda h: (-h["score"], h["id"]))
+        return hits[:max(1, int(limit))]
+
+    def claims_for_dossier(self, dossier_id: int) -> List[Dict[str, Any]]:
+        """某档案沉淀过的全部声明指纹（id 升序；shingles 已还原为 list[int]）。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, dossier_id, normalized, shingles, label, created_at"
+                " FROM claim_fingerprints WHERE dossier_id = ? ORDER BY id",
+                (int(dossier_id),)).fetchall()
+        out = []
+        for r in rows:
+            stored = _load(r["shingles"], [])
+            out.append({"id": int(r["id"]), "dossier_id": int(r["dossier_id"]),
+                        "normalized": str(r["normalized"] or ""),
+                        "shingles": stored if isinstance(stored, list) else [],
+                        "label": str(r["label"] or ""),
+                        "created_at": str(r["created_at"] or "")})
         return out
