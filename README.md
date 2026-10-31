@@ -44,7 +44,22 @@
 │   │   ├── deep_read_guard.py  后处理护栏（议题封闭/证据/L3 挂靠/禁词，代码实现）
 │   │   ├── attn_rules.json / deep_read_rules.json / society_issues.json / prompts.json
 │   │   └── README.md           关注度与深读的完整说明（公式、触发、护栏、隔离）
+│   ├── dossier/                档案库（SQLite 单文件 + WAL）
+│   │   ├── store.py            连接工厂、schema_version 顺序迁移、档案域七表 + 会话域三表
+│   │   └── service.py          建档编排：结论卡片化落库、证据批次、recheck 版本化、章节写入
+│   ├── assistant/              智能助手核心（对话 → 路由 → 工具 → 叙述 → 落库）
+│   │   ├── loop.py             外层工具循环（事件流、单轮上限、轮预算 CHAT_TURN_DEADLINE_S、取消链）
+│   │   ├── router.py           意图路由（chat_json + 封闭枚举 + 四层防护链，绝不猜）
+│   │   ├── registry.py         工具注册表（schema 校验、权限分级、成本/延迟元数据）
+│   │   ├── tools_verify.py / tools_heat.py / tools_memory.py
+│   │   ├── context.py          上下文窗口构建器（12k 字符预算、裁剪与摘要）
+│   │   ├── events.py           SSE 事件协议（封闭枚举：meta…done/error）
+│   │   ├── session_store.py    会话域三表读写（sessions/messages/tool_runs）
+│   │   ├── mcp_server.py       助手 MCP（python -m mylocalai.assistant.mcp_server）
+│   │   ├── prompts.json        人设与固定话术——改这里而非改代码
+│   │   └── assistant_rules.json  路由模型/上限/预算/指纹阈值/拒绝词表——改这里而非改代码
 │   ├── web/                    FastAPI 网站 + static/（src/mylocalai/web/app.py）
+│   │   └── static/             app.js（工具模式，契约不变）+ chat.js/cards.js/chat.css（对话 Tab）
 │   ├── util/                   text_safety（代理项规整）/ console_io（stdio 规整）
 │   └── cli.py                  命令行入口（python -m mylocalai.cli）
 ├── my_website/                 启动器（start.bat / start.sh）与说明，实际代码在 src/mylocalai/web/
@@ -54,8 +69,9 @@
 └── archive/                    遗留资产归档区（2026-10-30 清场建立，不入库）
 ```
 
-依赖方向只有一条：`core ← llm ← retrieval ← {classic, rumor, attention} ← web/cli/mcp`；
-classic / rumor / attention 互不 import（`tests/test_import_rules.py` 用 AST 锁定）。
+依赖方向只有一条：`core ← llm ← retrieval ← {classic, rumor, attention} ← {dossier, assistant} ← web/cli/mcp`；
+classic / rumor / attention 互不 import，dossier/assistant 不得被上游反向 import
+（`tests/test_import_rules.py` 用 AST 锁定）。
 
 ## 快速开始
 
@@ -266,14 +282,11 @@ python -m mylocalai.cli --attention-online "某段待分析的文本"
 ## 测试
 
 ```bash
-# 离线测试套件（不消耗 API 配额）
-.venv/Scripts/python.exe -m unittest tests.test_rumor_agent_offline tests.test_browser_mcp \
-    tests.test_mutations tests.test_opinions tests.test_stability_config \
-    tests.test_p0_fixes_2026_10_22 tests.test_prompt_config tests.test_p1p2_fixes_2026_10_23 \
-    tests.test_fixes_2026_10_24 tests.test_attention tests.test_attention_profiles \
-    tests.test_core_judge_attention tests.test_deep_read tests.test_deep_read_stage1 \
-    tests.test_deep_read_controlled tests.test_website_attention \
-    tests.test_import_rules tests.test_llm_gateway
+# 离线测试套件（不消耗 API 配额；全量 discover 一键跑）
+.venv/Scripts/python.exe -X utf8 -m unittest discover -s tests -p "test_*.py"
+
+# 模拟上游闸门（不耗配额，28 条：26 条既有 + 对话轮预算/SSE 取消两条 M2 探针）
+.venv/Scripts/python.exe .tmp/verify-2026-10-22/mock_run.py
 
 # 真实 API 端到端（会消耗配额）
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py
@@ -281,25 +294,15 @@ python -m mylocalai.cli --attention-online "某段待分析的文本"
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 638 个用例：Agent 流程与注入免疫、浏览与 MCP 约束、变异测试（确认约束真被验到）、
-民间观点聚合、两轮修复的验收（可配置口径与档位角色、稳定性护栏、时限与预算继承、
-提供方绑定与备用链路、single-flight 失败共享、并发上限、不可编码输入、无写死路径），
-以及 2026-10-22 检验报告 P0 的回归（配置告警不再被抹掉、关缓存不再连带关掉 single-flight、
-预算下限可配、瞬时故障不再被当成"参数不支持"、read_source 取消后不再抓取、
-空输入 0 次 API 调用、非 UTF-8 控制台规整、/api/health 暴露上游可用性），
-外加 P1/P2 的回归（提供方表/提示词/分层阈值/话术权重外置、三维模块并行、证据本空置信度、
-解释一致性、网站 agent 三维、多进程可观测、Agent 超时对齐、缓存清扫、依赖版本上限、启动脚本），
-以及 10-24 复核补修的回归（报告与结论一致性 + 不一致回退模板 + REPORT_MODE、
-证据本"全被过滤"标记的真实代码路径），
-以及 10-26 关注度模块的回归（公式与独立参考实现逐点对比、开区间边界、
-`python -O` 下边界守卫仍生效、配置写坏退回默认、档位与深读阈值语义、
-话题估参口径与时间短语假阳性、**前后端自洽性**：前端引用的接口路径与元素 id
-必须在后端路由和 HTML 里真实存在），
-以及 10-29 深读受控生成的回归（触发矩阵 absolute/quantile × spec/reachable、
-信号派生与公式逐点一致、议题封闭性、证据覆盖、L3 挂靠、禁词红队、
-`applicable=false` 出口、反方必填、字数上限、**物理隔离**（AST 检查 deep_read
-不 import verdict、深读异常不影响主结论、**LLM 缓存分区端到端验证**）、降级、
-配置告警、向后兼容）。
+离线套件共 858 个用例（unittest discover 全量，2026-10-31 M2 实测；M4 起由用例计数自动校验测试守护此数字）：
+M1 前的全部回归（Agent 流程与注入免疫、浏览与 MCP 约束、变异测试、民间观点聚合、
+两轮修复验收、10-22 P0 回归、P1/P2 回归、10-24 复核补修、10-26 关注度、10-29 深读受控生成），
+加上重塑 M1-M2 的新增模块：
+档案库（CRUD/迁移/JSON 往返/并发/持久化）、结论卡片派生与**防污染变异**（LLM 输出进不了打分链）、
+进度回调钩子（不传回调逐位不变守卫）、会话三表、路由四层防护链、助手主循环（事件序列快照/单轮上限/轮预算/取消）、
+工具封装正反例、对话层**注入变异 15 例**（词表/schema/枚举/白名单/纯函数边界/上下文裁剪六层拦截）、
+SSE 端点与断开取消、chat 前端**前后端自洽断言**、MCP 同核对照、端到端（对话→卡片→档案落库→recheck v2）、
+复核修复回归（引擎级协作取消、活跃档案卡路由兜底、import 方向新包覆盖、卡片规则形状校验）。
 另有 `tests/run_module_tests.py`（12 条内置用例全模块跑一遍并落盘）、
 `tests/smoke_api.py`（配置自检 + 连通性）。
 
@@ -313,8 +316,11 @@ python -m mylocalai.cli --attention-online "某段待分析的文本"
 - **蒸馏实验已归档**：`distill/`（含教师标签测试集）移入 `archive/`，作为 L5 阶段的教师标注源按需重启。
 - **信源名单是人工整理的**：不完整，名单外的好来源会被归为"未知来源"（有意的保守取向）；
   可用增量配置文件补。
-- **演示级部署**：网站监听 127.0.0.1、单进程、无鉴权，历史记录在内存里（重启清空）。
-  多 worker 部署时缓存与历史各自独立（见 `my_website/README.md`）。
+- **演示级部署**：网站监听 127.0.0.1、单进程、无鉴权。对话会话/消息/工具运行与核查档案
+  已持久化到 `data/dossier.db`（SQLite + WAL，重启保留）；`/api/analyze` 的历史记录仍是
+  内存轻模式（重启清空，契约不变）。多 worker 部署时缓存与历史各自独立（见 `my_website/README.md`）。
+- **真实上游冒烟依赖提供方状态**：LongCat 有返回空 content 的前科（2026-10-14 检验报告、
+  2026-10-31 M2 末冒烟复现两次），冒烟失败不代表链路回退——离线套件与 mock 闸门全绿为准。
 
 ## 文档
 
@@ -335,6 +341,28 @@ python -m mylocalai.cli --attention-online "某段待分析的文本"
 - `docs/opinions_module_spec.md` —— 民间观点聚合模块的规格说明。
 - `src/mylocalai/rumor/README.md` —— 谣言 Agent 的架构、证据本、受控浏览、MCP 与降级行为。
 - `my_website/README.md` —— 展示网站的启动方式与页面功能。
+
+## 智能助手（2026-10-31，M2）
+
+网站首页双 Tab，**对话为默认 Tab**：把"这条消息是真的吗"丢进对话框，拿回一张带证据、
+带置信度、带"什么时候该再看一眼"的结论卡片。设计口径见 `docs/工作指导-智能助手重塑-2026-10-30.md`。
+
+- **三档车道**：闲聊/追问（轻）；analyze_speech 言论土壤（快）；verify_claim/recheck 联网核查（慢查 30-120s，
+  先发本地初扫 markers + 组件级进度，绝不允许白屏干等）。
+- **路由四层防护链**：封闭枚举白名单 → 参数 schema 校验 → 工具 allowlist → 权限；任一步失败降级
+  clarify（追问一次），绝不猜；用户消息里的"改分数/删档案/越权"指令一律 refuse，对话层注入由
+  15 个变异用例锁定无效。
+- **卡片三层信息架构**：标签+置信度 → 证据计数/as_of/degraded 徽章 → 证据本前 5 条；
+  卡片永远在叙述之前；叙述失败时以卡片+固定模板收尾，永不丢结论。
+- **结论卡片口径**（全纯函数派生，大模型不参与打分）：label/risk_score（兼容层）+ confidence +
+  evidence_sufficiency（official/unofficial/unknown/total）+ as_of + recheck_conditions +
+  verdict_basis 标记；映射外置在 `config/verdict_rules.json` 的 `card` 段。
+- **持久化**：核查自动建档（结论版本化 v1/v2…、证据按批次、分析运行记录），会话/消息/工具运行
+  落 SQLite；重启后档案与会话都在。删除档案不是助手工具（只有程序内部可达）。
+- **回合预算与取消**：`CHAT_TURN_DEADLINE_S`（默认 180s）经 llm_cache 预算继承进引擎链；
+  前端 AbortController → SSE 断开 → 协作取消（agent 轮询 cancel_check、judge 四取消位），
+  超时/取消都诚实降级、已有卡片照发。
+- **MCP 同期交付**：见下节。
 
 ## 智能助手 MCP 接入（2026-10-31，M2-9）
 
