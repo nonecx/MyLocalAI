@@ -187,7 +187,8 @@ def _analyze_speech(ctx: Any, text: str) -> Dict[str, Any]:
     """analyze_speech：classic judge（言论土壤四档）→ 自动建档。"""
     services = ctx.services
     t0 = time.perf_counter()
-    result = services["speech"](str(text)) or {}
+    result = services["speech"](str(text),
+                                cancel_check=getattr(ctx, "cancel_check", None)) or {}
     duration = time.perf_counter() - t0
     if not isinstance(result, dict):
         result = {}

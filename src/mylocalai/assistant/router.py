@@ -31,6 +31,9 @@ TOOL_ACTIONS = ("verify_claim", "analyze_speech", "check_heat", "compute_heat",
                 "list_dossiers", "get_dossier", "recheck_dossier", "export_card",
                 "search_web")
 
+#: 带 id 参数的工具：缺 id 时允许"本会话最近档案"的确定性兜底（§5.4 ②）。
+_ID_ARG_ACTIONS = ("get_dossier", "recheck_dossier", "export_card")
+
 #: 拒绝原因分类：命中"改/删/越权"类词 → tamper；"批量"类 → bulk；其余 → fabricate。
 _TAMPER_WORDS = ("改", "删", "越权", "提权", "分数", "档案")
 _BULK_WORDS = ("批量",)
@@ -103,7 +106,9 @@ def _clarify(prompts: Dict[str, Any], error: str) -> Dict[str, Any]:
 def route(user_text: Any, registry: ToolRegistry,
           route_llm: Callable[[str, str], Any],
           rules: Optional[Dict[str, Any]],
-          prompts: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+          prompts: Optional[Dict[str, Any]],
+          history_hint: str = "",
+          id_fallback: Optional[int] = None) -> Dict[str, Any]:
     """路由一个用户消息，返回 {"action", "args", "reply", "error"}。
 
     - 工具 action：args 是 registry.validate 规整后的参数（多余键已丢弃）；
@@ -111,6 +116,15 @@ def route(user_text: Any, registry: ToolRegistry,
       （空时 clarify/refuse 用 prompts 固定话术；chitchat 返回空串，由 loop 层走
       narrate_llm 补一句——见 §5.1）；
     - 任何防护链失败 → {"action": "clarify", ...}，绝不猜。
+
+    history_hint（可选，§5.4 ②）：会话背景文本（活跃档案卡 + 最近对话摘要，由
+    loop 层组装）。非空时拼进 route_llm 的 user 文本（"【会话背景】…\\n【用户消息】…"），
+    供路由解析"刚才那条"；为空（缺省）时 user 文本与旧版逐位一致。
+
+    id_fallback（可选，§5.4 ② 确定性兜底）：本会话最近一次 tool_run 的 dossier_id
+    （正整数，由 loop 层给出）。仅当路由产出 get_dossier/recheck_dossier/export_card
+    且**id 参数缺失**时填入它再走正常校验——有则继续，无（None）则照旧 clarify；
+    用户显式给了 id（哪怕非法）绝不替换，除会话最近档案外绝不瞎猜其它数字。
 
     route_llm 的契约是 (system, user) -> (dict|None, err)（chat_json 包装）；本函数
     对它抛异常、返回 None、返回非 dict 一视同仁地降级，保证永不向外抛异常。
@@ -121,10 +135,14 @@ def route(user_text: Any, registry: ToolRegistry,
     # ① 枚举白名单 = allowlist ∪ 元动作（rules 写漏了元动作也不至于把闲聊当工具查）
     enum = set(allowlist) | set(META_ACTIONS)
 
+    user_text_s = str(user_text or "")
+    if history_hint:
+        user_text_s = f"【会话背景】{history_hint}\n【用户消息】{user_text_s}"
+
     obj: Any = None
     err = ""
     try:
-        obj, err = route_llm(_router_system(registry, prompts), str(user_text or ""))
+        obj, err = route_llm(_router_system(registry, prompts), user_text_s)
     except Exception as exc:  # noqa: BLE001  路由模型不可用 → 降级，不让对话崩
         obj, err = None, f"{type(exc).__name__}: {exc}"
 
@@ -143,6 +161,13 @@ def route(user_text: Any, registry: ToolRegistry,
 
     # ② 参数 schema 校验（只保留声明过的键）→ ③ allowlist + 权限检查
     raw_args = {k: v for k, v in obj.items() if k not in ("action", "reply")}
+    if id_fallback is not None and action in _ID_ARG_ACTIONS and "id" not in raw_args:
+        # 确定性兜底（§5.4 ②）："刚才那条再查一遍"没带 id → 填本会话最近档案 id。
+        # 只信 loop 层从会话 tool_runs 里查到的那个正整数，绝不瞎猜其它数字；
+        # 用户显式给了 id（哪怕非法）也绝不替换。
+        fb = id_fallback if isinstance(id_fallback, int) and not isinstance(id_fallback, bool) else 0
+        if fb > 0:
+            raw_args = {**raw_args, "id": fb}
     try:
         clean = registry.validate(action, raw_args)
         registry.check_allowed(action, allowlist=allowlist, write_enabled=True)

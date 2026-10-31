@@ -19,6 +19,9 @@ ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src" / "mylocalai"
 
 # 包 → 禁止出现的内部依赖（mylocalai.<name>）
+# 2026-10-31 复核修复补三行：依赖方向（§4.1）core ← llm ← retrieval ←
+# {classic, rumor, attention} ← {dossier, assistant} ← web/cli/mcp，
+# 因此 assistant 只禁 web、dossier 禁 {web, assistant}、web 是顶层无上游可禁（{}）。
 FORBIDDEN = {
     "mylocalai.core": {"classic", "rumor", "attention", "retrieval", "web", "llm"},
     "mylocalai.config": {"classic", "rumor", "attention", "retrieval", "web", "llm", "core", "util"},
@@ -28,6 +31,9 @@ FORBIDDEN = {
     "mylocalai.classic": {"rumor", "attention"},
     "mylocalai.rumor": {"classic", "attention"},
     "mylocalai.attention": {"classic", "rumor"},
+    "mylocalai.dossier": {"web", "assistant"},
+    "mylocalai.assistant": {"web"},
+    "mylocalai.web": set(),
 }
 
 # 入口适配层豁免： rumor 包内的 cli/mcp/__main__ 是命令行/MCP 入口，

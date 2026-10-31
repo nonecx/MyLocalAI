@@ -108,7 +108,9 @@ def stub_summarize(text="用户核查了自来水下毒的传闻。"):
 
 
 def stub_speech():
-    def _svc(text):
+    # cancel_check：M2 复核修复后 speech 服务契约带引擎协作取消位（真实服务透传 judge）；
+    # stub 只需接受并忽略（离线测试不取消）。
+    def _svc(text, cancel_check=None):
         return {"conclusion": "疑似情绪化谣言", "degraded_components": [],
                 "emotion": {"emotion_tendency": "恐惧", "emotion_score": 8.5, "keywords": []},
                 "attack": {"attack_target": "相关部门", "aggression_level": "中", "attack_type": "指控"},
@@ -490,8 +492,9 @@ class TestToolCallCap(LoopTestBase):
                     "agent_error": "", "llm_turns": 0, "evidence_book": {"entries": []}}
 
         class MultiPlanLoop(AssistantLoop):
-            def _route_plan(self, user_text):
+            def _route_plan(self, user_text, **kwargs):
                 # 模拟 M3 多槽位路由：一轮产出 3 个工具 action
+                # （**kwargs：复核修复后基类签名带 history_hint/id_fallback 透传参数）
                 return {"kind": "tools", "steps": [
                     {"action": "verify_claim", "args": {"text": f"第{i}条"}} for i in range(3)]}
 

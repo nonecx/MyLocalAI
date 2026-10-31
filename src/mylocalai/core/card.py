@@ -39,8 +39,29 @@ _BUILTIN_CARD = {
 _CACHE: Optional[Dict[str, Any]] = None
 
 
+def _card_shape_ok(data: Dict[str, Any]) -> bool:
+    """card 段的形状校验（2026-10-31 复核修复）：合并前把关。
+
+    - confidence_rules 必须是非空 list，且元素均为 dict、都含 "confidence" 键；
+    - recheck 若存在必须是 dict。
+    形状不合法 → 整段弃用退内置默认（与坏 JSON 同一路径）。此前只检查
+    "confidence_rules 非空"就合并：confidence_rules 写成 dict/元素非 dict 时，
+    _confidence 迭代到字符串键后 rule.get 抛 AttributeError（try 只捕
+    TypeError/ValueError），derive_card 会当着调用方的面崩——配置笔误不能炸判定链。
+    """
+    crules = data.get("confidence_rules")
+    if not isinstance(crules, list) or not crules:
+        return False
+    for rule in crules:
+        if not isinstance(rule, dict) or "confidence" not in rule:
+            return False
+    if "recheck" in data and not isinstance(data.get("recheck"), dict):
+        return False
+    return True
+
+
 def _rules() -> Dict[str, Any]:
-    """读 verdict_rules.json 的 card 段（坏配置退回内置默认，不抛异常）。"""
+    """读 verdict_rules.json 的 card 段（坏配置/形状不合法退回内置默认，不抛异常）。"""
     global _CACHE
     if _CACHE is not None:
         return _CACHE
@@ -48,7 +69,7 @@ def _rules() -> Dict[str, Any]:
     try:
         from mylocalai.config import rules as _rules_mod
         data = _rules_mod.load_rules().get("card")
-        if isinstance(data, dict) and data.get("confidence_rules"):
+        if isinstance(data, dict) and data.get("confidence_rules") and _card_shape_ok(data):
             merged = {k: v for k, v in _BUILTIN_CARD.items()}
             merged.update(data)
             rules = merged

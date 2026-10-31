@@ -6,9 +6,11 @@
   确定性代码      —— 谣言标签与风险分（verdict.assess），不受大模型输出或文本内注入影响
 
 运行模式（result["mode"]）：
-  agent     正常：Agent 调度工具并给出解释
-  pipeline  降级：大模型不可用/Agent 报错 → 直接并行跑各组件，用模板写解释
-  timeout   降级：Agent 超过总时限 → 只用已完成的组件出结论，不再补算
+  agent      正常：Agent 调度工具并给出解释
+  pipeline   降级：大模型不可用/Agent 报错 → 直接并行跑各组件，用模板写解释
+  timeout    降级：Agent 超过总时限 → 只用已完成的组件出结论，不再补算
+  cancelled  降级：调用方经 cancel_check 请求取消（§5.3 协作取消）→ 与超时同形：
+             只用已完成的组件出结论，不再补算，也不再开新的组件/LLM 调用
 
 无论哪种模式，analyze() 都不抛异常，并且总会给出结构化结果。
 """
@@ -78,6 +80,20 @@ SYSTEM_PROMPT = (
 
 DEFAULT_DEADLINE_S = 150.0
 DEFAULT_MAX_CHARS = 4000
+
+#: cancel_check 轮询间隔（秒）。主线程等 worker 时按此粒度探测取消请求；
+#: 不传 cancel_check 时仍是单次 done.wait(deadline_s)，行为与原来逐位一致。
+_CANCEL_POLL_S = 0.1
+
+_CANCEL_REASON = "分析已取消（用户中断）"
+
+
+def _cancelled(cancel_check: Optional[Callable[[], bool]]) -> bool:
+    """取消探测：cancel_check 自身抛异常不视为取消（与 loop 层同一口径）。"""
+    try:
+        return bool(cancel_check()) if cancel_check is not None else False
+    except Exception:  # noqa: BLE001  探测失败不误杀分析
+        return False
 
 
 def _template_explanation(v: Dict[str, Any]) -> str:
@@ -173,7 +189,8 @@ class RumorAgent:
         return {"tools_called": called, "llm_turns": turns, "final_text": final}
 
     # ------------------------------------------------------------------ #
-    def _run_with_deadline(self, state: AnalysisState):
+    def _run_with_deadline(self, state: AnalysisState,
+                           cancel_check: Optional[Callable[[], bool]] = None):
         """在后台线程里跑 Agent，主线程最多等 deadline_s 秒。
 
         超时时：
@@ -182,6 +199,10 @@ class RumorAgent:
             ThreadPoolExecutor(max_workers=1) + shutdown(cancel_futures=True)，
             cancel_futures 只取消未启动的任务，不打断正在跑的 future，后台会继续把
             整个工具流水线跑完，进程也要等它）。
+        cancel_check（§5.3 协作取消，可选）：主线程等 worker 的循环里轮询它；
+        命中即 state.cancel() 并提前收尾，返回 (None, "cancelled", 原因)——与超时
+        同一形态，由 analyze() 沿超时路径用已完成组件出降级结论。不传时仍是单次
+        done.wait(deadline_s)，行为逐位不变。
         返回 (trace, mode, error)。
         """
         box: Dict[str, Any] = {}
@@ -200,15 +221,30 @@ class RumorAgent:
         thread = threading.Thread(target=lambda: (worker(), done.set()),
                                   name="rumor-agent", daemon=True)
         thread.start()
-        if not done.wait(timeout=self.deadline_s):
-            state.cancel(f"Agent 超过总时限 {self.deadline_s:g}s")
-            return None, "timeout", f"Agent 超过总时限 {self.deadline_s:g}s"
+        if cancel_check is None:
+            if not done.wait(timeout=self.deadline_s):
+                state.cancel(f"Agent 超过总时限 {self.deadline_s:g}s")
+                return None, "timeout", f"Agent 超过总时限 {self.deadline_s:g}s"
+        else:
+            deadline_at = time.monotonic() + self.deadline_s
+            while not done.wait(timeout=min(_CANCEL_POLL_S, max(self.deadline_s, 0.001))):
+                if _cancelled(cancel_check):
+                    state.cancel(_CANCEL_REASON)
+                    return None, "cancelled", _CANCEL_REASON
+                if time.monotonic() >= deadline_at:
+                    state.cancel(f"Agent 超过总时限 {self.deadline_s:g}s")
+                    return None, "timeout", f"Agent 超过总时限 {self.deadline_s:g}s"
         if box.get("error"):
             return None, "pipeline", box["error"]
         return box.get("trace"), "agent", ""
 
     # ------------------------------------------------------------------ #
-    def analyze(self, text: str) -> Dict[str, Any]:
+    def analyze(self, text: str,
+                cancel_check: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
+        """全链路分析。cancel_check（可选，§5.3 协作取消）：分析期间被轮询，命中即
+        停止开算新组件并提前收尾——返回已完成组件的降级结论（mode="cancelled"）。
+        不传时行为与无此参数时逐位一致。
+        """
         t0 = time.perf_counter()
         # 孤立代理项先规整：它进不了缓存键、也发不出去，留着只会让某个组件抛
         # UnicodeEncodeError（2026-10-15 检验报告发现 12）。
@@ -228,11 +264,13 @@ class RumorAgent:
             if self.llm is None:
                 mode, agent_error = "pipeline", "大模型不可用（未配置密钥或未安装 langchain-openai）"
             else:
-                result, mode, agent_error = self._run_with_deadline(state)
+                result, mode, agent_error = self._run_with_deadline(state, cancel_check)
                 if result is not None:
                     trace = result
 
-            if mode != "timeout":
+            if mode not in ("timeout", "cancelled"):
+                # 超时/取消：不再补算（state 已 cancel，ensure 也拒绝开新组件）——
+                # 只用已完成的组件出降级结论。
                 self._fill_missing(state)
             verdict = compute_verdict(state, allow_compute=False)
 

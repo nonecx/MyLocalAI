@@ -114,16 +114,19 @@ def _real_service(name: str, rules: Dict[str, Any]) -> Callable:
                 on_component_done=on_component_done,
             )
             # 时限继承（§8）：analyze() 内部 deadline_scope(self.deadline_s) 与本线程已设的
-            # 回合预算（handle 的 deadline_scope_at）取 min——轮预算自动收紧引擎预算；
-            # cancel_check：回合级取消在 loop 层收口；引擎内协作取消（AnalysisState.cancel）
-            # 的接线留 M3——analyze() 当前不接受取消回调，此参数按服务契约占位。
-            return agent.analyze(text)
+            # 回合预算（handle 的 deadline_scope_at）取 min——轮预算自动收紧引擎预算。
+            # cancel_check（§5.3 协作取消）：回合级取消在 loop 层收口之外，引擎内协作取消
+            # 经 analyze(cancel_check=...) 接到 AnalysisState.cancel——轮询命中后不再开算
+            # 新组件，analyze 提前返回已完成组件的降级结论（mode="cancelled"）。
+            return agent.analyze(text, cancel_check=cancel_check)
         return _verify
 
     if name == "speech":
-        def _speech(text: str) -> Dict[str, Any]:
+        def _speech(text: str, cancel_check: Optional[Callable] = None) -> Dict[str, Any]:
             from mylocalai.classic.judge import judge
-            return judge(text)
+            # cancel_check（§5.3 协作取消）：judge 在阶段间与边界复核前轮询，命中后
+            # 不再开新的上游调用，已完成阶段如实降级收尾（不抛异常）。
+            return judge(text, cancel_check=cancel_check)
         return _speech
 
     if name == "heat":
@@ -330,19 +333,88 @@ class AssistantLoop:
         except Exception:  # noqa: BLE001  取消探测自身失败不视为取消
             return False
 
-    def _route_plan(self, user_text: str) -> Dict[str, Any]:
+    def _route_plan(self, user_text: str, history_hint: str = "",
+                    id_fallback: Optional[int] = None) -> Dict[str, Any]:
         """路由 → 执行计划（refusal / meta / tools 三种）。
+
+        history_hint/id_fallback（§5.4 ②）：会话背景（活跃档案卡+最近对话摘要）与
+        "本会话最近档案 id"的确定性兜底，透传给 router.route；两者缺省（空/None）
+        时路由行为与旧版逐位一致。
 
         M2 路由恒产出单个工具 action；这里返回"计划列表"的形状是为 M3 指纹
         "先问再查"的第二槽位预留（先秒回旧结论、后台再重查），执行侧已按
         max_tool_calls_per_turn 封顶。
         """
         res = router_mod.route(user_text, self.registry, self.services["route_llm"],
-                               self.rules, self.prompts)
+                               self.rules, self.prompts,
+                               history_hint=history_hint, id_fallback=id_fallback)
         if res["action"] in router_mod.META_ACTIONS:
             return {"kind": "meta", "action": res["action"],
                     "reply": res.get("reply", ""), "error": res.get("error", "")}
         return {"kind": "tools", "steps": [{"action": res["action"], "args": res.get("args", {})}]}
+
+    # ---- 路由上下文（§5.4 ②：活跃档案卡 + 最近对话摘要） ----
+
+    def _route_context(self, session_id: int,
+                       history: List[Dict[str, Any]]) -> Tuple[str, Optional[int]]:
+        """组装路由用的会话背景，返回 (history_hint, 本会话最近档案 id)。
+
+        - 活跃档案卡：最近 tool_runs 里出现过的 dossier_id（去重、取最近 3 个），
+          经档案库取 title + 最新结论 label/as_of，拼成紧凑文本
+          （如 "#3《某消息》(疑似谣言, 2026-10-31T…)"）——"刚才那条"靠它解析；
+        - 最近对话摘要：本回合之前最近 6 条 user/assistant 消息（各截 80 字；
+          kind="card" 的 JSON 载荷不入卡，结论已在档案卡里）。
+        两者皆空 → history_hint 为空串，路由 user 文本与旧版逐位一致。
+        全程只读，任何读取失败都降级为空——背景构建失败绝不挡路由。
+        """
+        parts: List[str] = []
+        last_dossier_id: Optional[int] = None
+        recent_ids: List[int] = []
+        try:
+            runs = self.sessions.runs_for_session(session_id)
+        except Exception:  # noqa: BLE001  会话库读失败 → 无背景可给
+            runs = []
+        for run in reversed(runs):   # 最近优先
+            try:
+                did = int(run.get("dossier_id")) if run.get("dossier_id") is not None else None
+            except (TypeError, ValueError):
+                continue
+            if did is None:
+                continue
+            if last_dossier_id is None:
+                last_dossier_id = did
+            if did not in recent_ids and len(recent_ids) < 3:
+                recent_ids.append(did)
+        cards = [c for c in (self._dossier_card(did) for did in recent_ids) if c]
+        if cards:
+            parts.append("活跃档案：" + "；".join(cards))
+        prior = [m for m in history[:-1] if m.get("role") in ("user", "assistant")
+                 and m.get("kind") != "card"][-6:]
+        if prior:
+            lines = [f"{m.get('role')}: {str(m.get('content') or '')[:80]}" for m in prior]
+            parts.append("最近对话：\n" + "\n".join(lines))
+        return ("\n".join(parts), last_dossier_id)
+
+    def _dossier_card(self, dossier_id: int) -> str:
+        """活跃档案卡的单条紧凑摘要：#3《某消息》(疑似谣言, 2026-10-31T…)。"""
+        try:
+            row = self.dossiers.store.get_dossier(int(dossier_id))
+        except Exception:  # noqa: BLE001  档案读失败 → 这条不进卡
+            return ""
+        if not row:
+            return ""
+        title = str(row.get("title") or "")
+        try:
+            latest = self.dossiers.store.latest_conclusion(int(dossier_id))
+        except Exception:  # noqa: BLE001
+            latest = None
+        if latest:
+            label = str(latest.get("label") or "")
+            as_of = str(latest.get("as_of") or "")
+            meta = f"{label}, {as_of}" if as_of else label
+        else:
+            meta = "尚无结论"
+        return f"#{int(dossier_id)}《{title}》({meta})"
 
     def _turn(self, session_id: int, user_text: str, events: EventStream,
               cancel_check: Optional[Callable[[], bool]], result: Dict[str, Any]) -> None:
@@ -361,7 +433,9 @@ class AssistantLoop:
             plan: Dict[str, Any] = {"kind": "refusal", "reply": refusal["reply"], "error": ""}
         else:
             cost["requests"] += 1  # 路由模型被咨询一次（失败也算一次尝试，M4 接真实计数）
-            plan = self._route_plan(user_text)
+            history_hint, last_dossier_id = self._route_context(session_id, history)
+            plan = self._route_plan(user_text, history_hint=history_hint,
+                                    id_fallback=last_dossier_id)
 
         if plan["kind"] == "refusal":
             events.emit("meta", session_id=session_id, run_id=None)

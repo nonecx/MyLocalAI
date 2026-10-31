@@ -188,6 +188,11 @@ def generate_report(
     return _local_fallback_report(conclusion, emotion_json, attack_json, logic_json, err)
 
 
+#: 判定链协作取消（judge 的 cancel_check 命中）时的本地模板出口：judge 不发起
+#: 报告 LLM 调用、直接取此模板收尾——公开别名，避免同包私有名跨模块引用。
+local_fallback_report = _local_fallback_report
+
+
 # ===========================================================================
 # 兼容旧接口（可选保留）：模板化 ReportGenerator 类
 # ===========================================================================
