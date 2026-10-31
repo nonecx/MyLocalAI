@@ -517,3 +517,360 @@ app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 def index() -> FileResponse:
     """首页（static/index.html）。"""
     return FileResponse(os.path.join(_STATIC_DIR, "index.html"))
+
+
+# ===========================================================================
+# 智能助手对话层（M2）：/api/chat（SSE）+ /api/sessions + /api/dossiers
+# ===========================================================================
+# 依赖方向：web → {assistant, dossier} 的公开服务接口，不直连引擎内部。
+# 助手核心 AssistantLoop（§4.2）由并行工作流开发：web 层只依赖
+# build_assistant_loop() 返回"带 handle(session_id, message, events, cancel_check)
+# 的对象或 None"这一句契约；测试通过 monkeypatch 本模块的工厂函数注入 stub，
+# 与 loop 的落地进度解耦。SSE 事件名/帧格式一律以 assistant.events 为唯一权威。
+
+import asyncio  # noqa: E402
+
+from fastapi import Request  # noqa: E402
+from fastapi.responses import PlainTextResponse, StreamingResponse  # noqa: E402
+
+from mylocalai.assistant.events import (  # noqa: E402
+    EVENT_NAMES as _SSE_EVENT_NAMES,
+    EventStream,
+    format_sse,
+    make_event,
+)
+from mylocalai.assistant.registry import MAX_TEXT_LENGTH as _ASSISTANT_MAX_TEXT_LENGTH  # noqa: E402
+
+#: chat 请求轮里 loop 正常收尾的事件名（events.py 协议：异常出口是 error）。
+_TERMINAL_SSE_EVENTS = ("done", "error")
+
+_SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    # 反向代理/压缩中间层默认会缓冲响应体，SSE 事件必须即时可达，显式关闭
+    "X-Accel-Buffering": "no",
+}
+
+
+def build_assistant_loop():
+    """构造助手核心 AssistantLoop（惰性 import）；未装配/构造失败时返回 None。
+
+    解耦点（编排者钉死）：所有 chat 端点只经本函数取 loop；None 时端点走
+    SSE error{code:"assistant_unavailable"} 降级收尾，绝不 500。loop 落地前
+    import 不到是预期状态；测试 monkeypatch 本函数注入 stub loop。
+    """
+    try:
+        from mylocalai.assistant.loop import AssistantLoop  # 延迟到首请求才加载
+    except Exception:  # noqa: BLE001  loop 未落地 / 依赖缺失 → 降级出口
+        return None
+    try:
+        return AssistantLoop()
+    except Exception as exc:  # noqa: BLE001  构造失败（如配置缺失）同样降级
+        import logging
+        logging.getLogger("mylocalai.web").warning(
+            "AssistantLoop 构造失败: %s: %s", type(exc).__name__, exc)
+        return None
+
+
+# ---- 会话库 / 档案库服务工厂（单例 + 测试注入点） ----
+
+_session_store = None
+_dossier_service = None
+
+
+def get_session_store():
+    """会话库（sessions/messages/tool_runs 三表，与档案域同库）。测试注入点。"""
+    global _session_store
+    if _session_store is None:
+        from mylocalai.assistant.session_store import SessionStore
+        _session_store = SessionStore()
+    return _session_store
+
+
+def get_dossier_service():
+    """档案域服务门面：数据一律经 DossierService/store 读取，不直连引擎。测试注入点。"""
+    global _dossier_service
+    if _dossier_service is None:
+        from mylocalai.dossier.service import DossierService
+        _dossier_service = DossierService()
+    return _dossier_service
+
+
+# ---- 对话（/api/chat，SSE） ----
+
+class ChatRequest(BaseModel):
+    """POST /api/chat 的请求体。session_id 缺省时自动新建会话（meta 事件回传 id）。"""
+    session_id: Optional[int] = None
+    message: str
+
+
+def _validate_chat_message(message: str) -> str:
+    """消息校验：沿用网站现有风格（非空、无代理项、≤8000 字）。
+
+    长度上限单一来源 = assistant.registry.MAX_TEXT_LENGTH（工具参数校验同用此值，
+    改一处两端生效）；模块内 MAX_TEXT_LENGTH 常量仍服务于 /api/analyze 契约。
+    """
+    text = (message or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="输入不能为空")
+    if has_surrogates(text):
+        raise HTTPException(status_code=400,
+                            detail="输入包含无效字符（无法编码的 Unicode 代理项），请检查后重试")
+    if len(text) > _ASSISTANT_MAX_TEXT_LENGTH:
+        raise HTTPException(status_code=400,
+                            detail=f"文本过长（最多 {_ASSISTANT_MAX_TEXT_LENGTH} 字）")
+    return text
+
+
+async def drain_event_stream(events: EventStream, request: Any, worker_done,
+                             poll_interval: float = 0.05):
+    """drain 循环（独立拆出、可单测）：把 EventStream 新增事件逐帧吐成 SSE。
+
+    终止契约（§5.3）：出现 done/error 事件**且**工作线程已结束，二者缺一就继续
+    轮询（done 之后 loop 还可能补写落库，线程收尾前不关流）。
+    断开取消链（§5.3）：客户端断开 → events.request_cancel() 置 cancelled，
+    loop 的 cancel_check 轮询到后协作收工；断开后已无法投递，立即结束本流、
+    不再等待工作线程（线程自身会尽快退出）。
+    """
+    seen = 0
+    while True:
+        try:
+            disconnected = await request.is_disconnected()
+        except Exception:  # noqa: BLE001  断开检测自身失败不吞事件流
+            disconnected = False
+        if disconnected:
+            events.request_cancel()
+            return
+        snapshot = events.snapshot()
+        total = len(snapshot)
+        while seen < total:
+            yield format_sse(snapshot[seen])
+            seen += 1
+        last_name = snapshot[-1]["event"] if snapshot else ""
+        if last_name in _TERMINAL_SSE_EVENTS and worker_done():
+            return
+        if events.cancelled and worker_done():
+            return
+        await asyncio.sleep(poll_interval)
+
+
+def _unavailable_stream(session_id: int):
+    """loop 未装配的降级出口：meta（回传/绑定会话 id）+ error 后收尾。"""
+    async def gen():
+        yield format_sse(make_event("meta", session_id=session_id, run_id=None))
+        yield format_sse(make_event(
+            "error", code="assistant_unavailable", recoverable=True,
+            message="助手核心尚未就绪（AssistantLoop 未装配），本次请求未执行，请稍后重试。"))
+    return gen()
+
+
+@app.post("/api/chat")
+async def chat(req: ChatRequest, request: Request) -> StreamingResponse:
+    """对话端点：SSE 流式返回助手事件（事件名封闭枚举见 mylocalai.assistant.events）。
+
+    流程：校验消息 → 解析/新建会话 → build_assistant_loop() 取助手核心 →
+    工作线程跑 loop.handle(session_id, message, events, cancel_check)，主协程
+    drain_event_stream 轮询 events.snapshot() 吐帧。loop 抛出协议外异常时由
+    web 兜底发 error 收尾，保证流必然终止。
+    """
+    message = _validate_chat_message(req.message)
+    store = get_session_store()
+    if req.session_id is not None:
+        if isinstance(req.session_id, bool) or not isinstance(req.session_id, int) \
+                or req.session_id <= 0:
+            raise HTTPException(status_code=400, detail="session_id 必须是正整数")
+        if store.get_session(int(req.session_id)) is None:
+            raise HTTPException(status_code=404, detail=f"会话不存在: {req.session_id}")
+        session_id = int(req.session_id)
+    else:
+        session_id = store.create_session(title=message[:24])
+
+    loop = build_assistant_loop()
+    if loop is None:
+        return StreamingResponse(_unavailable_stream(session_id),
+                                 media_type="text/event-stream", headers=_SSE_HEADERS)
+
+    events = EventStream()
+    worker_done = threading.Event()
+
+    def _run() -> None:
+        try:
+            loop.handle(session_id, message, events, lambda: events.cancelled)
+        except Exception as exc:  # noqa: BLE001  loop 内部兜底之外的最外层防线
+            try:
+                events.emit("error", code="internal", recoverable=False,
+                            message=f"助手处理异常: {type(exc).__name__}: {exc}")
+            except ValueError:
+                pass  # emit 只接受封闭枚举事件名，这里恒为合法事件，理论到不了
+        finally:
+            worker_done.set()
+
+    threading.Thread(target=_run, name="assistant-chat-turn", daemon=True).start()
+
+    async def gen():
+        try:
+            async for frame in drain_event_stream(events, request, worker_done.is_set):
+                yield frame
+        finally:
+            # 兜底取消：正常结束/断开/异常路径都通知 loop 收工（对已结束的循环无副作用）
+            events.request_cancel()
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers=_SSE_HEADERS)
+
+
+# ---- 会话 API ----
+
+class SessionCreateRequest(BaseModel):
+    """POST /api/sessions 的请求体（可整体省略）。"""
+    title: str = ""
+
+
+@app.get("/api/sessions")
+def sessions_list() -> Dict[str, Any]:
+    """会话列表（未归档，updated_at 倒序，最多 100 条），含 title/updated_at。"""
+    return {"sessions": get_session_store().list_sessions(limit=100)}
+
+
+@app.post("/api/sessions")
+def sessions_create(req: Optional[SessionCreateRequest] = None) -> Dict[str, Any]:
+    """新建会话，返回含 id 的完整会话记录。"""
+    body = req or SessionCreateRequest()
+    title = (body.title or "").strip()
+    if has_surrogates(title):
+        raise HTTPException(status_code=400, detail="标题包含无效字符（无法编码的 Unicode 代理项）")
+    store = get_session_store()
+    return store.get_session(store.create_session(title=title[:100]))
+
+
+@app.get("/api/sessions/{session_id}/messages")
+def session_messages(session_id: str) -> Dict[str, Any]:
+    """会话消息（时间正序）。非法 sid（非正整数/不存在）→ 404。"""
+    store = get_session_store()
+    sid = _parse_path_id(session_id, "会话")
+    if store.get_session(sid) is None:
+        raise HTTPException(status_code=404, detail=f"会话不存在: {sid}")
+    return {"session_id": sid, "messages": store.messages(sid)}
+
+
+def _parse_path_id(raw: str, kind: str) -> int:
+    """路径参数 → 正整数；非法一律 404（契约：非法 sid → 404，而不是 422）。"""
+    try:
+        value = int(str(raw))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=404, detail=f"{kind}不存在: {raw}") from None
+    if value <= 0:
+        raise HTTPException(status_code=404, detail=f"{kind}不存在: {raw}")
+    return value
+
+
+# ---- 档案库 API（M3 档案库页的后端先行） ----
+
+_EXPORT_DISCLAIMER = (
+    "免责声明：本档案由智能助手基于公开网络证据整理生成，只述证据、不判定真假，"
+    "结论仅供参考，最终判断权与事实核查请由用户自行把握。"
+)
+
+
+@app.get("/api/dossiers")
+def dossiers_list(query: str = "", limit: int = 50) -> Dict[str, Any]:
+    """档案列表（updated_at 倒序）。数据只经 DossierService/store 读取。"""
+    return {"dossiers": get_dossier_service().store.list_dossiers(
+        query=query or "", limit=max(1, min(int(limit), 200)))}
+
+
+@app.get("/api/dossiers/{dossier_id}")
+def dossier_detail(dossier_id: str) -> Dict[str, Any]:
+    """档案详情：档案头 + 全版本结论 + 证据批次计数 + 快照计数 + 版本对比（compare_versions）。"""
+    service = get_dossier_service()
+    did = _parse_path_id(dossier_id, "档案")
+    header = service.store.get_dossier(did)
+    if header is None:
+        raise HTTPException(status_code=404, detail=f"档案不存在: {did}")
+    cmp = service.compare_versions(did)
+    return {
+        **header,
+        "conclusions": service.store.conclusions(did),
+        "evidence_batches": cmp["evidence_batches"],
+        "versions": cmp["versions"],
+        "changed": cmp["changed"],
+        "snapshot_count": len(service.store.snapshots(did)),
+    }
+
+
+@app.get("/api/dossiers/{dossier_id}/export")
+def dossier_export(dossier_id: str, format: str = "md") -> PlainTextResponse:
+    """导出档案为 Markdown 文本（含证据截至时间 as_of 与免责语）。目前仅支持 format=md。"""
+    fmt = (format or "md").strip().lower()
+    if fmt != "md":
+        raise HTTPException(status_code=400, detail=f"暂只支持 format=md（收到: {format}）")
+    service = get_dossier_service()
+    did = _parse_path_id(dossier_id, "档案")
+    header = service.store.get_dossier(did)
+    if header is None:
+        raise HTTPException(status_code=404, detail=f"档案不存在: {did}")
+    return PlainTextResponse(_render_dossier_markdown(service, header),
+                             media_type="text/markdown; charset=utf-8")
+
+
+def _render_dossier_markdown(service, header: Dict[str, Any]) -> str:
+    """档案 → Markdown 文本：结论（版本化）+ 证据本 + 热度快照 + 免责页脚。"""
+    did = int(header["id"])
+    conclusions = service.store.conclusions(did)
+    snapshots = service.store.snapshots(did)
+    by_batch: Dict[int, List[Dict[str, Any]]] = {}
+    for e in service.store.evidence(did):
+        by_batch.setdefault(int(e.get("batch", 1)), []).append(e)
+
+    lines: List[str] = [f"# 档案：{header.get('title') or '未命名核查'}", "",
+                        f"- 档案编号：{did}",
+                        f"- 类型：{header.get('input_kind', 'text')}",
+                        f"- 建档时间：{header.get('created_at', '')}",
+                        f"- 最近更新：{header.get('updated_at', '')}",
+                        "", "## 核查结论（版本化）"]
+    if not conclusions:
+        lines += ["", "（暂无结论记录）"]
+    for c in conclusions:
+        risk = c.get("risk_score")
+        risk_txt = f"，风险分 {risk:g}" if isinstance(risk, (int, float)) else ""
+        lines += ["", f"### v{c.get('version')}：{c.get('label') or '（无标签）'}{risk_txt}"]
+        if c.get("confidence"):
+            lines.append(f"- 置信度：{c['confidence']}")
+        suff = c.get("evidence_sufficiency") or {}
+        if suff:
+            merged = {"official": 0, "unofficial": 0, "unknown": 0, "total": 0}
+            merged.update({k: v for k, v in suff.items() if isinstance(v, (int, float))})
+            lines.append("- 证据充分度：官方 {official} / 非官方 {unofficial} / 未知 {unknown}"
+                         "，共 {total} 条".format(**merged))
+        if c.get("as_of"):
+            lines.append(f"- 证据截至（as_of）：{c['as_of']}")
+        for rc in c.get("recheck_conditions") or []:
+            lines.append(f"- 复审条件：{rc}")
+        lines.append("- 结论口径：verdict.assess() 纯函数输出，大模型不参与打分")
+
+    lines += ["", "## 证据本"]
+    if not by_batch:
+        lines += ["", "（无证据记录）"]
+    for batch in sorted(by_batch):
+        lines += ["", f"### 批次 {batch}（{len(by_batch[batch])} 条）"]
+        for e in by_batch[batch]:
+            stance = e.get("stance") or "无关"
+            tier = e.get("source_kind") or e.get("domain_tier") or "未知来源"
+            title = e.get("title") or e.get("url") or "（无标题）"
+            lines.append(f"- [{stance}] {title}（{tier}）")
+            if e.get("url"):
+                lines.append(f"  <{e['url']}>")
+
+    lines += ["", "## 热度快照", ""]
+    if not snapshots:
+        lines.append("（无快照记录）")
+    else:
+        lines.append(f"共 {len(snapshots)} 次快照（E 分为确定性公式输出，y/z 多为代理值）。")
+        for s in snapshots:
+            flags = "、".join(str(f) for f in (s.get("proxy_flags") or []))
+            lines.append(
+                f"- {s.get('taken_at', '')}：x={s.get('x', 0):g} y={s.get('y', 0):g}"
+                f" z={s.get('z', 0):g} E={s.get('e_score', 0):g}"
+                + (f"（代理标记：{flags}）" if flags else ""))
+
+    as_of = next((c["as_of"] for c in reversed(conclusions) if c.get("as_of")), "")
+    lines += ["", "---", f"证据截至：{as_of or '未知'} · {_EXPORT_DISCLAIMER}"]
+    return "\n".join(lines)

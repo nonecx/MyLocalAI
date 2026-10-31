@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>网络言论智能分析系统</title>
   <link rel="stylesheet" href="static/style.css" />
+  <link rel="stylesheet" href="static/chat.css" />
 </head>
 <body>
   <header class="site-header">
@@ -18,7 +19,63 @@
     <span id="apiStatus" class="status-chip checking">服务检查中…</span>
   </header>
 
-  <main class="layout">
+  <!-- ============ 首页双 Tab（M2）：对话为默认 Tab；工具模式 = 原分析页，内容不动 ============ -->
+  <nav class="top-tabs" id="topTabs" role="tablist">
+    <button class="top-tab active" data-tab="chat" type="button">💬 对话</button>
+    <button class="top-tab" data-tab="tools" type="button">🧰 工具模式</button>
+  </nav>
+
+  <!-- ============ 对话 Tab（M2 新增，chat.js 接管） ============ -->
+  <div id="chatTab" class="chat-tab">
+    <main class="chat-layout">
+      <aside class="col-side chat-side">
+        <!-- 会话列表 -->
+        <section class="panel chat-sessions-panel">
+          <div class="panel-head">
+            <h2>💬 会话</h2>
+            <button id="chatNewSession" class="btn-ghost chat-new-btn" type="button">＋ 新建会话</button>
+          </div>
+          <ul id="chatSessionList" class="chat-session-list">
+            <li class="empty">暂无会话，发消息即可自动创建</li>
+          </ul>
+        </section>
+        <!-- 档案库入口（M2 先做简单区块，完整档案库页在 M3） -->
+        <section class="panel chat-dossier-panel">
+          <div class="panel-head">
+            <h2>🗂️ 档案库</h2>
+            <span id="chatDossierCount" class="count-chip">0</span>
+          </div>
+          <ul id="chatDossierList" class="chat-dossier-list">
+            <li class="empty">暂无档案；完成一次核查后自动沉淀</li>
+          </ul>
+          <p class="chat-dossier-hint muted">点开档案查看结论版本与证据截至时间；导出为 Markdown。</p>
+        </section>
+      </aside>
+
+      <!-- 消息流 + 输入区 -->
+      <section class="panel chat-main-panel">
+        <div id="chatMessages" class="chat-messages">
+          <div class="chat-welcome">
+            <h2>把要核查的消息发给我</h2>
+            <p>先给零成本本地初扫，再按需联网取证；结论永远带证据截至时间（as_of）与复审条件，只述证据、不判定真假。</p>
+          </div>
+        </div>
+        <div id="chatError" class="error-box hidden"></div>
+        <div class="chat-composer">
+          <textarea id="chatInput" maxlength="8000" rows="3"
+            placeholder="粘贴一条网络消息、传言或话题……（最多 8000 字，Enter 发送，Shift+Enter 换行）"></textarea>
+          <div class="chat-actions">
+            <span id="chatCharCount" class="chat-char-count">0 / 8000</span>
+            <button id="chatCancelBtn" class="btn-ghost hidden" type="button">✖ 停止</button>
+            <button id="chatSendBtn" class="btn-primary" type="button">发送</button>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- ============ 工具模式 Tab（原分析页，契约不动） ============ -->
+  <main class="layout hidden" id="toolsTab">
     <div class="col-main">
       <!-- 输入区 -->
       <section class="panel">
@@ -165,5 +222,7 @@
   </footer>
 
   <script src="static/app.js"></script>
+  <script src="static/cards.js"></script>
+  <script src="static/chat.js"></script>
 </body>
 </html>
