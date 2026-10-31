@@ -42,6 +42,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -162,6 +163,10 @@ DEEP_READ_FEWSHOT = """\
 # 触发模式的合法取值
 _TRIGGER_MODES: Tuple[str, ...] = ("absolute", "quantile", "change_rate", "any")
 
+# 环比增幅的分母下限：增幅 = (最新 - 前一) / max(前一, CHANGE_RATE_EPSILON)。
+# 前一快照为 0（或为负的脏值）时避免除零；E 本在 (0, 100) 开区间，这里纯防御。
+CHANGE_RATE_EPSILON: float = 1e-9
+
 
 # ---------------------------------------------------------------------------
 # 规则加载（config_loader 复用：整套替换 + 增量覆盖 + 失败退回默认 + 告警）
@@ -255,8 +260,23 @@ def _normalize_rules(data: Any) -> Tuple[Dict[str, Any], List[str]]:
         ratio = 0.1
     trigger["quantile_top_ratio"] = float(ratio)
 
+    # change_rate_threshold：None（未配置，环比判定停用）或非负有限实数。
+    # 写了别的类型/负数时退回 None 并告警——环比是"增幅"口径，负阈值没有语义，
+    # 静默沿用坏值反而会让触发判定说谎。
     change = trigger.get("change_rate_threshold")
-    trigger["change_rate_threshold"] = change
+    if change is None:
+        trigger["change_rate_threshold"] = None
+    elif _is_number(change) and math.isfinite(float(change)):
+        if float(change) < 0:
+            issues.append(f"change_rate_threshold 必须是非负实数（实际 {change!r}），"
+                          f"环比判定已停用")
+            trigger["change_rate_threshold"] = None
+        else:
+            trigger["change_rate_threshold"] = float(change)
+    else:
+        issues.append(f"change_rate_threshold 必须是非负实数或 null（实际 {change!r}），"
+                      f"环比判定已停用")
+        trigger["change_rate_threshold"] = None
 
     by_profile_raw = trigger.get("by_profile")
     by_profile: Dict[str, Any] = {}
@@ -478,8 +498,52 @@ def resolve_trigger_rules(rules: Dict[str, Any], profile: Optional[str]) -> Dict
     return resolved
 
 
+def _change_rate_detail(history: Optional[Sequence[float]],
+                        threshold: Any) -> Dict[str, Any]:
+    """环比增幅评估（**纯函数**，口径诚实、永不抛异常）。
+
+    history 是同档案 e_score 的时序序列（升序=时间正序，调用方决定是否已含当前
+    快照）；**只看最后两个有效数值**：增幅 = (最新 - 前一) / max(前一, ε)。
+
+    返回详情 dict（键固定）：
+        evaluated=False 时 —— {"evaluated", "triggered"(恒 False), "reason"}
+            reason 如实说明停用原因：阈值未配置 / 快照历史不足（<2 条，单快照
+            不触发环比判定）/ 比率非有限（快照数值过于极端）。
+        evaluated=True 时  —— {"evaluated", "triggered", "prev", "latest",
+                               "rate", "threshold"}
+            triggered 指**环比条件本身**（rate >= threshold）是否满足，不是整体
+            深读触发结论；prev/latest/rate 如实记录所用两快照与比率。
+
+    history 中非有限实数（bool/nan/inf/字符串）一律跳过；阈值不是非负有限实数
+    视为未配置（与 _normalize_rules 的口径一致，手搓 rules 也走同一防线）。
+    """
+    if not _is_number(threshold) or not math.isfinite(float(threshold)) \
+            or float(threshold) < 0:
+        return {"evaluated": False, "triggered": False,
+                "reason": "change_rate_threshold 未配置为非负实数，环比判定停用"}
+    values: List[float] = []
+    if isinstance(history, (list, tuple)):
+        for item in history:
+            if _is_number(item) and math.isfinite(float(item)):
+                values.append(float(item))
+    if len(values) < 2:
+        return {"evaluated": False, "triggered": False,
+                "reason": (f"快照历史不足（有效数值 {len(values)} 条，需 ≥2），"
+                           f"单快照不触发环比判定")}
+    prev, latest = values[-2], values[-1]
+    rate = (latest - prev) / max(prev, CHANGE_RATE_EPSILON)
+    if not math.isfinite(rate):
+        return {"evaluated": False, "triggered": False,
+                "reason": "环比比率非有限（快照数值过于极端），环比判定停用",
+                "prev": prev, "latest": latest}
+    return {"evaluated": True, "triggered": bool(rate >= float(threshold)),
+            "prev": prev, "latest": latest, "rate": rate,
+            "threshold": float(threshold)}
+
+
 def should_deep_read(scores: Any, profile: Optional[str] = None,
-                     rules: Optional[Dict[str, Any]] = None) -> bool:
+                     rules: Optional[Dict[str, Any]] = None,
+                     snapshot_history: Optional[Sequence[float]] = None) -> bool:
     """是否触发深读（**纯函数**，不碰 LLM、不联网、可单测）。
 
     参数:
@@ -490,15 +554,22 @@ def should_deep_read(scores: Any, profile: Optional[str] = None,
                      "当前话题在整批里的相对位置"，需要调用方把整批一起传进来。
         profile: 参数档位名（"spec" / "reachable"），决定用哪套触发规则。
         rules:   已加载的规则（`load_rules()` 的输出）。None 时用内置默认。
+        snapshot_history: 同档案 e_score 的时序序列（升序=时间正序），**仅
+                     change_rate / any 模式使用**。None 或有效数值不足 2 条时
+                     change_rate 恒为 False（单快照不触发，回落既有规则）；
+                     传入时不改变 absolute/quantile 的既有判定。
 
     模式:
         absolute   —— E 严格大于阈值（等于不算，与 `attention.deep_read_triggered` 一致）
         quantile   —— 同批 Top-K%：当前话题分数排进前 K%
-        change_rate—— 预留（环比增幅），当前恒为 False
-        any        —— absolute 或 quantile 任一满足
+        change_rate—— 环比增幅：(最新-前一)/max(前一, ε) ≥ change_rate_threshold
+                      （ε=CHANGE_RATE_EPSILON）。阈值未配置为非负实数、或
+                      snapshot_history 不足 2 条时恒为 False。
+        any        —— absolute 或 quantile 或 change_rate 任一满足
 
     行为兼容性保证：profile 为 None / "spec" 且走默认规则时，absolute 模式退化为
-    `score > 66`，与改造前的 `deep_read_triggered(score)` 逐位一致。
+    `score > 66`，与改造前的 `deep_read_triggered(score)` 逐位一致；不传
+    snapshot_history 时 change_rate 不参与，所有既有模式的判定逐位不变。
     """
     if rules is None:
         rules = {"trigger": DEFAULT_TRIGGER_RULES, "deep_read": DEFAULT_DEEP_READ_PARAMS,
@@ -518,7 +589,13 @@ def should_deep_read(scores: Any, profile: Optional[str] = None,
         ratio = float(trigger.get("quantile_top_ratio", 0.1))
         quantile_ok = _in_top_ratio(current, batch, ratio)
 
-    return bool(absolute_ok or quantile_ok)
+    change_rate_ok = False
+    if mode in ("change_rate", "any"):
+        detail = _change_rate_detail(snapshot_history,
+                                     trigger.get("change_rate_threshold"))
+        change_rate_ok = bool(detail.get("triggered"))
+
+    return bool(absolute_ok or quantile_ok or change_rate_ok)
 
 
 def _current_and_batch(scores: Any) -> Tuple[float, List[float]]:
@@ -803,7 +880,8 @@ def deep_read(query: str, detail: Dict[str, Any],
               rules: Optional[Dict[str, Any]] = None,
               rules_path: Optional[str] = None,
               evidence: Optional[Sequence[Dict[str, Any]]] = None,
-              opinions_signals: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+              opinions_signals: Optional[Dict[str, Any]] = None,
+              snapshot_history: Optional[Sequence[float]] = None) -> Dict[str, Any]:
     """对高关注度话题生成解读。
 
     参数:
@@ -817,12 +895,17 @@ def deep_read(query: str, detail: Dict[str, Any],
         rules_path: 规则文件路径（覆盖默认 `deep_read_rules.json`）。
         evidence:  带编号的发言证据列表（受控生成的地基；None 时模型应判不适用）。
         opinions_signals: opinions 模块已产出的诉求/归因对象/行动倾向（可选，不硬依赖）。
+        snapshot_history: 同档案 e_score 的时序序列（升序=时间正序），供 change_rate
+                   / any 模式做环比触发判定。None 或有效数值不足 2 条时环比判定
+                   停用（单快照不触发，回落既有规则）；提供时返回值多一个
+                   "trigger_detail" 键（如实记录环比评估所用两快照与比率），
+                   不提供时返回值与改造前逐键相同。
 
     返回:
         {"triggered": bool, "text": str, "source": "llm"|"template",
          "degraded": bool, "degraded_reason": str, "warnings": [...],
          "signals": {...}, "applicable": bool, "result": {...},
-         "guard_dropped": [...]}
+         "guard_dropped": [...], ["trigger_detail": {"change_rate": {...}}]}
         **永不抛异常**——解读失败不能拖垮主流程。
     """
     # score 读不出来时按 0.0 处理（深读是附加信息，detail 被上游写坏也不能抛）
@@ -844,9 +927,20 @@ def deep_read(query: str, detail: Dict[str, Any],
     mode = trigger.get("mode", "absolute")
     threshold = float(trigger.get("absolute_threshold", 66.0))
 
+    # 环比评估详情（口径诚实）：只要调用方给了快照历史就随返回值如实记录
+    # 所用两快照与比率；未给时不加新键，返回形状与改造前逐键相同（逐位不变守卫）。
+    change_rate_info = _change_rate_detail(snapshot_history,
+                                           trigger.get("change_rate_threshold"))
+
+    def _attach(payload: Dict[str, Any]) -> Dict[str, Any]:
+        if snapshot_history is not None:
+            payload["trigger_detail"] = {"change_rate": dict(change_rate_info)}
+        return payload
+
     judged: Any = detail if batch is None else list(batch) + [detail]
     try:
-        triggered = should_deep_read(judged, profile=profile, rules=rules)
+        triggered = should_deep_read(judged, profile=profile, rules=rules,
+                                     snapshot_history=snapshot_history)
     except Exception as exc:  # noqa: BLE001  触发判定失败时退回绝对阈值口径，不崩
         warnings.append(f"触发判定异常（{type(exc).__name__}: {exc}），已退回绝对阈值口径")
         triggered = _attn.deep_read_triggered(score, threshold)
@@ -855,11 +949,21 @@ def deep_read(query: str, detail: Dict[str, Any],
         if mode == "absolute":
             reason = (f"E={score:.4f} 未超过深读阈值 {threshold:g}"
                       f"（档位 {profile or '默认'}，{mode} 模式），不生成解读")
+        elif mode == "change_rate":
+            if change_rate_info.get("evaluated"):
+                reason = (f"E={score:.4f} 未触发深读（档位 {profile or '默认'}，"
+                          f"change_rate 模式：环比增幅 "
+                          f"{float(change_rate_info.get('rate', 0.0)):.4g} < 阈值 "
+                          f"{float(change_rate_info.get('threshold', 0.0)):g}），不生成解读")
+            else:
+                reason = (f"E={score:.4f} 未触发深读（档位 {profile or '默认'}，"
+                          f"change_rate 模式：{change_rate_info.get('reason') or '环比判定停用'}），"
+                          f"不生成解读")
         else:
             reason = (f"E={score:.4f} 未触发深读（档位 {profile or '默认'}，"
                       f"{mode} 模式，同批 Top {trigger.get('quantile_top_ratio', 0.1):.0%}），"
                       f"不生成解读")
-        return {
+        return _attach({
             "triggered": False,
             "text": "",
             "source": "",
@@ -870,7 +974,7 @@ def deep_read(query: str, detail: Dict[str, Any],
             "applicable": False,
             "result": {},
             "guard_dropped": [],
-        }
+        })
 
     # 代理值提示：y 是平台热度指数/转引值时，解读里必须写明（见 estimate.py）
     data_note = detail.get("data_note") or ""
@@ -881,9 +985,14 @@ def deep_read(query: str, detail: Dict[str, Any],
     signals = _signals_for(detail, profile)
 
     # 模板里的阈值表述随触发模式变化：absolute 模式写"E > 阈值"，
-    # quantile 等相对口径下写"同批 Top K%"——否则模板会谎称一个并不存在的绝对阈值。
+    # change_rate 模式写"环比增幅 ≥ 阈值"，quantile 等相对口径下写"同批 Top K%"
+    # ——否则模板会谎称一个并不存在的绝对阈值。
     if mode == "absolute":
         trigger_note = f"已触发深读阈值（E > {threshold:g}）"
+    elif mode == "change_rate":
+        # 能经 change_rate 触发，说明阈值必已配置（evaluated=True）
+        trigger_note = (f"已触发深读（change_rate 模式：环比增幅 ≥ "
+                        f"{float(change_rate_info.get('threshold', 0.0)):g}）")
     else:
         trigger_note = (f"已触发深读（{mode} 模式：同批 Top "
                         f"{trigger.get('quantile_top_ratio', 0.1):.0%}）")
@@ -921,24 +1030,26 @@ def deep_read(query: str, detail: Dict[str, Any],
             except _guard.GuardRejected as exc:
                 # 整体不合格（schema 坏 / 缺反方 / 标签全丢）→ 走模板回退并说明原因
                 warnings.append(f"深读输出未通过护栏（{exc.reason}），已回退本地模板")
-                return _template_fallback(query, detail, mode, threshold, trigger_note,
-                                          f"模型输出未通过护栏校验：{exc.reason}", warnings)
+                return _attach(_template_fallback(
+                    query, detail, mode, threshold, trigger_note,
+                    f"模型输出未通过护栏校验：{exc.reason}", warnings))
             except Exception as exc:  # noqa: BLE001  护栏自身出错也不能拖垮主流程
                 warnings.append(f"护栏校验异常（{type(exc).__name__}: {exc}），已回退本地模板")
-                return _template_fallback(query, detail, mode, threshold, trigger_note,
-                                          f"护栏校验异常：{type(exc).__name__}", warnings)
+                return _attach(_template_fallback(
+                    query, detail, mode, threshold, trigger_note,
+                    f"护栏校验异常：{type(exc).__name__}", warnings))
 
             if not sanitized.get("applicable"):
                 # 出口：纯情绪/纯事实/证据不足 —— 不为"有输出"而编
                 reason = sanitized.get("reason") or "模型判断该话题不适合做社会议题分析"
-                return {
+                return _attach({
                     "triggered": True, "text": "", "source": "llm",
                     "degraded": False, "warnings": warnings, "reason": reason,
                     "signals": signals, "applicable": False, "result": {},
                     "guard_dropped": [],
                     "profile": profile or _attn.DEFAULT_PROFILE,
                     "trigger_mode": mode,
-                }
+                })
 
             data = sanitized.get("data") or {}
             text = data.get("body") or ""
@@ -946,7 +1057,7 @@ def deep_read(query: str, detail: Dict[str, Any],
                 text = f"{text}\n\n【数据口径提示】{data_note}"
             if sanitized.get("degraded"):
                 warnings.extend(sanitized.get("warnings") or [])
-            return {
+            return _attach({
                 "triggered": True, "text": text, "source": "llm",
                 "degraded": bool(sanitized.get("degraded")),
                 "degraded_reason": ("部分条目被护栏丢弃，详见 guard_dropped"
@@ -956,11 +1067,11 @@ def deep_read(query: str, detail: Dict[str, Any],
                 "guard_dropped": sanitized.get("guard_dropped") or [],
                 "profile": profile or _attn.DEFAULT_PROFILE,
                 "trigger_mode": mode, "trigger_threshold": threshold,
-            }
+            })
         warnings.append(f"大模型解读不可用（{err or '空响应'}），已回退本地模板")
 
-    return _template_fallback(query, detail, mode, threshold, trigger_note,
-                              f"大模型不可用：{llm_error or '未启用'}", warnings)
+    return _attach(_template_fallback(query, detail, mode, threshold, trigger_note,
+                                      f"大模型不可用：{llm_error or '未启用'}", warnings))
 
 
 def _safe_load_issues() -> Tuple[Dict[str, Any], List[str]]:
@@ -1089,6 +1200,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     if trigger["mode"] == "absolute":
         print(f"触发深读：{'是' if result['triggered'] else '否'}"
               f"（绝对阈值 {trigger['absolute_threshold']:g}，严格大于才算）")
+    elif trigger["mode"] == "change_rate":
+        cr = trigger.get("change_rate_threshold")
+        cr_text = f"{float(cr):g}" if _is_number(cr) else "未配置"
+        print(f"触发深读：{'是' if result['triggered'] else '否'}"
+              f"（change_rate 模式：环比增幅 ≥ {cr_text}，需快照历史 ≥2 条；"
+              f"命令行无快照历史，此模式恒不触发）")
     else:
         print(f"触发深读：{'是' if result['triggered'] else '否'}"
               f"（{trigger['mode']} 模式：同批 Top {trigger['quantile_top_ratio']:.0%}）")

@@ -1,10 +1,11 @@
 {
   "_comment": "关注度深读口径外置配置：触发规则 + 受控生成参数 + 护栏禁词。写坏时 attn_agent.deep_read 会退回内置默认并留中文告警，不会崩溃。可用 DEEP_READ_RULES_PATH 整套替换、DEEP_READ_RULES_EXTRA_PATH 增量覆盖（与 rumor_agent / shared_core 的配置加载约定一致）。",
   "trigger": {
-    "_comment": "触发规则。mode 取值：absolute=绝对阈值（E 严格大于阈值）；quantile=同批 Top-K%（当前话题在本批 E 中排进前 K%）；change_rate=预留（环比增幅，暂未实现，恒不触发）；any=absolute 与 quantile 任一满足即触发。by_profile 按参数档位（attn_rules.json 的 profile）覆盖顶层配置，未列出的档位沿用顶层。",
+    "_comment": "触发规则。mode 取值：absolute=绝对阈值（E 严格大于阈值）；quantile=同批 Top-K%（当前话题在本批 E 中排进前 K%）；change_rate=环比增幅（(最新-前一)/max(前一, 1e-9) ≥ change_rate_threshold 时触发；需调用方传入同档案快照历史 snapshot_history，未传或有效数值不足 2 条时恒不触发，单快照回落既有规则）；any=absolute、quantile、change_rate 任一满足即触发。by_profile 按参数档位（attn_rules.json 的 profile）覆盖顶层配置，未列出的档位沿用顶层。",
     "mode": "absolute",
     "absolute_threshold": 66,
     "quantile_top_ratio": 0.1,
+    "_comment_change_rate": "环比增幅阈值：null=不启用 change_rate 触发（默认）；配置为非负实数（如 0.5 表示环比涨 50% 触发）后，配合调用方传入的快照历史生效。",
     "change_rate_threshold": null,
     "by_profile": {
       "spec": {
