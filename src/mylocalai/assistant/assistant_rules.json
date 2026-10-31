@@ -20,6 +20,7 @@
     "trigger_messages": 60
   },
   "max_tool_calls_per_turn": 2,
+  "turn_deadline_s": 180,
   "context_char_budget": 12000,
   "context_recent_messages": 24,
   "fingerprint_threshold": 0.72,
