@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import threading
 import unittest
@@ -210,6 +211,153 @@ class TestPersistenceAndConcurrency(unittest.TestCase):
             store.close()
         finally:
             tmp.cleanup()
+
+
+class TestMarkersStore(unittest.TestCase):
+    """L4 参谋：schema v4 迁移与 dossier_markers 读写（record_markers 一档案一条幂等）。"""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.db = Path(self.tmp.name) / "dossier.db"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    @staticmethod
+    def _scan():
+        """手工构造的 scan_markers 返回形状（确定性，不依赖词表内容）。"""
+        return {
+            "risk_hits": {"source_vague": {"label": "来源模糊", "hits": ["听说"], "points": 10},
+                          "fear_claim": {"label": "恐吓诉求", "hits": ["根本不敢说"], "points": 12}},
+            "credibility_hits": {"official_channel": {"label": "官方渠道线索",
+                                                      "hits": ["gov.cn"], "points": -8}},
+            "marker_points": 22, "credibility_points": -8, "assertion_signal": True,
+        }
+
+    def test_fresh_migrate_reaches_v4_with_markers_table(self):
+        """全新库 migrate：应用 4 段迁移、schema_migrations 记到 v4、
+        dossier_markers 表与唯一索引都在。"""
+        conn = connect(self.db)
+        try:
+            self.assertEqual(migrate(conn), 4)
+            self.assertEqual(SCHEMA_VERSION, 4)
+            self.assertEqual(
+                conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0], 4)
+            names = {r["name"] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            self.assertIn("dossier_markers", names)
+            idx = {r["name"] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'")}
+            self.assertIn("idx_dossier_markers_dossier", idx)
+        finally:
+            conn.close()   # 先关连接再让 tearDown 清临时目录（Windows 文件占用）
+
+    def test_upgrade_from_v3_keeps_history(self):
+        """v3 老库升级路径：手工只跑 MIGRATIONS[0:3] 建库、登记版本 1-3（真实 v3 库
+        的 schema_migrations 状态）并写入历史数据，再 migrate 只补 v4 一段——
+        历史档案与结论原样保留。"""
+        conn = connect(self.db)
+        try:
+            # schema_migrations 由 migrate() 引导创建，不在迁移脚本里——手工补上
+            conn.execute("""CREATE TABLE IF NOT EXISTS schema_migrations (
+                                version    INTEGER PRIMARY KEY,
+                                applied_at TEXT NOT NULL)""")
+            for i, script in enumerate(ds.MIGRATIONS[:3], start=1):
+                with conn:
+                    conn.executescript(script)
+                    conn.execute("INSERT INTO schema_migrations (version, applied_at)"
+                                 " VALUES (?, '2026-10-01T00:00:00+08:00')", (i,))
+            did = conn.execute(
+                "INSERT INTO dossiers (created_at, updated_at, title, input_text)"
+                " VALUES ('2026-10-01T08:00:00+08:00', '2026-10-01T08:00:00+08:00',"
+                " '旧档', '老正文')").lastrowid
+            conn.execute(
+                "INSERT INTO conclusions (dossier_id, version, label, created_at)"
+                " VALUES (?, 1, '疑似谣言', '2026-10-01T08:00:00+08:00')", (did,))
+            self.assertEqual(migrate(conn), 1)      # 只补跑 v4
+            self.assertEqual(
+                conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0], 4)
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM dossiers").fetchone()[0], 1)
+            row = conn.execute("SELECT label FROM conclusions WHERE dossier_id = ?",
+                               (did,)).fetchone()
+            self.assertEqual(row["label"], "疑似谣言")
+        finally:
+            conn.close()
+
+    def test_migrate_twice_is_idempotent(self):
+        """重复 migrate 幂等：第二次返回 0，schema_migrations 仍恰好 4 行。"""
+        conn = connect(self.db)
+        try:
+            self.assertEqual(migrate(conn), 4)
+            self.assertEqual(migrate(conn), 0)
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0], 4)
+        finally:
+            conn.close()
+
+    def test_record_markers_insert_idempotent_and_roundtrip(self):
+        """record_markers：首插 True、二插 False（一档案一条）；risk/credibility hits
+        JSON 读写往返还原、分数原样入库；档案不存在让外键约束自然抛。"""
+        store = DossierStore(self.db)
+        try:
+            did = store.create_dossier("隔夜茶", "听说隔夜茶致癌")
+            self.assertTrue(store.record_markers(did, self._scan()))
+            self.assertFalse(store.record_markers(did, self._scan()))
+            rows = store._conn.execute("SELECT * FROM dossier_markers").fetchall()
+            self.assertEqual(len(rows), 1)
+            row = rows[0]
+            self.assertEqual(row["dossier_id"], did)
+            self.assertEqual(json.loads(row["risk_hits"]), self._scan()["risk_hits"])
+            self.assertEqual(json.loads(row["credibility_hits"]),
+                             self._scan()["credibility_hits"])
+            self.assertEqual(row["marker_points"], 22)
+            self.assertEqual(row["credibility_points"], -8)
+            self.assertTrue(row["created_at"])
+            with self.assertRaises(sqlite_integrity_error()):
+                store.record_markers(424242, self._scan())
+        finally:
+            store.close()
+
+    def test_record_markers_empty_scan_not_inserted(self):
+        """空 scan / 无 risk_hits 键：返回 False 且不落行。"""
+        store = DossierStore(self.db)
+        try:
+            did = store.create_dossier("t", "x")
+            self.assertFalse(store.record_markers(did, {}))
+            self.assertFalse(store.record_markers(did, {"marker_points": 0}))
+            self.assertEqual(
+                store._conn.execute("SELECT COUNT(*) FROM dossier_markers").fetchone()[0], 0)
+        finally:
+            store.close()
+
+    def test_markers_survive_reopen(self):
+        """重开连接（模拟服务重启）：marker 行还在。"""
+        store = DossierStore(self.db)
+        did = store.create_dossier("t", "x")
+        store.record_markers(did, self._scan())
+        store.close()
+        store2 = DossierStore(self.db)
+        try:
+            row = store2._conn.execute(
+                "SELECT marker_points, credibility_points FROM dossier_markers"
+                " WHERE dossier_id = ?", (did,)).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual((row["marker_points"], row["credibility_points"]), (22, -8))
+        finally:
+            store2.close()
+
+    def test_delete_dossier_cascades_markers(self):
+        """删档案级联删 marker 行（外键 ON DELETE CASCADE）。"""
+        store = DossierStore(self.db)
+        try:
+            did = store.create_dossier("t", "x")
+            store.record_markers(did, self._scan())
+            self.assertTrue(store.delete_dossier(did))
+            self.assertEqual(
+                store._conn.execute("SELECT COUNT(*) FROM dossier_markers").fetchone()[0], 0)
+        finally:
+            store.close()
 
 
 if __name__ == "__main__":

@@ -28,6 +28,9 @@
     "shingle_size": 4,
     "ask_before_reuse": true
   },
+  "source_profile": {
+    "min_refutes": 2
+  },
   "tool_allowlist": [
     "verify_claim", "analyze_speech", "check_heat", "compute_heat",
     "list_dossiers", "get_dossier", "recheck_dossier", "export_card",

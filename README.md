@@ -45,8 +45,9 @@
 │   │   ├── attn_rules.json / deep_read_rules.json / society_issues.json / prompts.json
 │   │   └── README.md           关注度与深读的完整说明（公式、触发、护栏、隔离）
 │   ├── dossier/                档案库（SQLite 单文件 + WAL）
-│   │   ├── store.py            连接工厂、schema_version 顺序迁移（v3 含谣言库指纹表）、档案域七表 + 会话域三表
-│   │   └── service.py          建档编排：结论卡片化落库、证据批次、recheck 版本化、六章节聚合与导出
+│   │   ├── store.py            连接工厂、schema_version 顺序迁移（v4 含指纹表+话术标记表）、档案域七表 + 会话域三表
+│   │   ├── service.py          建档编排：结论卡片化落库、证据批次、recheck 版本化、六章节聚合与导出、初扫 markers 沉淀
+│   │   └── insights.py         参谋三聚合纯函数：话术模式库 / 信源画像 / 周报（零 LLM，永不抛）
 │   ├── assistant/              智能助手核心（对话 → 路由 → 工具 → 叙述 → 落库）
 │   │   ├── loop.py             外层工具循环（事件流、单轮上限、轮预算 CHAT_TURN_DEADLINE_S、取消链）
 │   │   ├── router.py           意图路由（chat_json + 封闭枚举 + 四层防护链，绝不猜）
@@ -59,9 +60,9 @@
 │   │   ├── session_store.py    会话域三表读写（sessions/messages/tool_runs）
 │   │   ├── mcp_server.py       助手 MCP（python -m mylocalai.assistant.mcp_server）
 │   │   ├── prompts.json        人设与固定话术——改这里而非改代码
-│   │   └── assistant_rules.json  路由模型/上限/预算/指纹阈值/拒绝词表——改这里而非改代码
+│   │   └── assistant_rules.json  路由模型/上限/预算/指纹阈值/信源画像阈值/拒绝词表——改这里而非改代码
 │   ├── web/                    FastAPI 网站 + static/（src/mylocalai/web/app.py）
-│   │   └── static/             app.js（工具模式，契约不变）+ chat.js/cards.js/chat.css（对话 Tab）
+│   │   └── static/             app.js（工具模式，契约不变）+ chat.js/cards.js/chat.css（对话 Tab）+ insights.js（参谋 Tab）
 │   ├── util/                   text_safety（代理项规整）/ console_io（stdio 规整）
 │   └── cli.py                  命令行入口（python -m mylocalai.cli）
 ├── my_website/                 启动器（start.bat / start.sh）与说明，实际代码在 src/mylocalai/web/
@@ -300,14 +301,17 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 992 个用例（unittest discover 全量，2026-10-31 M4 实测；**M4 起由
+离线套件共 1040 个用例（unittest discover 全量，2026-10-31 L4 实测；**M4 起由
 `tests.test_readme_counts` 自动校验此数字与 mock 闸门条数，改动后须同步回写**）：
 M1-M3 的全部回归（详见 git 历史），加上 M4 新增模块：
 **成本真实计数**（llm_client 进程级计数器：真实上游调用数 + usage tokens，缓存命中/
 single-flight 等待不计、取不到 usage 如实 0；loop 按"段前段后快照 delta"接线进
 done.cost / tool_runs / 档案 analysis_runs，计数面不可用退回粗口径）、
 **README 数字守护**（用例数 / mock 闸门条数 / 引用的测试与文档文件存在性，治文档漂移）、
-web 会话与档案成本汇总端点及前端会话累计徽章的自洽。
+web 会话与档案成本汇总端点及前端会话累计徽章的自洽；
+加上 L4 新增模块：**参谋三聚合**（dossier/insights.py 纯函数 + dossier_markers v4
+沉淀 + 三端点与参谋 Tab 前端自洽）、**信源画像反哺抬分**（collect_evidence
+source_profile 注入：空画像逐位不变守卫、抬分端到端、装配透传）。
 另有 `tests/run_module_tests.py`（12 条内置用例全模块跑一遍并落盘）、
 `tests/smoke_api.py`（配置自检 + 连通性）。
 
@@ -421,3 +425,27 @@ M4 起 `requests/tokens` 是**真实上游用量**，不再是粗口径估算（
 口径：助手**不判真假、只述证据**——汇总可核实的证据与来源立场并给出确定性结论卡片，
 真伪裁决留给用户；降级时如实说明，不编造。库路径与网页端同库（data/dossier.db，
 DOSSIER_DB_PATH 可覆盖）。测试：`tests.test_mcp_assistant`（同核对照、工具清单、守护路径）。
+
+## 参谋与洞察（2026-10-31，L4）
+
+"越用越聪明"（§2.5）的兑现点：三种积累全部 **SQLite 聚合 + 纯函数离线推导，零 LLM 调用**，
+数据只来自你自己的档案库。首页新增第三个 Tab「**参谋**」（默认 Tab 仍是对话），
+三个只读端点：`GET /api/insights/patterns`、`/api/insights/sources`、`/api/insights/weekly?days=7`。
+
+- **话术模式库**：核查落库时把初扫 markers（patterns 六类风险特征 + 三类可信度线索）结构化
+  沉淀进 `dossier_markers` 表（schema v4，一档案一条幂等）；跨档案聚合出"你查过的档案里
+  各话术模式命中多少、最新结论标签分布、常见组合是什么"（`tests.test_insights`）。
+- **信源画像反哺抬分**：按域名聚合证据史（域名从 url 现算，与引擎同口径 normalize）——
+  某域名在你的档案里反复为**已证伪结论**（高风险谣言/疑似谣言）提供反驳证据，默认 ≥2 次
+  （`assistant_rules.json` 的 `source_profile.min_refutes` 可调）即记入个人画像；此后
+  verify/recheck 装配引擎时把画像注入 `collect_evidence(source_profile=…)`，该域名当前的
+  "反驳"条目并入可靠反驳独立域名集合（官方口径不变），stance_summary 增加
+  `profile_refute_domains`/`profile_refute` 标注。**空画像/不传画像时输出与从前逐位不变**（守卫测试锁定）；
+  画像只来自档案库 SQL，LLM 输出没有写画像的通道（`tests.test_source_profile_lift`）。
+- **个人信息环境周报**：按时间窗（默认 7 天，1-90 可调）聚合新档案 / 结论分布 / 分析运行与
+  真实成本（requests/tokens）/ 高频话术 / 辟谣主力域名 / 热度快照 / 指纹沉淀量；无推送无打扰，
+  打开参谋页才算（§2.2 不制造新压力）。
+- 三端点全部只读、聚合函数永不抛；库不可用时降级为 503 或合法空结构（均为诚实降级）；
+  参谋页数据为空显示"暂无数据"。
+  测试：`tests.test_insights_api`（端点 + 前后端自洽）、`tests.test_insights`、
+  `tests.test_source_profile_lift`。

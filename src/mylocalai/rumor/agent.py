@@ -121,6 +121,7 @@ class RumorAgent:
         recursion_limit: int = 10,
         use_default_llm: bool = True,
         on_component_done: Optional[Callable[[str], None]] = None,
+        source_profile: Optional[Dict[str, Dict[str, int]]] = None,
     ) -> None:
         if llm is None and use_default_llm:
             from mylocalai.llm.adapter import build_llm
@@ -132,6 +133,9 @@ class RumorAgent:
         self.recursion_limit = recursion_limit
         # 进度回调透传给每次 analyze 的 AnalysisState（None=不启用，行为不变）
         self.on_component_done = on_component_done
+        # 信源画像（L4 参谋）：透传给每次 analyze 的 AnalysisState（None=不启用，
+        # 行为不变；非空时经默认 evidence 闭包进入 collect_evidence 反哺抬分）
+        self.source_profile = source_profile
 
     # ------------------------------------------------------------------ #
     def _run_agent(self, state: AnalysisState) -> List[Any]:
@@ -254,7 +258,8 @@ class RumorAgent:
         truncated = len(text) > self.max_chars
         text = text[: self.max_chars]
 
-        state = AnalysisState(text, self.funcs, on_component_done=self.on_component_done)
+        state = AnalysisState(text, self.funcs, on_component_done=self.on_component_done,
+                              source_profile=self.source_profile)
         mode, agent_error = "agent", ""
         trace: Dict[str, Any] = {"tools_called": [], "llm_turns": 0, "final_text": ""}
 

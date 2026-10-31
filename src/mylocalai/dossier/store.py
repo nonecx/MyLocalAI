@@ -26,7 +26,7 @@ from typing import Any, Dict, Iterable, List, Optional
 __all__ = ["SCHEMA_VERSION", "DEFAULT_DB_PATH", "connect", "migrate",
            "DossierStore", "default_db_path"]
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 #: 顺序迁移：索引 i 的脚本把库从版本 i 升到 i+1。永不修改已发布的条目，只允许追加。
 MIGRATIONS: List[str] = [
@@ -159,6 +159,21 @@ MIGRATIONS: List[str] = [
         created_at  TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_claim_fp_normalized ON claim_fingerprints(normalized);
+    """,
+    # v4：话术特征 marker 行（L4 参谋）。每档案至多一行（唯一索引），由 record_markers
+    # 以 INSERT OR IGNORE 幂等写入；hits 存 JSON（与库内其他 payload 同口径），
+    # 分数已在 patterns.scan_markers 扫描时算好，入库只存不算——打分零 LLM、纯函数。
+    """
+    CREATE TABLE IF NOT EXISTS dossier_markers (
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        dossier_id         INTEGER NOT NULL REFERENCES dossiers(id) ON DELETE CASCADE,
+        risk_hits          TEXT DEFAULT '{}',
+        credibility_hits   TEXT DEFAULT '{}',
+        marker_points      INTEGER DEFAULT 0,
+        credibility_points INTEGER DEFAULT 0,
+        created_at         TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_dossier_markers_dossier ON dossier_markers(dossier_id);
     """,
 ]
 
@@ -307,6 +322,7 @@ class DossierStore:
         add_opinions / opinions、add_deep_read / deep_reads、add_run / runs
       - 声明指纹（M3-1 谣言库）：add_claim_fingerprint（幂等沉淀）/
         find_fingerprints（相似召回）/ claims_for_dossier
+      - 话术特征（L4 参谋）：record_markers（一档案一行，幂等落 marker 行）
     """
 
     def __init__(self, db_path: Optional[os.PathLike | str] = None) -> None:
@@ -596,3 +612,37 @@ class DossierStore:
                         "label": str(r["label"] or ""),
                         "created_at": str(r["created_at"] or "")})
         return out
+
+    # ---- 话术特征 marker 行（L4 参谋；表结构见 MIGRATIONS v4） ----
+
+    def record_markers(self, dossier_id: int, scan: dict) -> bool:
+        """落一档案的话术特征行（一档案一条，唯一索引幂等）。
+
+        scan 是 patterns.scan_markers 的返回形状：risk_hits/credibility_hits 的内层
+        为 {"label": 中文名, "hits": [...], "points": int}，原样 JSON 序列化存
+        （与库内其他 payload 同口径）；marker_points/credibility_points 是扫描时
+        由纯函数算好的分数，入库只存不算——大模型不参与任何打分。
+
+        返回 True 表示本次插入成功；scan 为空 / 无 risk_hits 键时不插入返回 False；
+        已存在（INSERT OR IGNORE 命中唯一索引）返回 False。dossier_id 不存在时
+        外键约束自然抛 IntegrityError（调用方兜）。
+        """
+        if not isinstance(scan, dict) or not scan or "risk_hits" not in scan:
+            return False
+        try:
+            marker_points = int(scan.get("marker_points", 0))
+        except (TypeError, ValueError):
+            marker_points = 0
+        try:
+            credibility_points = int(scan.get("credibility_points", 0))
+        except (TypeError, ValueError):
+            credibility_points = 0
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO dossier_markers (dossier_id, risk_hits,"
+                " credibility_hits, marker_points, credibility_points, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (int(dossier_id), _dump(scan.get("risk_hits") or {}),
+                 _dump(scan.get("credibility_hits") or {}),
+                 marker_points, credibility_points, _now()))
+            return cur.rowcount > 0

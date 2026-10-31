@@ -56,8 +56,16 @@
       .forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
     const chat = $("#chatTab");
     const tools = $("#toolsTab");
+    const insights = $("#insightsPanel");
     if (chat) chat.classList.toggle("hidden", tab !== "chat");
     if (tools) tools.classList.toggle("hidden", tab !== "tools");
+    if (insights) {
+      insights.classList.toggle("hidden", tab !== "insights");
+      insights.hidden = tab !== "insights";
+    }
+    /* 参谋 Tab（L4）：每次切进来刷新一次只读聚合；InsightsPanel 由 insights.js
+       提供，带存在性守卫——组件文件缺失时只影响刷新，不挡 Tab 切换 */
+    if (tab === "insights" && window.InsightsPanel) InsightsPanel.refresh();
   }
 
   /* ---------- 错误与提示 ---------- */

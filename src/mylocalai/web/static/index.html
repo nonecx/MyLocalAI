@@ -19,10 +19,12 @@
     <span id="apiStatus" class="status-chip checking">服务检查中…</span>
   </header>
 
-  <!-- ============ 首页双 Tab（M2）：对话为默认 Tab；工具模式 = 原分析页，内容不动 ============ -->
+  <!-- ============ 首页三 Tab（M2/L4）：对话为默认 Tab；工具模式 = 原分析页；
+       参谋 = L4 只读聚合页（insights.js 接管，切进时刷新） ============ -->
   <nav class="top-tabs" id="topTabs" role="tablist">
     <button class="top-tab active" data-tab="chat" type="button">💬 对话</button>
     <button class="top-tab" data-tab="tools" type="button">🧰 工具模式</button>
+    <button class="top-tab" data-tab="insights" type="button">🧭 参谋</button>
   </nav>
 
   <!-- ============ 对话 Tab（M2 新增，chat.js 接管） ============ -->
@@ -73,6 +75,33 @@
       </section>
     </main>
   </div>
+
+  <!-- ============ 参谋 Tab（L4）：话术模式库 / 信源画像 / 本周简报 ============
+       三块容器由 insights.js 渲染（切进本 Tab 时刷新）；数据全部来自
+       /api/insights/* 只读聚合端点，零 LLM、不判定真假，空数据显示"暂无数据"。 -->
+  <section class="panel insight-panel hidden" id="insightsPanel" hidden>
+    <div class="panel-head">
+      <h2>🧭 参谋 · 你的个人档案画像</h2>
+      <span class="count-chip">零 LLM · 纯只读聚合</span>
+    </div>
+    <p class="insight-intro muted">
+      以下全部由你自己的档案库统计得出：只述证据、计数与排序，不对任何消息或站点判定真假。
+    </p>
+    <div class="insight-cards">
+      <article class="insight-card" id="insightPatterns">
+        <h3 class="insight-card-title">📚 话术模式库</h3>
+        <div class="insight-card-body"><p class="insight-empty">暂无数据</p></div>
+      </article>
+      <article class="insight-card" id="insightSources">
+        <h3 class="insight-card-title">🛰️ 信源画像</h3>
+        <div class="insight-card-body"><p class="insight-empty">暂无数据</p></div>
+      </article>
+      <article class="insight-card" id="insightWeekly">
+        <h3 class="insight-card-title">🗓️ 本周简报</h3>
+        <div class="insight-card-body"><p class="insight-empty">暂无数据</p></div>
+      </article>
+    </div>
+  </section>
 
   <!-- ============ 工具模式 Tab（原分析页，契约不动） ============ -->
   <main class="layout hidden" id="toolsTab">
@@ -223,6 +252,7 @@
 
   <script src="static/app.js"></script>
   <script src="static/cards.js"></script>
+  <script src="static/insights.js"></script>
   <script src="static/chat.js"></script>
 </body>
 </html>

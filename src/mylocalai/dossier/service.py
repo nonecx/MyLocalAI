@@ -103,6 +103,8 @@ class DossierService:
 
         result 是 RumorAgent.analyze() 的返回（label/risk_score/evidence_book/...）。
         返回 {"version", "card", "batch"}。失败不抛：写不进的部分返回 degraded 标记。
+        结论落库成功后还会顺手沉淀话术特征 marker 行（L4 参谋，见下）——这段
+        独立兜底，成功时不加任何新键，失败只附加 "markers_error"。
         """
         out: Dict[str, Any] = {"version": None, "card": None, "batch": None}
         try:
@@ -140,6 +142,20 @@ class DossierService:
         except Exception as exc:  # noqa: BLE001  档案写失败不影响主结论
             out["degraded"] = True
             out["error"] = f"{type(exc).__name__}: {exc}"
+
+        # L4 参谋：结论落库成功后沉淀话术特征 marker 行（一档案一条，幂等）。
+        # 输入原文非空才扫；惰性导入 patterns（照 loop.py 的先例，避免加载全依赖）。
+        # 这段整体独立 try/except：失败只在返回 dict 附加 "markers_error"，
+        # 绝不影响上面结论/证据/运行记录的成败；成功时不加任何新键（返回形状不漂移）。
+        if out.get("version") is not None:
+            try:
+                dossier = self.store.get_dossier(dossier_id) or {}
+                input_text = str(dossier.get("input_text") or "")
+                if input_text:
+                    from mylocalai.rumor.patterns import scan_markers
+                    self.store.record_markers(dossier_id, scan_markers(input_text))
+            except Exception as exc:  # noqa: BLE001  markers 失败绝不拖垮 record_analysis
+                out["markers_error"] = str(exc)
         return out
 
     def record_speech_analysis(self, dossier_id: int, result: Dict[str, Any],

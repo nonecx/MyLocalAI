@@ -531,7 +531,7 @@ def index() -> FileResponse:
 import asyncio  # noqa: E402
 
 from fastapi import Request  # noqa: E402
-from fastapi.responses import PlainTextResponse, StreamingResponse  # noqa: E402
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse  # noqa: E402
 
 from mylocalai.assistant.events import (  # noqa: E402
     EVENT_NAMES as _SSE_EVENT_NAMES,
@@ -901,3 +901,53 @@ def dossier_export(dossier_id: str, format: str = "md") -> PlainTextResponse:
         headers={"Content-Disposition":
                  f"attachment; filename=\"{filename}\"; filename*=UTF-8''{filename}"},
     )
+
+
+# ===========================================================================
+# L4 参谋（insights）：话术模式库 / 信源画像 / 个人信息环境周报
+# ===========================================================================
+# 三个只读端点：数据一律经 get_dossier_service().store 读取（测试注入点同档案库
+# 端点），聚合用 mylocalai.dossier.insights 的纯函数——零 LLM、零联网、只做计数
+# 与排序，不产生任何真假断言。处理体任何故障 → 503 {"error": "insights_unavailable"}
+# （参谋是增益面，绝不把页面打成 500）；days 参数用字符串手工解析保持 400 语义。
+
+
+@app.get("/api/insights/patterns")
+def insights_patterns() -> Dict[str, Any]:
+    """话术模式库（零 LLM、纯只读聚合）：个人档案库里的话术特征 × 结论标签统计。"""
+    try:
+        from mylocalai.dossier.insights import pattern_library  # 惰性 import（先例：build_assistant_loop）
+        return {"patterns": pattern_library(get_dossier_service().store)}
+    except Exception:  # noqa: BLE001  参谋数据取不到就如实 503，不让页面 500
+        return JSONResponse({"error": "insights_unavailable"}, status_code=503)
+
+
+@app.get("/api/insights/sources")
+def insights_sources() -> Dict[str, Any]:
+    """信源画像（零 LLM、纯只读聚合）：按域名聚合证据条目的反驳/支持战绩（已排序）。"""
+    try:
+        from mylocalai.dossier.insights import source_profiles
+        return {"profiles": source_profiles(get_dossier_service().store)}
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"error": "insights_unavailable"}, status_code=503)
+
+
+@app.get("/api/insights/weekly")
+def insights_weekly(days: str = "7") -> Dict[str, Any]:
+    """个人信息环境周报（零 LLM、纯只读聚合）：窗口内档案/结论/成本/话术/信源/热度计数。
+
+    days 用字符串参数手工解析（不用 FastAPI 类型校验，保持 400 语义）：
+    int() 失败或不在 1..90 → 400 {"error": "invalid_days"}；缺省 7 天。
+    """
+    try:
+        n = int(str(days))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "invalid_days"}, status_code=400)
+    if not 1 <= n <= 90:
+        return JSONResponse({"error": "invalid_days"}, status_code=400)
+    try:
+        from mylocalai.dossier.insights import weekly_digest
+        now = datetime.now().astimezone().isoformat()
+        return {"digest": weekly_digest(get_dossier_service().store, now=now, days=n)}
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"error": "insights_unavailable"}, status_code=503)

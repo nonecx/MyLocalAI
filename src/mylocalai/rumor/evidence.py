@@ -377,6 +377,19 @@ def _entry_from_result(r: Dict[str, Any], query: str) -> Dict[str, Any]:
     }
 
 
+def _profile_host(key: str) -> str:
+    """信源画像键的域名归一（与条目侧 normalize_host 同口径比对）。
+
+    画像键通常来自 qualified_source_profile，是裸域名（如 "rumor-mill.example.com"）；
+    normalize_host 按 URL 解析对裸域名返回空串（urlparse 需要 scheme），故与
+    classify_domain 同一判别：带 scheme/路径的走 normalize_host，裸域名按主机名
+    规整（小写、去尾点、去 www.）。
+    """
+    key = str(key or "").strip()
+    host = normalize_host(key) if ("/" in key or ":" in key) else key.lower().rstrip(".")
+    return host[4:] if host.startswith("www.") else host
+
+
 def collect_evidence(
     text: str,
     claims: Optional[Dict[str, Any]] = None,
@@ -384,11 +397,20 @@ def collect_evidence(
     search_fn: Optional[Callable[[str, int], Dict[str, Any]]] = None,
     fetch_fn: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
     llm_judge: bool = True,
+    source_profile: Optional[Dict[str, Dict[str, int]]] = None,
 ) -> Dict[str, Any]:
     """搜索并整理证据本。text 仅用于在 claims 未提供时做兜底，不发给搜索引擎。
 
     search_fn/fetch_fn 默认在调用时解析为模块级 search_all/fetch_article，
     便于测试与部署替换检索实现。
+
+    source_profile（L4 参谋，可选）：档案库沉淀的信源画像，形状
+    {域名: {"refutes": 反驳档案数}}。仅当传入**非空** dict 时生效：把"当前条目
+    立场为反驳、域名（normalize_host 后）在画像里、且尚未计入可靠反驳"的域名
+    并入 reliable 反驳集合，并写入 stance_summary 的 profile_refute_domains /
+    profile_refute 两个键——个人档案库里反复辟谣同一类谣言的信源值得信任加权。
+    不传 / 传 None / 传 {} 时不加任何键，输出与没有此参数时逐位一致
+    （official 口径不受影响：画像域名只进 reliable 集合）。
     """
     search_fn = search_fn or search_all
     fetch_fn = fetch_fn or fetch_article
@@ -524,11 +546,29 @@ def collect_evidence(
     refute_domains = {normalize_host(e["url"]) for e in refutes}
     official_domains = {normalize_host(e["url"]) for e in refutes
                         if e.get("source_kind", "").startswith("官方")}
+    # L4 参谋：信源画像反哺抬分（最小侵入）。仅当传入非空画像时生效：把"当前条目
+    # 立场为反驳、域名在画像里、且尚未计入可靠反驳"的域名并入 reliable 集合；
+    # official 口径不受影响（画像域名只进 reliable 集合）。不传/传空时下面整段
+    # 跳过、不加任何键，输出与原来逐位一致（tests/test_source_profile_lift.py 锁定）。
+    profile_refute: set = set()
+    if isinstance(source_profile, dict) and source_profile:
+        profile_keys = {_profile_host(k) for k in source_profile}
+        profile_keys.discard("")
+        for e in book["entries"]:
+            if e.get("stance") != "反驳":
+                continue
+            host = normalize_host(e.get("url") or "")
+            if host and host in profile_keys and host not in refute_domains:
+                profile_refute.add(host)
+        refute_domains |= profile_refute
     s["reliable_refute"] = len(refute_domains)
     s["reliable_refute_domains"] = sorted(d for d in refute_domains if d)
     s["official_refute"] = len(official_domains)
     s["official_refute_domains"] = sorted(d for d in official_domains if d)
     s["other_refute"] = len(refute_domains - official_domains)
+    if isinstance(source_profile, dict) and source_profile:
+        s["profile_refute_domains"] = sorted(profile_refute)   # 滤空串：profile_refute 里不会有空串
+        s["profile_refute"] = len(profile_refute)
     s["reliable_support"] = sum(1 for e in book["entries"]
                                 if e["stance"] == "支持" and e["domain_tier"] in RELIABLE_TIERS)
     s["irrelevant"] = sum(1 for e in book["entries"] if e["stance"] == "无关")

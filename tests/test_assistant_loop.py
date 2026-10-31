@@ -721,5 +721,130 @@ class TestTurnBudget(LoopTestBase):
         self.assertEqual(out["tool_run_id"], run["id"])
 
 
+# ===========================================================================
+# L4 参谋装配（source_profile）：_qualified_profile 纯函数 + _verify 生产路径透传。
+# 口径：空库 → {}（照传，引擎对空 dict 逐位不变）；读取故障 → None；
+# owner 缺位 → None（行为与装配前逐位一致）。
+# ===========================================================================
+
+def _seed_refute_history(service, domain: str, n: int = 2) -> None:
+    """预置 n 个高风险档案，各带同一域名的一条反驳证据（refuted_dossiers=n）。"""
+    for i in range(n):
+        did = service.store.create_dossier(f"证伪史{i}", f"传闻{i}")
+        service.store.add_conclusion(did, "高风险谣言", 80.0,
+                                     as_of="2026-10-31T10:00:00+08:00")
+        service.store.add_evidence(did, 1, [{
+            "url": f"https://{domain}/post{i}", "domain": domain,
+            "domain_tier": "非官方（门户）", "source_kind": "非官方（门户）",
+            "stance": "反驳", "title": "辟谣", "snippet": "经查不实",
+            "fetched_at": "2026-10-31T09:00:00+08:00"}])
+
+
+def capture_agent_factory(captured: dict):
+    """RumorAgent 替身工厂：只捕获构造 kwargs，analyze 返回最小合法结果。"""
+
+    class _CaptureAgent:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def analyze(self, text, cancel_check=None):
+            return {"label": "疑似谣言", "risk_score": 10, "degraded_components": [],
+                    "agent_error": "", "llm_turns": 0, "evidence_book": {"entries": []}}
+
+    return _CaptureAgent
+
+
+class TestQualifiedProfile(LoopTestBase):
+    """_qualified_profile 单测：达标线缺省/配置/兜底、空库 {}、读取故障 None。"""
+
+    def _func(self):
+        from mylocalai.assistant.loop import _qualified_profile
+        return _qualified_profile
+
+    def test_empty_store_returns_empty_dict(self):
+        """空档案库 → {}（不是 None）：画像启用但暂无达标信源，引擎逐位不变。"""
+        self.assertEqual(self._func()(self.dossiers.store, self.rules), {})
+
+    def test_refute_history_within_threshold_qualifies(self):
+        """两个高风险档案均被同一域名反驳 → {domain: {"refutes": 2}}（rules 显式给 2）。"""
+        _seed_refute_history(self.dossiers, "bad.example.com", n=2)
+        rules = dict(self.rules, source_profile={"min_refutes": 2})
+        self.assertEqual(self._func()(self.dossiers.store, rules),
+                         {"bad.example.com": {"refutes": 2}})
+
+    def test_higher_min_refutes_excludes_domain(self):
+        """min_refutes=3：只证伪 2 个档案的域名不入选 → {}。"""
+        _seed_refute_history(self.dossiers, "bad.example.com", n=2)
+        rules = dict(self.rules, source_profile={"min_refutes": 3})
+        self.assertEqual(self._func()(self.dossiers.store, rules), {})
+
+    def test_missing_or_broken_section_defaults_to_two(self):
+        """缺 source_profile 段 / min_refutes 写坏 → 都按 2 兜底，不抛。"""
+        _seed_refute_history(self.dossiers, "bad.example.com", n=2)
+        func = self._func()
+        self.assertEqual(func(self.dossiers.store, {}),
+                         {"bad.example.com": {"refutes": 2}})
+        self.assertEqual(func(self.dossiers.store, {"source_profile": {}}),
+                         {"bad.example.com": {"refutes": 2}})
+        self.assertEqual(func(self.dossiers.store, {"source_profile": {"min_refutes": "abc"}}),
+                         {"bad.example.com": {"refutes": 2}})
+        self.assertEqual(func(self.dossiers.store, {"source_profile": "junk"}),
+                         {"bad.example.com": {"refutes": 2}})
+
+    def test_store_failure_returns_none(self):
+        """画像读取故障（source_profiles 炸）→ None：装配是增益面，绝不挡核查。"""
+        with mock.patch("mylocalai.dossier.insights.source_profiles",
+                        side_effect=RuntimeError("库炸了")):
+            self.assertIsNone(self._func()(self.dossiers.store, self.rules))
+
+
+class TestVerifySourceProfileWiring(LoopTestBase):
+    """装配透传：经生产路径 _real_service("verify", rules, owner) 取 _verify 调一次。"""
+
+    def _verify_via_production_path(self, owner):
+        from mylocalai.assistant.loop import _real_service
+        return _real_service("verify", self.rules, owner)
+
+    def test_production_verify_passes_qualified_profile(self):
+        """生产路径 _verify 把 source_profile= 传给 RumorAgent，值来自 _qualified_profile。"""
+        _seed_refute_history(self.dossiers, "bad.example.com", n=2)
+        captured = {}
+        loop = self.make_loop({})
+        verify = self._verify_via_production_path(loop)
+        with mock.patch("mylocalai.rumor.agent.RumorAgent",
+                        capture_agent_factory(captured)):
+            out = verify(VERIFY_TEXT)
+        self.assertEqual(captured.get("source_profile"),
+                         {"bad.example.com": {"refutes": 2}})
+        # 值确实来自 _qualified_profile（与纯函数直接调用对拍）
+        from mylocalai.assistant.loop import _qualified_profile
+        self.assertEqual(captured.get("source_profile"),
+                         _qualified_profile(self.dossiers.store, self.rules))
+        self.assertEqual(out["label"], "疑似谣言")   # 引擎返回值原样透传
+
+    def test_production_verify_empty_store_still_passes_empty_profile(self):
+        """空库（{}）也照传——装配不缺席；引擎对空 dict 逐位不变。"""
+        captured = {}
+        loop = self.make_loop({})
+        verify = self._verify_via_production_path(loop)
+        with mock.patch("mylocalai.rumor.agent.RumorAgent",
+                        capture_agent_factory(captured)):
+            verify(VERIFY_TEXT)
+        self.assertEqual(captured.get("source_profile"), {})
+
+    def test_verify_without_owner_passes_none(self):
+        """owner=None（无档案库可取）→ source_profile=None，行为与装配前一致。"""
+        captured = {}
+        verify = self._verify_via_production_path(None)
+        with mock.patch("mylocalai.rumor.agent.RumorAgent",
+                        capture_agent_factory(captured)):
+            verify(VERIFY_TEXT)
+        self.assertIsNone(captured.get("source_profile"))
+
+    def test_rules_json_has_source_profile_section(self):
+        """assistant_rules.json 同步带 source_profile 段（用户可改的缺省口径）。"""
+        self.assertEqual(self.rules.get("source_profile"), {"min_refutes": 2})
+
+
 if __name__ == "__main__":
     unittest.main()

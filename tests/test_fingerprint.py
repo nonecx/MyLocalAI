@@ -233,8 +233,8 @@ class TestStoreClaimFingerprints(unittest.TestCase):
         self.assertEqual(self.store.find_fingerprints("", 0.72), [])
 
     def test_v2_to_v3_migration_preserves_old_data(self):
-        """迁移：手工建 v2 库（只跑前两个迁移）+ 旧数据 → 开 DossierStore 升到 v3，
-        旧数据逐字段保留，指纹表可用（§6 M3-1：迁移只允许追加）。"""
+        """迁移：手工建 v2 库（只跑前两个迁移）+ 旧数据 → 开 DossierStore 升到当前版本，
+        旧数据逐字段保留，指纹表可用（§6 M3-1：迁移只允许追加；v4 起一并升到最新）。"""
         db = Path(self.tmp.name) / "upgrade.db"
         conn = connect(db)
         with conn:
@@ -254,9 +254,9 @@ class TestStoreClaimFingerprints(unittest.TestCase):
                 " created_at) VALUES (?, 1, '疑似谣言', 62.0, 't0')", (did,))
         conn.close()
 
-        store = DossierStore(db)   # 构造即迁移 v2→v3
+        store = DossierStore(db)   # 构造即迁移 v2→当前（v4）
         try:
-            self.assertEqual(SCHEMA_VERSION, 3)
+            self.assertEqual(SCHEMA_VERSION, 4)
             row = store.get_dossier(did)
             self.assertEqual(row["title"], "旧档案")
             self.assertEqual(store.latest_conclusion(did)["label"], "疑似谣言")
@@ -270,7 +270,7 @@ class TestStoreClaimFingerprints(unittest.TestCase):
                     "SELECT version FROM schema_migrations")}
             finally:
                 conn2.close()
-            self.assertEqual(versions, {1, 2, 3})
+            self.assertEqual(versions, {1, 2, 3, 4})
         finally:
             store.close()
 

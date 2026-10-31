@@ -241,6 +241,27 @@ class _CostDossiers:
         return getattr(self._inner, name)
 
 
+def _qualified_profile(store: Any, rules: Dict[str, Any]) -> Optional[Dict[str, Dict[str, int]]]:
+    """档案库信源画像 → "达标信源" dict（L4 参谋装配，纯读取、零 LLM、永不抛）。
+
+    返回形状即引擎注入的 source_profile 参数（RumorAgent → evidence.collect_evidence）：
+    {domain: {"refutes": n}}。空库返回 {}（引擎对空 dict 逐位不变）；min_refutes 取
+    rules["source_profile"]["min_refutes"]，缺段/写坏按 2 兜底、不抛；任何读取故障
+    返回 None（等价"不启用"）——画像是增益面，绝不挡核查。
+    """
+    try:
+        # 惰性 import（先例：_usage_now / _verify 内的引擎 import），测试可 mock 模块属性
+        from mylocalai.dossier.insights import qualified_source_profile, source_profiles
+        cfg = (rules or {}).get("source_profile")
+        try:
+            min_refutes = int(cfg.get("min_refutes", 2)) if isinstance(cfg, dict) else 2
+        except (TypeError, ValueError):
+            min_refutes = 2
+        return qualified_source_profile(source_profiles(store), min_refutes=min_refutes)
+    except Exception:  # noqa: BLE001  画像装配失败 = 不启用，行为与改动前逐位一致
+        return None
+
+
 def _real_service(name: str, rules: Dict[str, Any],
                   owner: Optional["AssistantLoop"] = None) -> Callable:
     """真实引擎的惰性装配（只在生产路径被触发；测试注入 stub 后永不到这里）。"""
@@ -253,6 +274,16 @@ def _real_service(name: str, rules: Dict[str, Any],
             # logic 三个组件在生产路径永远缺席。
             from mylocalai.classic.language import analyze_aggression, analyze_emotion
             from mylocalai.classic.logic import analyze_logic
+            # 信源画像装配（L4 参谋）：owner 带档案库时从档案史挑"达标信源"（历史证伪
+            # ≥阈值 min_refutes 的域名）注入引擎参与抬分；装配失败/owner 缺位一律
+            # None——引擎对 None/空 dict 逐位不变（tests/test_source_profile_lift.py
+            # 锁定）；{}（空库）也照传，语义即"画像启用但暂无达标信源"。
+            source_profile: Optional[Dict[str, Dict[str, int]]] = None
+            if owner is not None:
+                try:
+                    source_profile = _qualified_profile(owner.dossiers.store, rules)
+                except Exception:  # noqa: BLE001  画像是增益面：取不到就当不启用
+                    source_profile = None
             agent = RumorAgent(
                 max_chars=MAX_TEXT_LENGTH,
                 funcs={
@@ -261,6 +292,7 @@ def _real_service(name: str, rules: Dict[str, Any],
                     "logic": analyze_logic,
                 },
                 on_component_done=on_component_done,
+                source_profile=source_profile,
             )
             # 时限继承（§8）：analyze() 内部 deadline_scope(self.deadline_s) 与本线程已设的
             # 回合预算（handle 的 deadline_scope_at）取 min——轮预算自动收紧引擎预算。

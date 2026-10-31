@@ -37,6 +37,7 @@ def default_funcs(state: "AnalysisState | None" = None) -> Dict[str, Callable[[s
             text,
             claims=state.ensure("claims") if state is not None else None,
             markers=state.peek("markers") if state is not None else None,
+            source_profile=getattr(state, "source_profile", None) if state is not None else None,
         )
 
     return {
@@ -48,7 +49,8 @@ def default_funcs(state: "AnalysisState | None" = None) -> Dict[str, Callable[[s
 
 class AnalysisState:
     def __init__(self, text: str, funcs: Optional[Dict[str, Callable]] = None,
-                 on_component_done: Optional[Callable[[str], None]] = None) -> None:
+                 on_component_done: Optional[Callable[[str], None]] = None,
+                 source_profile: Optional[Dict[str, Dict[str, int]]] = None) -> None:
         self.text = text
         merged = default_funcs(self)
         if funcs:
@@ -57,6 +59,10 @@ class AnalysisState:
         # 进度回调（M2 对引擎的唯一侵入）：组件算完时回调一次组件名；默认 None，
         # 不传时行为逐位不变（守卫测试 tests/test_progress_hook.py 锁定）。
         self.on_component_done = on_component_done
+        # 信源画像（L4 参谋）：档案库沉淀的 {域名: {"refutes": n}}。默认 None=不启用，
+        # 默认 evidence 闭包只在非空时把它透传给 collect_evidence 做反哺抬分，
+        # 不传时输出逐位不变（守卫测试 tests/test_source_profile_lift.py 锁定）。
+        self.source_profile = source_profile
         self._results: Dict[str, Dict[str, Any]] = {}
         self._locks = {name: threading.Lock() for name in COMPONENTS}
         self.timings: Dict[str, float] = {}
