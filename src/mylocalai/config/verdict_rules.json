@@ -47,5 +47,21 @@
       "official": 6,
       "numeric_detail": 4
     }
+  },
+
+  "card": {
+    "_comment": "结论卡片派生（工作指导 §4.5）：confidence 只由证据本信源分布决定；recheck_conditions 由证据缺口决定。大模型不参与打分。",
+    "confidence_rules": [
+      {"min_official": 2, "min_total": 5, "confidence": "high"},
+      {"min_official": 1, "min_total": 3, "confidence": "medium"},
+      {"min_total": 3, "confidence": "medium"},
+      {"min_total": 0, "confidence": "low"}
+    ],
+    "recheck": {
+      "no_official": "出现官方/权威媒体级信源的通报或报道",
+      "few_evidence": "证据本独立条目≥{threshold}",
+      "few_evidence_threshold": 5,
+      "official_lift": "证据本新增权威条目≥2"
+    }
   }
 }

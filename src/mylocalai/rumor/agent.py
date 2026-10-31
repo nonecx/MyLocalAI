@@ -104,6 +104,7 @@ class RumorAgent:
         max_chars: int = DEFAULT_MAX_CHARS,
         recursion_limit: int = 10,
         use_default_llm: bool = True,
+        on_component_done: Optional[Callable[[str], None]] = None,
     ) -> None:
         if llm is None and use_default_llm:
             from mylocalai.llm.adapter import build_llm
@@ -113,6 +114,8 @@ class RumorAgent:
         self.deadline_s = deadline_s
         self.max_chars = max_chars
         self.recursion_limit = recursion_limit
+        # 进度回调透传给每次 analyze 的 AnalysisState（None=不启用，行为不变）
+        self.on_component_done = on_component_done
 
     # ------------------------------------------------------------------ #
     def _run_agent(self, state: AnalysisState) -> List[Any]:
@@ -215,7 +218,7 @@ class RumorAgent:
         truncated = len(text) > self.max_chars
         text = text[: self.max_chars]
 
-        state = AnalysisState(text, self.funcs)
+        state = AnalysisState(text, self.funcs, on_component_done=self.on_component_done)
         mode, agent_error = "agent", ""
         trace: Dict[str, Any] = {"tools_called": [], "llm_turns": 0, "final_text": ""}
 

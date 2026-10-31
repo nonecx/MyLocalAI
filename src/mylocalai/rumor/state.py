@@ -47,12 +47,16 @@ def default_funcs(state: "AnalysisState | None" = None) -> Dict[str, Callable[[s
 
 
 class AnalysisState:
-    def __init__(self, text: str, funcs: Optional[Dict[str, Callable]] = None) -> None:
+    def __init__(self, text: str, funcs: Optional[Dict[str, Callable]] = None,
+                 on_component_done: Optional[Callable[[str], None]] = None) -> None:
         self.text = text
         merged = default_funcs(self)
         if funcs:
             merged.update(funcs)
         self._funcs = merged
+        # 进度回调（M2 对引擎的唯一侵入）：组件算完时回调一次组件名；默认 None，
+        # 不传时行为逐位不变（守卫测试 tests/test_progress_hook.py 锁定）。
+        self.on_component_done = on_component_done
         self._results: Dict[str, Dict[str, Any]] = {}
         self._locks = {name: threading.Lock() for name in COMPONENTS}
         self.timings: Dict[str, float] = {}
@@ -111,6 +115,11 @@ class AnalysisState:
                 elapsed = time.perf_counter() - t0
                 self.timings[name] = round(elapsed, 2)
                 self.spans[name] = [round(t0 - self._t0, 3), round(time.perf_counter() - self._t0, 3)]
+                if self.on_component_done is not None:
+                    try:
+                        self.on_component_done(name)
+                    except Exception:  # noqa: BLE001  进度回调绝不影响分析本身
+                        pass
             return self._results[name]
 
     def peek(self, name: str) -> Optional[Dict[str, Any]]:

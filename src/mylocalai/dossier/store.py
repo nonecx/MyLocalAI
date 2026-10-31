@@ -24,7 +24,7 @@ from typing import Any, Dict, Iterable, List, Optional
 __all__ = ["SCHEMA_VERSION", "DEFAULT_DB_PATH", "connect", "migrate",
            "DossierStore", "default_db_path"]
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 #: 顺序迁移：索引 i 的脚本把库从版本 i 升到 i+1。永不修改已发布的条目，只允许追加。
 MIGRATIONS: List[str] = [
@@ -108,6 +108,40 @@ MIGRATIONS: List[str] = [
         created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_runs_dossier ON analysis_runs(dossier_id, created_at);
+    """,
+    # v2：会话域三表（M2）。sessions/messages/tool_runs 与档案域同库不同域。
+    """
+    CREATE TABLE IF NOT EXISTS sessions (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        title      TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        archived   INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS messages (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id  INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        role        TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system_note')),
+        kind        TEXT NOT NULL DEFAULT 'text',
+        content     TEXT NOT NULL DEFAULT '',
+        tool_run_id INTEGER,
+        created_at  TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);
+    CREATE TABLE IF NOT EXISTS tool_runs (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        dossier_id INTEGER REFERENCES dossiers(id) ON DELETE SET NULL,
+        tool       TEXT NOT NULL DEFAULT '',
+        args       TEXT NOT NULL DEFAULT '{}',
+        status     TEXT NOT NULL DEFAULT '',
+        degraded   INTEGER NOT NULL DEFAULT 0,
+        duration_s REAL NOT NULL DEFAULT 0,
+        requests   INTEGER NOT NULL DEFAULT 0,
+        tokens     INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_tool_runs_session ON tool_runs(session_id, id);
     """,
 ]
 

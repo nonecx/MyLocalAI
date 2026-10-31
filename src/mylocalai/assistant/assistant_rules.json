@@ -1,0 +1,43 @@
+{
+  "_comment": "助手行为规则（工作指导 §4.2/§5.1/§5.4）：改这里而非改代码。",
+  "route_model": {
+    "system_prompt_key": "router_system",
+    "temperature": 0,
+    "max_tokens": 300,
+    "cache_namespace": "assistant_router"
+  },
+  "narrate_model": {
+    "system_prompt_key": "narrate_system",
+    "temperature": 0,
+    "max_tokens": 700,
+    "cache_namespace": "assistant_narrate"
+  },
+  "summary_model": {
+    "system_prompt_key": "summary_system",
+    "temperature": 0,
+    "max_tokens": 400,
+    "cache_namespace": "assistant_sum",
+    "trigger_messages": 60
+  },
+  "max_tool_calls_per_turn": 2,
+  "context_char_budget": 12000,
+  "context_recent_messages": 24,
+  "fingerprint_threshold": 0.72,
+  "fingerprint": {
+    "shingle_size": 4,
+    "ask_before_reuse": true
+  },
+  "tool_allowlist": [
+    "verify_claim", "analyze_speech", "check_heat", "compute_heat",
+    "list_dossiers", "get_dossier", "recheck_dossier", "export_card",
+    "search_web", "chitchat", "clarify", "refuse"
+  ],
+  "refusal_triggers": [
+    "帮我编造谣言", "编写假消息", "伪装成真实消息", "批量生成谣言",
+    "帮我写个钓鱼", "伪造官方通报", "改一下分数", "把风险分改成", "删掉档案"
+  ],
+  "reminders": {
+    "dossier_age_days": 14,
+    "snapshot_change_ratio": 0.5
+  }
+}
