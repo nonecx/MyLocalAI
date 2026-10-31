@@ -150,5 +150,208 @@ class TestDossierExport(DossierApiTestBase):
         self.assertEqual(self.get("/api/dossiers/999999/export").status_code, 404)
 
 
+# ===========================================================================
+# 以下为 M3 追加用例（原 M2 用例零改动）：详情 chapters 六章节、导出附件头、
+# /api/sessions/{sid}/reminders 被动提醒端点、前后端自洽（chat.js/index.html/chat.css）。
+# ===========================================================================
+
+import re  # noqa: E402
+from datetime import datetime, timedelta  # noqa: E402
+
+STATIC_DIR = ROOT / "src" / "mylocalai" / "web" / "static"
+
+
+def _read_static(name: str) -> str:
+    return (STATIC_DIR / name).read_text(encoding="utf-8")
+
+
+class TestDossierDetailChapters(DossierApiTestBase):
+    """GET /api/dossiers/{id} 响应扩 chapters（M3-2：经 service.chapters）。"""
+
+    def test_detail_contains_six_chapter_keys(self):
+        resp = self.get(f"/api/dossiers/{self.did_tea}")
+        self.assertEqual(resp.status_code, 200)
+        chapters = resp.json()["chapters"]
+        self.assertEqual(set(chapters),
+                         {"conclusion", "evidence", "speech", "heat", "opinions", "deep_read"})
+        # 预置数据：conclusion 1 版 + 证据批次 + 1 快照；speech/opinions/deep_read 未生成
+        self.assertEqual(chapters["conclusion"]["count"], 1)
+        self.assertEqual(chapters["evidence"]["total"], 2)
+        self.assertEqual(chapters["heat"]["count"], 1)
+        self.assertIn("trend", chapters["heat"])
+        for name in ("speech", "opinions", "deep_read"):
+            self.assertEqual(chapters[name], {"chapter_status": "absent"})
+
+    def test_detail_chapters_absent_for_empty_dossier(self):
+        chapters = self.get(f"/api/dossiers/{self.did_weather}").json()["chapters"]
+        self.assertEqual(chapters["conclusion"]["count"], 0)
+        self.assertEqual(chapters["evidence"], {"total": 0, "batches": []})
+        self.assertEqual(chapters["heat"]["count"], 0)
+        self.assertNotIn("trend", chapters["heat"])
+        for name in ("speech", "opinions", "deep_read"):
+            self.assertEqual(chapters[name], {"chapter_status": "absent"})
+
+    def test_detail_chapters_absent_shape_is_json_safe(self):
+        """absent 是普通 dict（chapter_status 键），前端可稳定判别。"""
+        chapters = self.get(f"/api/dossiers/{self.did_weather}").json()["chapters"]
+        self.assertEqual(chapters["speech"].get("chapter_status"), "absent")
+
+
+class TestDossierExportAttachment(DossierApiTestBase):
+    """M3-6 导出走 service.export_markdown，Content-Disposition attachment。"""
+
+    def test_export_has_attachment_disposition(self):
+        resp = self.get(f"/api/dossiers/{self.did_tea}/export?format=md")
+        self.assertEqual(resp.status_code, 200)
+        disposition = resp.headers.get("content-disposition", "")
+        self.assertIn("attachment", disposition)
+        self.assertIn(f"dossier-{self.did_tea}.md", disposition)
+
+    def test_export_contains_six_sections_for_full_dossier(self):
+        """完整档案导出含六节标题 + 固定免责语段（M3-6 验收口径）。"""
+        self.store.add_conclusion(self.did_tea, "疑似谣言", 62.0, confidence="medium",
+                                  as_of="2026-10-31T11:00:00+08:00")
+        resp = self.get(f"/api/dossiers/{self.did_tea}/export?format=md")
+        text = resp.text
+        for needle in ("## 一、核查结论（版本化）", "## 二、证据本",
+                       "## 三、言论土壤（classic 四档）", "## 四、热度快照与趋势",
+                       "## 五、观点光谱", "## 六、背景解读（深读）",
+                       "本报告只述证据与立场分布，不对消息真假下结论；请以官方通报为准",
+                       "本节暂无数据", "生成时间"):
+            self.assertIn(needle, text, f"导出缺少：{needle}")
+
+
+class TestSessionRemindersApi(DossierApiTestBase):
+    """GET /api/sessions/{sid}/reminders（M3-7 被动提醒：会话涉及档案 → lines）。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        from mylocalai.assistant.session_store import SessionStore
+        # 会话域与档案域同库（tool_runs.dossier_id 外键指向 dossiers 表）
+        self.sessions = SessionStore(Path(self.tmp.name) / "dossier.db")
+        self.addCleanup(self.sessions.close)
+        patcher = mock.patch.object(self.webapp, "get_session_store", lambda: self.sessions)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _age_dossier(self, did: int, days_ago: float) -> None:
+        stamp = (datetime.now().astimezone() - timedelta(days=days_ago)).isoformat(timespec="seconds")
+        self.store._conn.execute("UPDATE dossiers SET updated_at = ? WHERE id = ?", (stamp, did))
+        self.store._conn.commit()
+
+    def test_reminders_empty_session_returns_no_lines(self):
+        sid = self.sessions.create_session(title="新会话")
+        resp = self.get(f"/api/sessions/{sid}/reminders")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["session_id"], sid)
+        self.assertEqual(data["dossier_ids"], [])
+        self.assertEqual(data["lines"], [])
+
+    def test_reminders_invalid_sid_is_404(self):
+        self.assertEqual(self.get("/api/sessions/999999/reminders").status_code, 404)
+        self.assertEqual(self.get("/api/sessions/abc/reminders").status_code, 404)
+        self.assertEqual(self.get("/api/sessions/-1/reminders").status_code, 404)
+
+    def test_reminders_age_line_for_session_dossier(self):
+        """会话跑过 verify（tool_runs 回填 dossier_id）且档案超 14 天 → 一行年龄提醒。"""
+        self._age_dossier(self.did_tea, days_ago=20)
+        sid = self.sessions.create_session(title="核查隔夜茶")
+        run_id = self.sessions.start_run(sid, "verify_claim", {"text": "隔夜茶致癌？"})
+        self.sessions.finish_run(run_id, "ok", dossier_id=self.did_tea)
+        data = self.get(f"/api/sessions/{sid}/reminders").json()
+        self.assertEqual(data["dossier_ids"], [self.did_tea])
+        self.assertEqual(len(data["lines"]), 1)
+        self.assertIn(f"#{self.did_tea}", data["lines"][0])
+        self.assertIn("天未复核", data["lines"][0])
+
+    def test_reminders_dedup_same_dossier_from_multiple_runs(self):
+        """同一档案被 verify 又被 get_dossier（args.id）引用 → 提醒行去重。"""
+        self._age_dossier(self.did_tea, days_ago=20)
+        sid = self.sessions.create_session(title="反复回看")
+        r1 = self.sessions.start_run(sid, "verify_claim", {"text": "x"})
+        self.sessions.finish_run(r1, "ok", dossier_id=self.did_tea)
+        r2 = self.sessions.start_run(sid, "get_dossier", {"id": self.did_tea})
+        self.sessions.finish_run(r2, "ok")   # 未回填 dossier_id，只有 args.id
+        data = self.get(f"/api/sessions/{sid}/reminders").json()
+        self.assertEqual(data["dossier_ids"], [self.did_tea])
+        self.assertEqual(len(data["lines"]), 1)
+
+    def test_reminders_heat_change_line(self):
+        """快照最新两分值变化幅度超 0.5 → 一行"热度变化明显"（档案是新的，无年龄行）。"""
+        sid = self.sessions.create_session(title="热度骤变")
+        run_id = self.sessions.start_run(sid, "check_heat", {"topic": "隔夜茶"})
+        self.sessions.finish_run(run_id, "ok", dossier_id=self.did_tea)
+        # 夹具已有一条"现在"的快照；两次新快照放到未来两天，保证它们是序列最后两个
+        base = datetime.now().astimezone()
+        self.store.add_snapshot(self.did_tea, 1, 2, 3, 10.0,
+                                taken_at=(base + timedelta(days=1)).isoformat(timespec="seconds"))
+        self.store.add_snapshot(self.did_tea, 1, 2, 3, 90.0,
+                                taken_at=(base + timedelta(days=2)).isoformat(timespec="seconds"))
+        data = self.get(f"/api/sessions/{sid}/reminders").json()
+        self.assertEqual(len(data["lines"]), 1)
+        self.assertIn("热度变化明显", data["lines"][0])
+
+    def test_reminders_absent_when_rules_not_hit(self):
+        """档案新鲜 + 快照无变化 → lines 为空（不制造新压力）。"""
+        sid = self.sessions.create_session(title="刚查完")
+        run_id = self.sessions.start_run(sid, "verify_claim", {"text": "x"})
+        self.sessions.finish_run(run_id, "ok", dossier_id=self.did_tea)
+        self.assertEqual(self.get(f"/api/sessions/{sid}/reminders").json()["lines"], [])
+
+
+class TestM3FrontendConsistency(unittest.TestCase):
+    """M3 前后端自洽（沿 test_website_chat 先例）：新端点引用一致、档案库元素在位。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.chat_js = _read_static("chat.js")
+        cls.chat_css = _read_static("chat.css")
+        cls.index_html = _read_static("index.html")
+
+    @staticmethod
+    def _normalize(path: str) -> str:
+        path = path.split("?")[0]
+        return re.sub(r"\{[^}]*\}", "{}", path)
+
+    def test_reminders_endpoint_wired_end_to_end(self):
+        """chat.js 引用 /api/sessions/{sid}/reminders，后端路由存在，渲染函数在位。"""
+        self.assertIn("/api/sessions/{sid}/reminders", self.chat_js)
+        from app import app as fastapi_app
+        routes = {self._normalize(getattr(r, "path", "")) for r in fastapi_app.routes}
+        self.assertIn("/api/sessions/{}/reminders", routes)
+        for fn in ("loadSessionReminders", "renderReminderLine"):
+            self.assertIn(f"function {fn}", self.chat_js)
+        self.assertIn(".chat-reminder", self.chat_css)
+
+    def test_dossier_chapter_renderers_and_styles_consistent(self):
+        """六个章节渲染器齐全；chat.js 用到的 chat-* class 都在 chat.css 有定义。"""
+        for fn in ("renderDossierChapters", "renderConclusionChapter", "renderEvidenceChapter",
+                   "renderSpeechChapter", "renderHeatChapter", "renderOpinionsChapter",
+                   "renderDeepReadChapter"):
+            self.assertIn(f"function {fn}", self.chat_js, f"chat.js 缺少 {fn}")
+        used = set()
+        for chunk in re.findall(r'class="([^"]+)"', self.chat_js):
+            used.update(re.findall(r"[A-Za-z][\w-]*", chunk))
+        chat_classes = sorted(c for c in used if c.startswith("chat-"))
+        missing = [c for c in chat_classes if f".{c}" not in self.chat_css]
+        self.assertEqual(missing, [], f"chat.css 缺少定义：{missing}")
+
+    def test_index_dossier_view_markers(self):
+        """index.html 档案库视图元素在位（六章节提示 + 列表 id + 导出链接）。"""
+        for marker in ('id="chatDossierList"', 'id="chatDossierCount"',
+                       "六章节", "chat-dossier-panel"):
+            self.assertIn(marker, self.index_html, f"index.html 缺少：{marker}")
+        self.assertIn("format=md", self.chat_js)
+        self.assertIn("download=", self.chat_js)
+        self.assertIn("本节暂无数据", self.chat_js)   # 缺章如实文案与后端口径一致
+
+    def test_chatjs_element_ids_exist_in_html(self):
+        used = set(re.findall(r'\$\("#([A-Za-z][\w]*)"\)', self.chat_js))
+        used |= set(re.findall(r'querySelector\("#([A-Za-z][\w]*)"\)', self.chat_js))
+        missing = sorted(i for i in used if f'id="{i}"' not in self.index_html)
+        self.assertEqual(missing, [], f"chat.js 引用了 HTML 里不存在的元素 id: {missing}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

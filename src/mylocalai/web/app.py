@@ -540,6 +540,7 @@ from mylocalai.assistant.events import (  # noqa: E402
     make_event,
 )
 from mylocalai.assistant.registry import MAX_TEXT_LENGTH as _ASSISTANT_MAX_TEXT_LENGTH  # noqa: E402
+from mylocalai.assistant.reminders import aggregate_reminder_lines  # noqa: E402
 
 #: chat 请求轮里 loop 正常收尾的事件名（events.py 协议：异常出口是 error）。
 _TERMINAL_SSE_EVENTS = ("done", "error")
@@ -751,6 +752,50 @@ def session_messages(session_id: str) -> Dict[str, Any]:
     return {"session_id": sid, "messages": store.messages(sid)}
 
 
+def _session_dossier_ids(store: Any, sid: int) -> List[int]:
+    """该会话涉及过的档案号（按 tool_runs 首现顺序，去重）。
+
+    两个来源：tool_runs.dossier_id（verify/recheck 等落库时回填）；args.id
+    （get_dossier/recheck_dossier/export_card 等记忆类工具的显式档案号——
+    用户"回看过"的档案也可能需要提醒）。读失败返回已收集部分，不抛。
+    """
+    ids: List[int] = []
+    try:
+        for run in store.runs_for_session(sid):
+            if not isinstance(run, dict):
+                continue
+            candidates = [run.get("dossier_id")]
+            args = run.get("args")
+            if isinstance(args, dict):
+                candidates.append(args.get("id"))
+            for cand in candidates:
+                if isinstance(cand, bool) or not isinstance(cand, int) or cand <= 0:
+                    continue
+                if cand not in ids:
+                    ids.append(cand)
+    except Exception:  # noqa: BLE001  tool_runs 读失败时提醒退空，不影响会话本身
+        return ids
+    return ids
+
+
+@app.get("/api/sessions/{session_id}/reminders")
+def session_reminders(session_id: str) -> Dict[str, Any]:
+    """会话的被动提醒（M3-7，§2.2"不制造新压力"）。
+
+    聚合该会话涉及过的档案 → reminder_lines（纯函数，规则外置
+    assistant_rules.reminders / prompts.reminder_line）。只在用户打开会话时被
+    前端取一次，消息流顶部一行浅色呈现；无命中返回空列表，前端不渲染任何东西。
+    非法 sid（非正整数/不存在）→ 404，与 messages 端点同口径。
+    """
+    store = get_session_store()
+    sid = _parse_path_id(session_id, "会话")
+    if store.get_session(sid) is None:
+        raise HTTPException(status_code=404, detail=f"会话不存在: {sid}")
+    dossier_ids = _session_dossier_ids(store, sid)
+    lines = aggregate_reminder_lines(dossier_ids, get_dossier_service().store)
+    return {"session_id": sid, "dossier_ids": dossier_ids, "lines": lines}
+
+
 def _parse_path_id(raw: str, kind: str) -> int:
     """路径参数 → 正整数；非法一律 404（契约：非法 sid → 404，而不是 422）。"""
     try:
@@ -762,13 +807,7 @@ def _parse_path_id(raw: str, kind: str) -> int:
     return value
 
 
-# ---- 档案库 API（M3 档案库页的后端先行） ----
-
-_EXPORT_DISCLAIMER = (
-    "免责声明：本档案由智能助手基于公开网络证据整理生成，只述证据、不判定真假，"
-    "结论仅供参考，最终判断权与事实核查请由用户自行把握。"
-)
-
+# ---- 档案库 API（M3 档案库页：列表 / 详情六章节 / Markdown 导出） ----
 
 @app.get("/api/dossiers")
 def dossiers_list(query: str = "", limit: int = 50) -> Dict[str, Any]:
@@ -779,7 +818,9 @@ def dossiers_list(query: str = "", limit: int = 50) -> Dict[str, Any]:
 
 @app.get("/api/dossiers/{dossier_id}")
 def dossier_detail(dossier_id: str) -> Dict[str, Any]:
-    """档案详情：档案头 + 全版本结论 + 证据批次计数 + 快照计数 + 版本对比（compare_versions）。"""
+    """档案详情：档案头 + 全版本结论 + 证据批次计数 + 快照计数 + 版本对比
+    + chapters 六章节聚合（M3-2：conclusion/evidence/speech/heat/opinions/deep_read，
+    经 service.chapters()，纯读取、缺章如实 absent、永不抛）。"""
     service = get_dossier_service()
     did = _parse_path_id(dossier_id, "档案")
     header = service.store.get_dossier(did)
@@ -793,12 +834,18 @@ def dossier_detail(dossier_id: str) -> Dict[str, Any]:
         "versions": cmp["versions"],
         "changed": cmp["changed"],
         "snapshot_count": len(service.store.snapshots(did)),
+        "chapters": service.chapters(did),
     }
 
 
 @app.get("/api/dossiers/{dossier_id}/export")
 def dossier_export(dossier_id: str, format: str = "md") -> PlainTextResponse:
-    """导出档案为 Markdown 文本（含证据截至时间 as_of 与免责语）。目前仅支持 format=md。"""
+    """导出档案为 Markdown 文本（M3-6：六章节 + 徽章 + 免责语 + as_of 页脚）。
+
+    文本由 service.export_markdown() 纯字符串拼接（零 LLM）；响应带
+    Content-Disposition attachment（浏览器点击即下载 .md 文件）。
+    目前仅支持 format=md。
+    """
     fmt = (format or "md").strip().lower()
     if fmt != "md":
         raise HTTPException(status_code=400, detail=f"暂只支持 format=md（收到: {format}）")
@@ -807,70 +854,10 @@ def dossier_export(dossier_id: str, format: str = "md") -> PlainTextResponse:
     header = service.store.get_dossier(did)
     if header is None:
         raise HTTPException(status_code=404, detail=f"档案不存在: {did}")
-    return PlainTextResponse(_render_dossier_markdown(service, header),
-                             media_type="text/markdown; charset=utf-8")
-
-
-def _render_dossier_markdown(service, header: Dict[str, Any]) -> str:
-    """档案 → Markdown 文本：结论（版本化）+ 证据本 + 热度快照 + 免责页脚。"""
-    did = int(header["id"])
-    conclusions = service.store.conclusions(did)
-    snapshots = service.store.snapshots(did)
-    by_batch: Dict[int, List[Dict[str, Any]]] = {}
-    for e in service.store.evidence(did):
-        by_batch.setdefault(int(e.get("batch", 1)), []).append(e)
-
-    lines: List[str] = [f"# 档案：{header.get('title') or '未命名核查'}", "",
-                        f"- 档案编号：{did}",
-                        f"- 类型：{header.get('input_kind', 'text')}",
-                        f"- 建档时间：{header.get('created_at', '')}",
-                        f"- 最近更新：{header.get('updated_at', '')}",
-                        "", "## 核查结论（版本化）"]
-    if not conclusions:
-        lines += ["", "（暂无结论记录）"]
-    for c in conclusions:
-        risk = c.get("risk_score")
-        risk_txt = f"，风险分 {risk:g}" if isinstance(risk, (int, float)) else ""
-        lines += ["", f"### v{c.get('version')}：{c.get('label') or '（无标签）'}{risk_txt}"]
-        if c.get("confidence"):
-            lines.append(f"- 置信度：{c['confidence']}")
-        suff = c.get("evidence_sufficiency") or {}
-        if suff:
-            merged = {"official": 0, "unofficial": 0, "unknown": 0, "total": 0}
-            merged.update({k: v for k, v in suff.items() if isinstance(v, (int, float))})
-            lines.append("- 证据充分度：官方 {official} / 非官方 {unofficial} / 未知 {unknown}"
-                         "，共 {total} 条".format(**merged))
-        if c.get("as_of"):
-            lines.append(f"- 证据截至（as_of）：{c['as_of']}")
-        for rc in c.get("recheck_conditions") or []:
-            lines.append(f"- 复审条件：{rc}")
-        lines.append("- 结论口径：verdict.assess() 纯函数输出，大模型不参与打分")
-
-    lines += ["", "## 证据本"]
-    if not by_batch:
-        lines += ["", "（无证据记录）"]
-    for batch in sorted(by_batch):
-        lines += ["", f"### 批次 {batch}（{len(by_batch[batch])} 条）"]
-        for e in by_batch[batch]:
-            stance = e.get("stance") or "无关"
-            tier = e.get("source_kind") or e.get("domain_tier") or "未知来源"
-            title = e.get("title") or e.get("url") or "（无标题）"
-            lines.append(f"- [{stance}] {title}（{tier}）")
-            if e.get("url"):
-                lines.append(f"  <{e['url']}>")
-
-    lines += ["", "## 热度快照", ""]
-    if not snapshots:
-        lines.append("（无快照记录）")
-    else:
-        lines.append(f"共 {len(snapshots)} 次快照（E 分为确定性公式输出，y/z 多为代理值）。")
-        for s in snapshots:
-            flags = "、".join(str(f) for f in (s.get("proxy_flags") or []))
-            lines.append(
-                f"- {s.get('taken_at', '')}：x={s.get('x', 0):g} y={s.get('y', 0):g}"
-                f" z={s.get('z', 0):g} E={s.get('e_score', 0):g}"
-                + (f"（代理标记：{flags}）" if flags else ""))
-
-    as_of = next((c["as_of"] for c in reversed(conclusions) if c.get("as_of")), "")
-    lines += ["", "---", f"证据截至：{as_of or '未知'} · {_EXPORT_DISCLAIMER}"]
-    return "\n".join(lines)
+    filename = f"dossier-{did}.md"
+    return PlainTextResponse(
+        service.export_markdown(did),
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition":
+                 f"attachment; filename=\"{filename}\"; filename*=UTF-8''{filename}"},
+    )

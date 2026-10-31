@@ -7,7 +7,8 @@
      - AbortController 取消：abort 即断开连接，后端据此走协作取消链；
      - 渲染 §5.3 全部事件：meta/status/tool_start/scan/progress/card/
        narrative/tool_end/done/error（集合 ⊆ events.py EVENT_NAMES，测试锁定）；
-     - 会话列表加载/切换/新建（左侧栏）+ 档案库入口（简单区块，完整页在 M3）。
+     - 会话列表加载/切换/新建（左侧栏）+ 档案库视图（M3：列表 → 详情六章节区块
+       + Markdown 导出）+ 被动提醒一行呈现（M3-7，§2.2 不制造新压力）。
    ============================================================ */
 "use strict";
 
@@ -22,6 +23,7 @@
     chat: "/api/chat",
     sessions: "/api/sessions",
     sessionMessages: "/api/sessions/{sid}/messages",
+    sessionReminders: "/api/sessions/{sid}/reminders",
     dossiers: "/api/dossiers",
     dossierDetail: "/api/dossiers/{id}",
     dossierExport: "/api/dossiers/{id}/export",
@@ -82,6 +84,7 @@
 
   function clearConversation() {
     $("#chatMessages").querySelectorAll(".msg").forEach((n) => n.remove());
+    $("#chatMessages").querySelectorAll(".chat-reminder").forEach((n) => n.remove());
     currentTurnEl = null;
     updateWelcome();
     chatClearError();
@@ -369,6 +372,31 @@
       const data = await resp.json();
       ((data && data.messages) || []).forEach(renderHistoryMessage);
     } catch (e) { /* 历史加载失败保持空白会话 */ }
+    /* 被动提醒（M3-7）：打开会话/加载消息时取一次，消息流顶部一行浅色呈现；
+       取不到就不显示——不弹窗、不打断（§2.2 不制造新压力） */
+    loadSessionReminders(sid);
+  }
+
+  /* ---------- 被动提醒（M3-7，§2.2"不制造新压力"） ---------- */
+  function renderReminderLine(lines) {
+    const box = $("#chatMessages");
+    if (!box) return;
+    const old = box.querySelector(".chat-reminder");
+    if (old) old.remove();
+    if (!Array.isArray(lines) || !lines.length) return;
+    const el = document.createElement("div");
+    el.className = "chat-reminder";
+    el.textContent = "⏰ " + lines.join("　");
+    box.insertBefore(el, box.firstChild);
+  }
+
+  async function loadSessionReminders(sid) {
+    try {
+      const resp = await fetch(apiPath(CHAT_API.sessionReminders, sid));
+      if (!resp.ok) { renderReminderLine([]); return; }
+      const data = await resp.json();
+      renderReminderLine((data && data.lines) || []);
+    } catch (e) { /* 提醒加载失败静默：不提示、不重试、不打断会话 */ }
   }
 
   function renderHistoryMessage(m) {
@@ -406,7 +434,10 @@
     }
   }
 
-  /* ---------- 档案库入口（简单区块；完整档案库页在 M3） ---------- */
+  /* ---------- 档案库视图（M3：列表 → 详情六章节区块） ----------
+     数据来自 GET /api/dossiers/{id} 的 chapters 字段（service.chapters() 聚合），
+     缺章如实显示"本节暂无数据"，不编造（§2.2 口径诚实）。 */
+
   async function loadDossiers() {
     try {
       const resp = await fetch(CHAT_API.dossiers + "?limit=20");
@@ -431,6 +462,155 @@
     } catch (e) { /* 档案列表加载失败不阻塞主流程 */ }
   }
 
+  function chapterBlock(title, body) {
+    return `<div class="chat-dossier-chapter">
+      <div class="chat-dossier-chapter-title">${title}</div>${body}</div>`;
+  }
+
+  function chapterAbsent(note) {
+    return `<p class="chat-dossier-absent">${escapeHtml(
+      note || "本节暂无数据（章节按需生成，不预生成、不编造）")}</p>`;
+  }
+
+  /* 分数变化判定：null/undefined 视为"无分"，避免 Number(null)=0 的假相同 */
+  function scoreChanged(a, b) {
+    const na = (a === null || a === undefined) ? null : Number(a);
+    const nb = (b === null || b === undefined) ? null : Number(b);
+    if (na === null && nb === null) return false;
+    if (na === null || nb === null) return true;
+    return na !== nb;
+  }
+
+  /* 1. 结论版本对比表：标签/分数/as_of 相对上一版有变化的行高亮 */
+  function renderConclusionChapter(c) {
+    c = c || {};
+    const compare = c.compare || {};
+    const versions = compare.versions || [];
+    if (!versions.length) return chapterAbsent("尚无结论版本（还没有跑过核查）");
+    const rows = versions.map((v, i) => {
+      const prev = i > 0 ? versions[i - 1] : null;
+      const changed = prev && (prev.label !== v.label
+        || scoreChanged(prev.risk_score, v.risk_score)
+        || String(prev.as_of || "") !== String(v.as_of || ""));
+      const risk = (v.risk_score === null || v.risk_score === undefined)
+        ? "—" : Number(v.risk_score);
+      return `<tr${changed ? ' class="chat-version-changed"' : ""}>
+        <td>v${escapeHtml(String(v.version))}</td>
+        <td>${escapeHtml(v.label || "—")}</td>
+        <td>${escapeHtml(String(risk))}</td>
+        <td>${escapeHtml(String(v.as_of || "未知").replace("T", " "))}</td></tr>`;
+    }).join("");
+    const badges = compare.changed ? ' <span class="badge amber">标签有变化</span>' : "";
+    const degraded = c.degraded ? ' <span class="badge amber">含降级运行</span>' : "";
+    return `<table class="chat-versions-table">
+        <thead><tr><th>版本</th><th>标签</th><th>风险分</th><th>as_of</th></tr></thead>
+        <tbody>${rows}</tbody></table>
+      <div class="chat-badges">${badges}${degraded}</div>`;
+  }
+
+  /* 2. 证据批次折叠列表（details 原生折叠） */
+  function renderEvidenceChapter(e) {
+    e = e || {};
+    const batches = e.batches || [];
+    if (!batches.length) return chapterAbsent("证据本还没有条目（尚未联网取证）");
+    const folds = batches.map((b) => {
+      const items = (b.entries || []).map((en) => `
+        <li><span class="chat-ev-stance">${escapeHtml(en.stance || "无关")}</span>${escapeHtml(en.title || en.url || "（无标题）")}${en.url ? `<div class="chat-ev-url">${escapeHtml(String(en.url))}</div>` : ""}</li>`).join("");
+      return `<details class="chat-evidence-fold">
+        <summary>批次 ${escapeHtml(String(b.batch))}（${Number(b.count) || 0} 条）</summary>
+        <ul class="chat-ev-list">${items || "<li>（无条目）</li>"}</ul></details>`;
+    }).join("");
+    return `<div class="muted">共 ${Number(e.total) || 0} 条证据</div>${folds}`;
+  }
+
+  /* 3. 言论土壤四档卡：形状与 cards.js renderSpeech 的载荷一致，直接复用 */
+  function renderSpeechChapter(s) {
+    if (!s || s.chapter_status === "absent") return chapterAbsent();
+    if (window.ChatCards && window.ChatCards.renderSpeech) {
+      return window.ChatCards.renderSpeech({
+        label: s.conclusion || s.label || "",
+        emotion: s.emotion, attack: s.attack, logic: s.logic, as_of: s.as_of,
+      });
+    }
+    return chapterAbsent("言论土壤渲染组件未就绪");
+  }
+
+  /* 4. 热度趋势：最新 E 分 + 代理徽章 + 趋势 SVG 内嵌（组件未收口时占位） */
+  function renderHeatChapter(h) {
+    h = h || {};
+    const snaps = h.snapshots || [];
+    if (!snaps.length) return chapterAbsent("还没有热度快照（查过热度才有）");
+    const last = snaps[snaps.length - 1];
+    const eVal = Number(last.e_score);
+    const flags = Array.isArray(last.proxy_flags) ? last.proxy_flags : [];
+    const trend = h.trend || {};
+    let trendHtml = "";
+    if (trend.svg && String(trend.svg).trim().toLowerCase().startsWith("<svg")) {
+      trendHtml = `<div class="chat-trend-box">${trend.svg}</div>`;
+    } else if (trend.trend_status === "pending") {
+      trendHtml = '<div class="chat-trend-pending">⏳ 趋势组件加载中（组件收口后此处自动出趋势图）</div>';
+    }
+    const summary = (trend.summary && typeof trend.summary === "object")
+      ? Object.entries(trend.summary).map(([k, v]) => `${k} ${v}`).join(" · ") : "";
+    return `<div class="chat-dims">
+        <div class="dim-row"><span class="k">快照次数</span><span class="v">${snaps.length}</span></div>
+        <div class="dim-row"><span class="k">最新 E 分</span><span class="v">${Number.isFinite(eVal) ? eVal.toFixed(2) : "—"}（${escapeHtml(String(last.taken_at || "").replace("T", " "))}）</span></div>
+      </div>
+      ${flags.length ? `<div class="chat-badges"><span class="badge amber">代理值：${escapeHtml(flags.join("、"))}</span></div>` : ""}
+      ${trendHtml}
+      ${summary ? `<div class="chat-spectrum-legend muted">${escapeHtml(summary)}</div>` : ""}`;
+  }
+
+  /* 5. 观点光谱分布条（颜色取自固定表，分布数据只决定宽度） */
+  const SPECTRUM_COLORS = ["#34d399", "#fbbf24", "#60a5fa", "#9ca3af", "#f97316"];
+
+  function renderOpinionsChapter(o) {
+    if (!o || o.chapter_status === "absent") return chapterAbsent();
+    const latest = (o.rows && o.rows.length) ? o.rows[o.rows.length - 1] : {};
+    const dist = (latest.distribution && typeof latest.distribution === "object")
+      ? latest.distribution : {};
+    const entries = Object.entries(dist);
+    const total = entries.reduce((s, [, v]) => s + (Number(v) || 0), 0);
+    const segs = entries.map(([k, v], i) => {
+      const n = Number(v) || 0;
+      const pct = total > 0 ? Math.round(n / total * 100) : 0;
+      return `<span class="chat-spectrum-seg" style="width:${pct}%;background:${SPECTRUM_COLORS[i % SPECTRUM_COLORS.length]}" title="${escapeHtml(k)} ${n}"></span>`;
+    }).join("");
+    const legend = entries.map(([k, v]) => `${k} ${Number(v) || 0}`).join(" · ");
+    return `<div class="chat-spectrum-bar">${segs || '<span class="muted">（无分布数据）</span>'}</div>
+      <div class="chat-spectrum-legend muted">${escapeHtml(legend || "—")}</div>
+      ${latest.summary ? `<div class="chat-deepread-text">${escapeHtml(String(latest.summary))}</div>` : ""}
+      ${latest.degraded ? '<div class="chat-badges"><span class="badge amber">降级输出</span></div>' : ""}`;
+  }
+
+  /* 6. 背景解读文本 + 降级/护栏丢弃徽章 */
+  function renderDeepReadChapter(dr) {
+    if (!dr || dr.chapter_status === "absent") return chapterAbsent();
+    const payload = (dr.payload && typeof dr.payload === "object") ? dr.payload : {};
+    const text = String(payload.text || payload.body || "").trim();
+    const badges = [];
+    if (dr.degraded || payload.degraded) badges.push('<span class="badge amber">降级输出</span>');
+    const dropped = Array.isArray(dr.guard_dropped) ? dr.guard_dropped : [];
+    if (dropped.length) {
+      badges.push(`<span class="badge gray">护栏丢弃 ${dropped.length} 项</span>`);
+    }
+    return `${badges.length ? `<div class="chat-badges">${badges.join("")}</div>` : ""}
+      ${text ? `<div class="chat-deepread-text">${escapeHtml(text)}</div>`
+             : '<p class="chat-dossier-absent">解读正文为空：模型判定不适用或输出被护栏丢弃，如实呈现，不代写。</p>'}`;
+  }
+
+  function renderDossierChapters(d) {
+    const ch = (d && d.chapters) || {};
+    return [
+      chapterBlock("🧾 结论版本对比", renderConclusionChapter(ch.conclusion)),
+      chapterBlock("📑 证据批次", renderEvidenceChapter(ch.evidence)),
+      chapterBlock("🗣️ 言论土壤（classic 四档）", renderSpeechChapter(ch.speech)),
+      chapterBlock("📈 热度快照与趋势", renderHeatChapter(ch.heat)),
+      chapterBlock("⚖️ 观点光谱", renderOpinionsChapter(ch.opinions)),
+      chapterBlock("🔭 背景解读（深读）", renderDeepReadChapter(ch.deep_read)),
+    ].join("");
+  }
+
   async function toggleDossierDetail(did, li) {
     const box = li.querySelector(".chat-dossier-detail");
     if (!box) return;
@@ -442,15 +622,14 @@
       const resp = await fetch(apiPath(CHAT_API.dossierDetail, did));
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const d = await resp.json();
-      const versions = (d.versions || []).map((v) => `
-        <div class="dim-row"><span class="k">v${escapeHtml(String(v.version))}</span>
-          <span class="v">${escapeHtml(v.label || "—")} · 截至 ${escapeHtml(String(v.as_of || "未知"))}</span></div>`).join("");
       const batches = Object.entries(d.evidence_batches || {})
         .map(([b, n]) => `批次${escapeHtml(String(b))}×${escapeHtml(String(n))}`).join(" · ");
       box.innerHTML = `
-        ${versions || '<div class="muted">（无结论版本）</div>'}
-        <div class="muted">证据：${batches || "0 条"} · 快照 ${Number(d.snapshot_count) || 0} 次</div>
-        <a class="chat-dossier-export" href="${apiPath(CHAT_API.dossierExport, did)}?format=md" target="_blank" rel="noopener">导出 Markdown</a>`;
+        <div class="chat-dossier-view">
+          ${renderDossierChapters(d)}
+          <div class="muted">证据：${batches || "0 条"} · 快照 ${Number(d.snapshot_count) || 0} 次</div>
+          <a class="chat-dossier-export" href="${apiPath(CHAT_API.dossierExport, did)}?format=md" download="dossier-${Number(did)}.md">⬇ 导出 Markdown</a>
+        </div>`;
       box.dataset.loaded = "1";
     } catch (e) {
       box.textContent = `档案详情加载失败：${(e && e.message) || e}`;
