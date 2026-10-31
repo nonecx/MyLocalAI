@@ -236,7 +236,9 @@ class TestRumorMessageEndToEnd(AssistantE2EBase):
         self.assertEqual("".join(p["delta"] for n, p in frames if n == "narrative"),
                          svc.narrate)
         done = frames[-1][1]
-        self.assertEqual(done["cost"]["requests"], 5)       # 路由1 + verify llm_turns 3 + 叙述1
+        # M4 真实计数：done.cost = 本回合真实上游调用（stub 全离线 → 0；原口径
+        # 路由1+verify llm_turns 3+叙述1 是快照不可用时的粗口径 fallback，不再入账）
+        self.assertEqual(done["cost"]["requests"], 0)
 
     def test_tool_end_dossier_id_and_store_persistence(self):
         """②tool_end 带 dossier_id；直接开库断言 conclusions/evidence_entries/analysis_runs。"""
@@ -267,7 +269,9 @@ class TestRumorMessageEndToEnd(AssistantE2EBase):
             runs = conn.execute(
                 "SELECT kind, status, requests FROM analysis_runs WHERE dossier_id = ?",
                 (did,)).fetchall()
-            self.assertEqual(runs, [("verify", "ok", 3)])
+            # M4 真实计数：analysis_runs.requests 记工具段真实 delta（stub 全离线 → 0）；
+            # 原 llm_turns=3 粗口径只在快照不可用时作 fallback
+            self.assertEqual(runs, [("verify", "ok", 0)])
         finally:
             conn.close()
         # tool_runs（会话域）同样带上 dossier_id

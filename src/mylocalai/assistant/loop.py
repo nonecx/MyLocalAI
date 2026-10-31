@@ -21,6 +21,11 @@
 
 降级文化（§5.7）：路由失败 → clarify；工具异常 → error 事件 + 诚实降级回复 + run 状态
 error，会话不崩；叙述失败 → 卡片 + 固定模板收尾，**永不因叙述失败丢结论**。
+
+成本真实计数（M4，§6 M4/§8）：路由/叙述/摘要与每个工具段的真实 LLM 成本取自
+llm_client 进程计数器的快照 delta（真实上游调用数 + usage tokens），分别记入
+done.cost、tool_runs.finish_run 与档案 analysis_runs（经 _CostDossiers 在
+record_analysis 调用点注入）；计数面不可用时逐段退回 M4 前的粗口径，绝不挡回合。
 """
 
 from __future__ import annotations
@@ -168,6 +173,72 @@ class _ServiceBox:
 
     def __contains__(self, name: str) -> bool:
         return True  # 所有契约内服务都可取（缺省走真实引擎）
+
+
+# ---------------------------------------------------------------------------
+# M4 成本真实计数接线（工作指导 §6 M4 / §8）
+# ---------------------------------------------------------------------------
+# 口径：路由/叙述/摘要与每个工具的真实 LLM 成本 = llm_client 进程计数器（真实上游
+# 调用数 / usage tokens）在**本回合本段前后**的快照 delta。快照取不到（计数面不可用）
+# 时退回 M4 前的粗口径（路由/叙述/摘要各记 1 次尝试、工具用其 out.cost 粗记），
+# 保证成本是增益面：计数器故障绝不挡回合。已知边界如实声明：Agent 的 LangChain
+# 工具轮不经 llm_client，不计入（见 llm_client.record_usage 处注释）。
+
+def _usage_now() -> Optional[Dict[str, int]]:
+    """进程级真实用量快照；计数面不可用时返回 None（调用方退粗口径）。"""
+    try:
+        from mylocalai.llm.llm_client import usage_snapshot
+        return usage_snapshot()
+    except Exception:  # noqa: BLE001  计数是增益面：取不到就退回粗口径，绝不挡回合
+        return None
+
+
+def _usage_delta(base: Optional[Dict[str, int]]) -> Optional[Dict[str, int]]:
+    """相对 base 的真实用量 delta；base/当前快照任一不可用 → None。"""
+    if base is None:
+        return None
+    now = _usage_now()
+    if now is None:
+        return None
+    return {"requests": max(0, int(now["requests"]) - int(base["requests"])),
+            "tokens": max(0, int(now["tokens"]) - int(base["tokens"]))}
+
+
+def _add_usage_delta(cost: Dict[str, int], base: Optional[Dict[str, int]],
+                     fallback_requests: int = 0) -> None:
+    """把一段真实用量 delta 记入成本账；快照不可用退粗口径（fallback_requests 次尝试）。"""
+    delta = _usage_delta(base)
+    if delta is not None:
+        cost["requests"] += delta["requests"]
+        cost["tokens"] += delta["tokens"]
+    else:
+        cost["requests"] += fallback_requests
+
+
+class _CostDossiers:
+    """ctx.dossiers 的成本接线代理（M4）：把真实 delta 注入 record_analysis。
+
+    tools_verify 的 handler 在执行期内调 ctx.dossiers.record_analysis(
+    requests=llm_turns, tokens=0)（M4 前的粗口径占位）。verify/recheck 的全部上游
+    调用都发生在 record_analysis 之前，故"调用点即该工具真实成本的收敛点"：本代理
+    把 requests/tokens 参数替换为进程计数器的真实 delta（快照不可用时原样透传、
+    退回粗口径），让档案 analysis_runs 拿到真实成本——tools_verify/service 均为
+    只读文件，接线收敛在 loop 层。其余属性一律透传。
+    """
+
+    def __init__(self, inner: Any, base: Optional[Dict[str, int]]) -> None:
+        self._inner = inner
+        self._base = base
+
+    def record_analysis(self, dossier_id: int, result: Dict[str, Any], **kwargs: Any):
+        delta = _usage_delta(self._base)
+        if delta is not None:
+            kwargs["requests"] = delta["requests"]
+            kwargs["tokens"] = delta["tokens"]
+        return self._inner.record_analysis(dossier_id, result, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
 
 
 def _real_service(name: str, rules: Dict[str, Any],
@@ -766,10 +837,12 @@ class AssistantLoop:
             # 预检是纯词表子串匹配（零 LLM 成本）；拒绝不进路由模型
             plan = {"kind": "refusal", "reply": refusal["reply"], "error": ""}
         elif plan is None:
-            cost["requests"] += 1  # 路由模型被咨询一次（失败也算一次尝试，M4 接真实计数）
+            # M4 真实计数：路由段成本 = 计数器 delta；快照不可用退粗口径（+1 次咨询尝试）
+            route_base = _usage_now()
             history_hint, last_dossier_id = self._route_context(session_id, history)
             plan = self._route_plan(user_text, history_hint=history_hint,
                                     id_fallback=last_dossier_id)
+            _add_usage_delta(cost, route_base, fallback_requests=1)
 
         if pending is not None and plan.get("kind") != "tools":
             # 复核修复（M3 P2-2）：待决只对**紧随的下一轮**生效。本回合没有被消费
@@ -800,9 +873,10 @@ class AssistantLoop:
             narrated = False
             if action == "chitchat" and not reply.strip():
                 # chitchat 路由没给 reply → narrate_llm 补一句（§5.1）；再失败用固定话术
+                narrate_base = _usage_now()
                 text, _err = self._narrate(history, "")
                 narrated = True
-                cost["requests"] += 1
+                _add_usage_delta(cost, narrate_base, fallback_requests=1)
                 reply = (text or "").strip() or str(prompts.get("chitchat_fallback", ""))
             self._say(events, reply)
             sessions.add_message(session_id, "assistant", reply, kind="text")
@@ -870,11 +944,14 @@ class AssistantLoop:
                 events.emit("scan", markers=chips, text=self._scan_intro(chips, prompts))
 
             t0 = time.perf_counter()
+            tool_base = _usage_now()   # 工具段真实成本基线（M4 计数接线）
             tool_error = ""
             out: Dict[str, Any] = {}
             try:
-                ctx = SimpleNamespace(sessions=sessions, dossiers=dossiers, events=events,
-                                      cancel_check=cancel_check, services=services)
+                ctx = SimpleNamespace(sessions=sessions,
+                                      dossiers=_CostDossiers(dossiers, tool_base),
+                                      events=events, cancel_check=cancel_check,
+                                      services=services)
                 if spec is None:
                     tool_error = f"工具未注册: {step['action']}"
                 else:
@@ -884,6 +961,8 @@ class AssistantLoop:
             except Exception as exc:  # noqa: BLE001  工具炸了会话不炸（§6 M2-3 验收）
                 out, tool_error = {}, f"{type(exc).__name__}: {exc}"
             duration = time.perf_counter() - t0
+            # M4 真实计数：该工具执行期间进程计数器的 delta = 它真实花掉的上游调用/token
+            tool_delta = _usage_delta(tool_base)
 
             # 工具后取消轮询（§5.3 取消链）：慢工具执行期间用户断开 → 协作收工。
             # 不再发卡片/叙述（断开后也送不到前端）；run 记 cancelled（已建档则带上
@@ -891,6 +970,8 @@ class AssistantLoop:
             if self._cancelled(cancel_check):
                 sessions.finish_run(run_id, status="cancelled", degraded=True,
                                     duration_s=round(duration, 3),
+                                    requests=int((tool_delta or {}).get("requests", 0)),
+                                    tokens=int((tool_delta or {}).get("tokens", 0)),
                                     dossier_id=out.get("dossier_id"))
                 events.emit("error", code="cancelled", recoverable=True,
                             message="本轮已取消（用户断开或请求取消）。")
@@ -910,8 +991,17 @@ class AssistantLoop:
             status = ("error" if tool_error
                       else "timeout" if timed_out
                       else ("ok" if out.get("ok", True) else "degraded"))
+            # M4 真实计数：tool_run/done.cost 记工具段真实 delta；快照不可用退回
+            # 工具自报的粗口径 out.cost（M4 前口径）
+            if tool_delta is not None:
+                run_cost = dict(tool_delta)
+            else:
+                coarse = out.get("cost") or {}
+                run_cost = {"requests": int(coarse.get("requests", 0)),
+                            "tokens": int(coarse.get("tokens", 0))}
             executed.append({"step": step, "run_id": run_id, "out": out,
-                             "duration": duration, "status": status, "error": tool_error})
+                             "duration": duration, "status": status, "error": tool_error,
+                             "run_cost": run_cost})
 
             # ⑤ 卡片永远在叙述之前；卡片同时以 kind="card" 落库
             card = out.get("card")
@@ -919,8 +1009,8 @@ class AssistantLoop:
                 self._emit_card(events, sessions, session_id,
                                 _CARD_TYPE.get(str(step["action"]), "conclusion"), card, run_id)
                 result["card"] = card
-            cost["requests"] += int((out.get("cost") or {}).get("requests", 0))
-            cost["tokens"] += int((out.get("cost") or {}).get("tokens", 0))
+            cost["requests"] += int(run_cost.get("requests", 0))
+            cost["tokens"] += int(run_cost.get("tokens", 0))
             if out.get("dossier_id") is not None:
                 result["dossier_id"] = out.get("dossier_id")
             result["degraded"] = bool(result["degraded"] or out.get("degraded")
@@ -968,8 +1058,10 @@ class AssistantLoop:
             reply = str(prompts.get("degraded_reply", "深查暂时不可用（{reason}）。")).format(
                 reason=failed[0]["error"])
         else:
-            cost["requests"] += 1  # 叙述尝试一次
+            # M4 真实计数：叙述段成本 = 计数器 delta；快照不可用退粗口径（+1 次尝试）
+            narrate_base = _usage_now()
             text, _err = self._narrate(history, digest)
+            _add_usage_delta(cost, narrate_base, fallback_requests=1)
             if text and str(text).strip():
                 reply = str(text).strip()
             else:
@@ -984,7 +1076,7 @@ class AssistantLoop:
         # ⑦ tool_end（叙述之后，§5.3 顺序）+ finish_run 只调一次（建档后补 dossier_id）
         for e in executed:
             out = e["out"]
-            run_cost = out.get("cost") or {}
+            run_cost = e["run_cost"]   # M4：工具段真实 delta（粗口径为 fallback）
             degraded = bool(out.get("degraded")) or e["status"] in ("error", "timeout")
             sessions.finish_run(e["run_id"], status=e["status"], degraded=degraded,
                                 duration_s=round(e["duration"], 3),
@@ -1077,11 +1169,12 @@ class AssistantLoop:
         convo = "\n".join(f"{m.get('role')}: {str(m.get('content') or '')[:200]}"
                           for m in msgs if m.get("role") != "system_note")
         system = str(self.prompts.get("summary_system", ""))
+        sum_base = _usage_now()   # M4 真实计数：摘要段成本基线
         try:
             text, _err = self.services["summarize_llm"](system, convo)
         except Exception:  # noqa: BLE001
             return
-        cost["requests"] += 1
+        _add_usage_delta(cost, sum_base, fallback_requests=1)
         if text and str(text).strip():
             self.sessions.add_message(session_id, "system_note",
                                       f"{_SUMMARY_PREFIX} {str(text).strip()}", kind="text")

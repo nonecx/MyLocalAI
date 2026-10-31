@@ -11,7 +11,7 @@
 │   ├── core/
 │   │   └── tiering.py          四档言论分层的唯一实现（classic.judge 与 verdict 共用）
 │   ├── llm/                    LLM 网关（唯一构造路径）
-│   │   ├── llm_client.py       提供方成组绑定 + 配置自检 + 备用链路 + JSON 稳健解析
+│   │   ├── llm_client.py       提供方成组绑定 + 配置自检 + 备用链路 + JSON 稳健解析 + 进程级真实用量计数（M4）
 │   │   ├── llm_cache.py        进程内结果缓存（同请求只调一次）+ 请求级时长预算
 │   │   ├── adapter.py          LangChain 聊天模型构造（Agent 侧，同源同一网关）
 │   │   └── providers.json      提供方表（密钥/地址/模型/能否关思维链）——改这里而非改代码
@@ -287,6 +287,10 @@ python -m mylocalai.cli --attention-online "某段待分析的文本"
 # 离线测试套件（不消耗 API 配额；全量 discover 一键跑）
 .venv/Scripts/python.exe -X utf8 -m unittest discover -s tests -p "test_*.py"
 
+# 一键 CI（M4）：compileall src → 离线套件 → mock 闸门，任一步失败即整体失败
+scripts\ci.cmd
+# （POSIX shell 环境参考 scripts/ci.sh；本机沙箱子进程跑 bash 会崩，Windows 一律用 ci.cmd）
+
 # 模拟上游闸门（不耗配额，28 条：26 条既有 + 对话轮预算/SSE 取消两条 M2 探针）
 .venv/Scripts/python.exe .tmp/verify-2026-10-22/mock_run.py
 
@@ -296,14 +300,14 @@ python -m mylocalai.cli --attention-online "某段待分析的文本"
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 976 个用例（unittest discover 全量，2026-10-31 M3 实测；M4 起由用例计数自动校验测试守护此数字）：
-M1-M2 的全部回归（详见 git 历史），加上 M3 新增模块：
-**声明指纹秒回**（归一化+shingle/Jaccard 纯函数、schema v3 谣言库、verify"先问再查"、
-秒回/重查确定性旁过、核查落库自动沉淀——越用越聪明）、attention 趋势线（纯 SVG）与
-**change_rate 触发实现**（同档案快照环比、单快照不触发、不传历史逐位不变守卫）、
-档案库六章节聚合与页面（版本对比/证据批次/观点光谱/背景解读）、Markdown 六章节导出
-（免责语+as_of 页脚+徽章）、被动提醒纯函数（规则外置，打开会话时一行呈现）、
-opinions/deep_read 章节工具（真实引擎集成：护栏证据集=档案证据集、空证据回退、信号接线）。
+离线套件共 992 个用例（unittest discover 全量，2026-10-31 M4 实测；**M4 起由
+`tests.test_readme_counts` 自动校验此数字与 mock 闸门条数，改动后须同步回写**）：
+M1-M3 的全部回归（详见 git 历史），加上 M4 新增模块：
+**成本真实计数**（llm_client 进程级计数器：真实上游调用数 + usage tokens，缓存命中/
+single-flight 等待不计、取不到 usage 如实 0；loop 按"段前段后快照 delta"接线进
+done.cost / tool_runs / 档案 analysis_runs，计数面不可用退回粗口径）、
+**README 数字守护**（用例数 / mock 闸门条数 / 引用的测试与文档文件存在性，治文档漂移）、
+web 会话与档案成本汇总端点及前端会话累计徽章的自洽。
 另有 `tests/run_module_tests.py`（12 条内置用例全模块跑一遍并落盘）、
 `tests/smoke_api.py`（配置自检 + 连通性）。
 
@@ -326,6 +330,7 @@ opinions/deep_read 章节工具（真实引擎集成：护栏证据集=档案证
 ## 文档
 
 - `docs/研究报告-2026-10-30.md` —— 重塑前的质量基线与实测证据（智能助手重塑的依据）。
+- `docs/评估-真流式-2026-10-31.md` —— M4 真流式评估（现状/要动的面/收益/风险；结论：建议 M5 前不做，拍板留给作者）。
 - `docs/工作指导-智能助手重塑-2026-10-30.md` —— 重塑工作的唯一执行依据（里程碑与验收）。
 - `docs/项目报告-2026-10-26.md` —— 项目现状报告（关注度接入网页端与深读之后）。
 - `docs/关注度评估报告-2026-10-26.md` —— 关注度公式与阈值的评估报告。
@@ -377,6 +382,27 @@ opinions/deep_read 章节工具（真实引擎集成：护栏证据集=档案证
 - **Markdown 导出**：`GET /api/dossiers/{id}/export?format=md` 六章节+徽章+免责语+as_of 页脚。
 - **被动提醒**：档案年龄/热度变化超阈值时，打开会话以一行浅色提示呈现（规则外置），无推送无打扰。
 - **change_rate 触发**：同一档案的快照序列环比增幅达阈值即触发深读（单快照不触发）。
+
+## 成本真实计数（2026-10-31，M4）
+
+M4 起 `requests/tokens` 是**真实上游用量**，不再是粗口径估算（§8 成本模型的落地）：
+
+- **计数点**：`src/mylocalai/llm/llm_client.py` 进程级计数器（`threading.Lock`，跨线程安全）。
+  requests 只在**真实发起并返回的上游调用**时 +1——缓存命中、single-flight 等待、预算耗尽
+  未发起都不计；tokens 从响应 `usage.total_tokens` 取，取不到**如实记 0，不估算**。备用链的
+  每次成功调用各计一次。
+- **接线**：助手回合内按"段前段后快照 delta"分别记入——路由/叙述/摘要段进 `done.cost`
+  （前端"本轮成本"徽章）；每个工具段进 `tool_runs`（会话域）与档案 `analysis_runs`
+  （经 record_analysis 调用点注入）。计数面不可用时逐段退回 M4 前粗口径，绝不挡回合。
+- **可见处**：每轮 done.cost 徽章；左栏会话列表的会话累计成本（`/api/sessions` 每项附
+  `cost`）；`/api/sessions/{sid}/messages` 与 `/api/dossiers/{id}` 附 `cost` 汇总
+  （sum 真实落库值）。
+- **口径边界（如实声明）**：Agent 的 LangChain 工具轮不经 llm_client，不计数；轮内路由/
+  叙述成本只在当轮徽章呈现、不落库（会话/档案汇总只累落库部分）；并发回合同时进行时，
+  进程级计数器的段归属是近似。守护测试：`tests.test_cost_accounting`。
+- **CI**：`scripts\ci.cmd` 一键（compileall src → 离线套件 → mock 闸门 28 条），用法见"测试"一节。
+- **真流式评估（M4 结论）**：收益集中在闲聊车道首字（省约 2-4s），慢查车道几乎不动且
+  LongCat SSE 支持未实测——**建议 M5 前不做**，拍板留给作者（详见 `docs/评估-真流式-2026-10-31.md`）。
 
 ## 智能助手 MCP 接入（2026-10-31，M2-9）
 

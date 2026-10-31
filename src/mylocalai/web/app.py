@@ -725,10 +725,45 @@ class SessionCreateRequest(BaseModel):
     title: str = ""
 
 
+def _sum_runs_cost(rows: Any) -> Dict[str, int]:
+    """运行记录行的 requests/tokens 求和（M4 成本汇总口径：只累真实落库值，不估算）。
+
+    会话侧来源 = tool_runs（工具段真实 delta）；档案侧来源 = analysis_runs。
+    轮内路由/叙述成本只在当轮 done.cost 徽章呈现、不落库（消息表无成本列），
+    因此这里如实只汇总落库部分——缺哪块就少算哪块，不编数字。
+    """
+    requests = 0
+    tokens = 0
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        try:
+            requests += int(row.get("requests") or 0)
+        except (TypeError, ValueError):
+            pass
+        try:
+            tokens += int(row.get("tokens") or 0)
+        except (TypeError, ValueError):
+            pass
+    return {"requests": requests, "tokens": tokens}
+
+
 @app.get("/api/sessions")
 def sessions_list() -> Dict[str, Any]:
-    """会话列表（未归档，updated_at 倒序，最多 100 条），含 title/updated_at。"""
-    return {"sessions": get_session_store().list_sessions(limit=100)}
+    """会话列表（未归档，updated_at 倒序，最多 100 条），含 title/updated_at。
+
+    M4：每项附 cost 汇总 {"requests","tokens"}（sum 该会话 tool_runs 的真实落库值），
+    供左栏会话列表渲染会话级累计成本徽章。逐会话取 tool_runs 是 N 次进程内 SQLite
+    查询（N≤100、单机个人库量级），不值得为此加一条聚合 SQL。
+    """
+    store = get_session_store()
+    items = store.list_sessions(limit=100)
+    for item in items:
+        try:
+            item["cost"] = _sum_runs_cost(store.runs_for_session(int(item["id"])))
+        except Exception:  # noqa: BLE001  成本汇总是增益面：取不到就缺省零值
+            item["cost"] = {"requests": 0, "tokens": 0}
+    return {"sessions": items}
 
 
 @app.post("/api/sessions")
@@ -744,12 +779,14 @@ def sessions_create(req: Optional[SessionCreateRequest] = None) -> Dict[str, Any
 
 @app.get("/api/sessions/{session_id}/messages")
 def session_messages(session_id: str) -> Dict[str, Any]:
-    """会话消息（时间正序）。非法 sid（非正整数/不存在）→ 404。"""
+    """会话消息（时间正序）+ M4 成本汇总（cost = sum tool_runs 的真实落库值）。
+    非法 sid（非正整数/不存在）→ 404。"""
     store = get_session_store()
     sid = _parse_path_id(session_id, "会话")
     if store.get_session(sid) is None:
         raise HTTPException(status_code=404, detail=f"会话不存在: {sid}")
-    return {"session_id": sid, "messages": store.messages(sid)}
+    return {"session_id": sid, "messages": store.messages(sid),
+            "cost": _sum_runs_cost(store.runs_for_session(sid))}
 
 
 def _session_dossier_ids(store: Any, sid: int) -> List[int]:
@@ -820,13 +857,15 @@ def dossiers_list(query: str = "", limit: int = 50) -> Dict[str, Any]:
 def dossier_detail(dossier_id: str) -> Dict[str, Any]:
     """档案详情：档案头 + 全版本结论 + 证据批次计数 + 快照计数 + 版本对比
     + chapters 六章节聚合（M3-2：conclusion/evidence/speech/heat/opinions/deep_read，
-    经 service.chapters()，纯读取、缺章如实 absent、永不抛）。"""
+    经 service.chapters()，纯读取、缺章如实 absent、永不抛）。
+    M4：附 cost 汇总（sum analysis_runs 的真实落库 requests/tokens）。"""
     service = get_dossier_service()
     did = _parse_path_id(dossier_id, "档案")
     header = service.store.get_dossier(did)
     if header is None:
         raise HTTPException(status_code=404, detail=f"档案不存在: {did}")
     cmp = service.compare_versions(did)
+    runs = service.store.runs(did)
     return {
         **header,
         "conclusions": service.store.conclusions(did),
@@ -835,6 +874,7 @@ def dossier_detail(dossier_id: str) -> Dict[str, Any]:
         "changed": cmp["changed"],
         "snapshot_count": len(service.store.snapshots(did)),
         "chapters": service.chapters(did),
+        "cost": _sum_runs_cost(runs),
     }
 
 

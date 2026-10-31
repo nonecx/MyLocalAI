@@ -340,6 +340,61 @@ def mark_thinking_unsupported(base_url: str, model: str) -> None:
     _THINKING_SUPPORT[(base_url, model)] = False
 
 
+# ---------------------------------------------------------------------------
+# 进程级真实用量计数（M4 成本真实计数，工作指导 §6 M4 / §8）
+# ---------------------------------------------------------------------------
+# 口径（诚实优先，不估算）：
+#   - requests 只在**真实发起上游调用**时计数：计数点放在 _chat_raw_once._call ——
+#     主尝试 / extra_body 被拒后的回落尝试 / 备用链各提供方的尝试全部经由这一层，
+#     每次真实返回的调用各计 1。缓存命中、single-flight 等待者、预算耗尽（未发起）
+#     都到不了这一层，自然不计。
+#   - tokens 从响应 usage.total_tokens 取（OpenAI SDK 形状）；取不到（提供方不回
+#     usage / 形状不符）就如实记 0，绝不按字数估算。
+#   - 失败的尝试（超时 / 5xx / 连接失败）不计：请求未完成计费，计入反而虚高。
+#   - 计数器是**进程级**的：llm_cache 的缓存/single-flight 都在同一进程内生效，
+#     跨线程安全（threading.Lock + 读时锁拷贝）。
+# 已知边界（如实声明，不装看不见）：Agent 的 LangChain 工具轮
+# （mylocalai.llm.adapter.build_llm 直连 ChatOpenAI）不经本模块，其上游调用不计数；
+# 会话/档案侧看到的 requests/tokens 是"llm_client 可见面"的真实值（路由/叙述/摘要/
+# classic/attention/深读/证据与声明抽取等全部覆盖）。
+_usage_lock = threading.Lock()
+_usage_requests = 0
+_usage_tokens = 0
+
+
+def record_usage(requests: int = 1, tokens: int = 0) -> None:
+    """累加真实上游用量（内部使用；供计数点调用，测试也可直接注入）。"""
+    global _usage_requests, _usage_tokens
+    with _usage_lock:
+        _usage_requests += int(requests)
+        _usage_tokens += int(tokens)
+
+
+def usage_snapshot() -> Dict[str, int]:
+    """当前进程的累计真实用量 {"requests": int, "tokens": int}（读时锁拷贝）。"""
+    with _usage_lock:
+        return {"requests": int(_usage_requests), "tokens": int(_usage_tokens)}
+
+
+def reset_usage() -> None:
+    """清零用量计数（测试与检验脚本用）。"""
+    global _usage_requests, _usage_tokens
+    with _usage_lock:
+        _usage_requests = 0
+        _usage_tokens = 0
+
+
+def _response_total_tokens(resp: Any) -> int:
+    """从响应取 usage.total_tokens；取不到（None/坏形状）如实记 0，不估算。"""
+    try:
+        value = getattr(getattr(resp, "usage", None), "total_tokens", None)
+    except Exception:  # noqa: BLE001  响应形状怪异不影响调用本身
+        return 0
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return int(value)
+
+
 def extract_json_obj(text: str) -> Optional[dict]:
     """
     从模型返回的文本中稳健地抽取 JSON 对象。
@@ -421,7 +476,12 @@ def _chat_raw_once(
         if extra is not None:
             kwargs["extra_body"] = extra
         active = client_override if client_override is not None else client
-        return active.chat.completions.create(**kwargs)
+        resp = active.chat.completions.create(**kwargs)
+        # M4 真实计数点：这里是一切上游调用的唯一汇合层（主尝试/参数回落/备用链都经此），
+        # 缓存命中与 single-flight 等待者到不了这里。只计真实返回的调用（失败/超时未计费
+        # 不计），tokens 取响应 usage，取不到如实 0。
+        record_usage(requests=1, tokens=_response_total_tokens(resp))
+        return resp
 
     extra = None if enable_thinking else thinking_extra_body(base_url, model)
     try:

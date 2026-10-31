@@ -401,11 +401,12 @@ class TestFingerprintAskAndResolve(LoopTestBase):
         msgs = self.sessions.messages(self.session_id)
         self.assertEqual(msgs[-2]["kind"], "text")       # 问句同文落库
         self.assertEqual(msgs[-2]["content"], out["reply"])
-        # result：fingerprint_hit 形状 + 成本只剩路由一次
+        # result：fingerprint_hit 形状 + 成本只有路由段（M4 真实计数：stub 路由无
+        # 真实上游调用 → 0；原粗口径"路由咨询 1 次"是快照不可用时的 fallback）
         self.assertEqual(set(out["fingerprint_hit"].keys()), {"dossier_id", "score"})
         self.assertGreaterEqual(out["fingerprint_hit"]["score"],
                                 self.rules["fingerprint_threshold"])
-        self.assertEqual(out["cost"], {"requests": 1, "tokens": 0})
+        self.assertEqual(out["cost"], {"requests": 0, "tokens": 0})
         self.assertEqual(out["action"], "verify_claim")
 
     def test_reuse_keyword_bypasses_router_and_replies_old_dossier(self):

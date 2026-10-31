@@ -178,9 +178,10 @@ class TestChitchatFlow(LoopTestBase):
         self.assertEqual([(m["role"], m["kind"]) for m in msgs],
                          [("user", "text"), ("assistant", "text")])
         self.assertEqual(msgs[1]["content"], "你好。想查什么直接说。")
-        # 无工具运行记录；成本 = 路由 1 次
+        # 无工具运行记录；成本 = 路由的真实上游调用（M4 真实计数：stub 路由不走
+        # 真实 llm_client → delta 0；原口径"路由咨询 1 次"是快照不可用时的 fallback）
         self.assertEqual(self.sessions.runs_for_session(self.session_id), [])
-        self.assertEqual(out["cost"]["requests"], 1)
+        self.assertEqual(out["cost"]["requests"], 0)
         self.assertEqual(out["action"], "chitchat")
         self.assertEqual(narrate.calls, [])   # 路由已给 reply，不补叙述
 
@@ -237,8 +238,10 @@ class TestVerifyFlow(LoopTestBase):
         self.assertEqual(card_evt["card"]["label"], "疑似谣言")
         self.assertEqual(card_evt["label"], "疑似谣言")
         self.assertTrue(card_evt["card"]["verdict_basis"].startswith("verdict"))
-        # done 成本：路由 1 + verify llm_turns 3 + 叙述 1
-        self.assertEqual(events[-1]["cost"], {"requests": 5, "tokens": 0})
+        # done 成本 = 本回合真实上游调用（M4 真实计数：路由/verify llm_turns/叙述都按
+        # 计数器 delta 计——stub 全离线没有真实调用 → 全 0；原口径 1+3+1=5 只在
+        # 快照不可用的 fallback 下出现，粗口径已不再入账）
+        self.assertEqual(events[-1]["cost"], {"requests": 0, "tokens": 0})
 
     def test_verify_persistence_and_run_record(self):
         """verify 全链落库：卡片消息、tool_runs 完整、档案 v1+证据批次、返回 dict 形状。"""
@@ -259,7 +262,9 @@ class TestVerifyFlow(LoopTestBase):
         self.assertEqual(run["status"], "ok")
         self.assertFalse(run["degraded"])
         self.assertGreaterEqual(run["duration_s"], 0.0)
-        self.assertEqual(run["requests"], 3)
+        # M4 真实计数：run.requests/tokens 记工具段真实 delta（stub 无真实上游 → 0）；
+        # 原 llm_turns=3 的粗口径只在快照不可用时作 fallback
+        self.assertEqual(run["requests"], 0)
         self.assertEqual(run["tokens"], 0)
         # 建档：结论 v1 + 证据批次 1（2 条）
         d_id = out["dossier_id"]
@@ -675,8 +680,9 @@ class TestTurnBudget(LoopTestBase):
         self.assertTrue(run["degraded"])
         self.assertIsNone(run["dossier_id"])
         self.assertEqual(out["tool_run_id"], run["id"])
-        # 成本只剩路由 1 次：预算已尽不再发起叙述等新的上游调用
-        self.assertEqual(out["cost"]["requests"], 1)
+        # 成本只剩路由段的调用（M4 真实计数：stub 下 delta=0；预算已尽不再发起
+        # 叙述等新的上游调用——与旧口径"只剩路由 1 次"同一意图）
+        self.assertEqual(out["cost"]["requests"], 0)
 
     def test_zero_budget_disables_limit(self):
         """CHAT_TURN_DEADLINE_S=0 → 不限：超过"名义预算"的慢查照常完成、无 error。"""

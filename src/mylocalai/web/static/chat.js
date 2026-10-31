@@ -349,11 +349,17 @@
         list.innerHTML = '<li class="empty">暂无会话，发消息即可自动创建</li>';
         return;
       }
-      list.innerHTML = sessions.map((s) => `
+      list.innerHTML = sessions.map((s) => {
+        /* M4 会话级累计成本徽章：/api/sessions 每项带 cost 汇总（tool_runs 真实落库值） */
+        const cost = (s && s.cost) || {};
+        const costTxt = `成本 ${Number(cost.requests) || 0} 次 · ${Number(cost.tokens) || 0} tokens`;
+        return `
         <li data-sid="${Number(s.id)}">
           <div class="chat-session-title">${escapeHtml(s.title || "（未命名会话）")}</div>
           <div class="chat-session-meta">${escapeHtml(String(s.updated_at || "").replace("T", " "))}</div>
-        </li>`).join("");
+          <div class="chat-session-meta">${escapeHtml(costTxt)}</div>
+        </li>`;
+      }).join("");
       list.querySelectorAll("li[data-sid]").forEach((li) => {
         li.addEventListener("click", () => selectSession(Number(li.dataset.sid)));
       });
