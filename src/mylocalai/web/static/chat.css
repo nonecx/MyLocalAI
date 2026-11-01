@@ -8,32 +8,34 @@
 /* ---------- 首页双 Tab 导航 ---------- */
 .top-tabs {
   display: flex;
-  gap: 8px;
-  padding: 16px 22px 0;
+  gap: 2px;
+  padding: 8px 22px 0;
   max-width: 1200px;
   width: 100%;
   margin: 0 auto;
+  border-bottom: 1px solid var(--border);
 }
 
 .top-tab {
-  border: 1.5px solid var(--border);
-  border-bottom: none;
-  background: #eceefb;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
   color: var(--muted);
   font-size: 14px;
   font-weight: 600;
-  padding: 10px 22px;
-  border-radius: 12px 12px 0 0;
+  padding: 9px 14px 10px;
+  border-radius: 6px 6px 0 0;
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
 }
 
-.top-tab:hover { color: var(--primary); }
+.top-tab:hover { color: var(--text); background: rgba(28, 33, 40, 0.04); }
 
 .top-tab.active {
-  background: var(--panel);
+  background: transparent;
   color: var(--primary-dark);
-  box-shadow: 0 -1px 3px rgba(16, 24, 40, 0.06);
+  border-bottom-color: var(--primary);
+  box-shadow: none;
 }
 
 /* ---------- 对话布局 ---------- */
@@ -41,23 +43,34 @@
 
 .chat-layout {
   display: grid;
-  grid-template-columns: 320px minmax(0, 1fr);
-  gap: 20px;
-  padding: 0 22px 22px;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 18px;
+  padding: 18px 22px;
   max-width: 1200px;
   width: 100%;
   margin: 0 auto;
-  align-items: start;
+  align-items: stretch;
+  height: calc(100vh - 172px);
+  min-height: 520px;
 }
 
 .chat-side {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 16px;
   min-width: 0;
+  min-height: 0;
 }
 
-.chat-new-btn { font-size: 13px; padding: 5px 12px; }
+.chat-side > .chat-sessions-panel { flex: 0 0 auto; }
+.chat-side > .chat-dossier-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-new-btn { font-size: 13px; padding: 4px 12px; }
 
 /* ---------- 会话列表 ---------- */
 .chat-session-list,
@@ -66,9 +79,11 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
-  max-height: 300px;
+  max-height: 220px;
   overflow-y: auto;
 }
+
+.chat-dossier-list { flex: 1 1 auto; max-height: none; }
 
 .chat-session-list li,
 .chat-dossier-list li {
@@ -140,7 +155,7 @@
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 8px 10px;
-  background: #fbfbfe;
+  background: #fafbfc;
 }
 
 .chat-dossier-chapter-title {
@@ -259,10 +274,9 @@
 .chat-main-panel {
   display: flex;
   flex-direction: column;
-  min-height: 540px;
-  height: calc(100vh - 190px);
+  min-height: 0;
   min-width: 0;
-  padding: 16px 18px;
+  padding: 16px 20px;
 }
 
 .chat-messages {
@@ -272,6 +286,9 @@
   flex-direction: column;
   gap: 14px;
   padding: 6px 4px 14px;
+  width: 100%;
+  max-width: 860px;
+  margin: 0 auto;
 }
 
 .chat-welcome {
@@ -280,8 +297,32 @@
   color: var(--muted);
   padding: 30px 20px;
 }
-.chat-welcome h2 { font-size: 19px; color: var(--text); margin-bottom: 10px; }
-.chat-welcome p { font-size: 13.5px; line-height: 1.9; max-width: 460px; }
+.chat-welcome h2 { font-size: 20px; color: var(--text); margin-bottom: 10px; }
+.chat-welcome p { font-size: 13.5px; line-height: 1.9; max-width: 480px; margin: 0 auto; }
+
+.chat-welcome-samples {
+  margin-top: 18px;
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chat-welcome-sample {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 7px 15px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.chat-welcome-sample:hover {
+  border-color: var(--primary);
+  color: var(--primary-dark);
+  background: var(--primary-soft);
+}
 
 .msg { display: flex; }
 .msg-user { justify-content: flex-end; }
@@ -355,7 +396,7 @@
   display: block;
   height: 100%;
   border-radius: 999px;
-  background: linear-gradient(90deg, var(--primary) 0%, #7c3aed 100%);
+  background: var(--primary);
   transition: width 0.3s;
 }
 
@@ -432,6 +473,9 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+  width: 100%;
+  max-width: 860px;
+  margin: 0 auto;
 }
 
 .chat-composer textarea {
@@ -451,9 +495,10 @@
 
 /* ---------- 窄屏 ---------- */
 @media (max-width: 900px) {
-  .chat-layout { grid-template-columns: 1fr; }
-  .chat-main-panel { height: auto; min-height: 420px; }
-  .chat-messages { min-height: 320px; }
+  .chat-layout { grid-template-columns: 1fr; height: auto; min-height: 0; }
+  .chat-main-panel { min-height: 460px; height: auto; }
+  .chat-side > .chat-dossier-panel { flex: 0 0 auto; }
+  .chat-dossier-list { max-height: 240px; }
 }
 
 /* ---------- 参谋 Tab（L4）：话术模式库 / 信源画像 / 本周简报 ----------
@@ -476,14 +521,24 @@
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 12px 14px;
-  background: #fbfbfe;
+  background: #fafbfc;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .insight-card-title { font-size: 13.5px; font-weight: 700; margin-bottom: 8px; }
-.insight-card-body { font-size: 12.5px; line-height: 1.8; }
+.insight-card-body { font-size: 12.5px; line-height: 1.8; flex: 1 1 auto; }
 
-.insight-empty { color: var(--muted); font-size: 12.5px; margin: 0; }
+.insight-empty {
+  color: var(--muted);
+  font-size: 12.5px;
+  margin: 0;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  padding: 18px 12px;
+  text-align: center;
+}
 
 .insight-count { font-size: 13px; margin: 0 0 6px; }
 .insight-sub { font-size: 12px; margin: 0 0 8px; }

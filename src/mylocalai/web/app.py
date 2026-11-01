@@ -513,6 +513,20 @@ _STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
 
+@app.middleware("http")
+async def _static_revalidate_cache(request: Request, call_next):
+    """静态资源一律"可缓存但须回源校验"（Cache-Control: no-cache）。
+
+    页面升级后用户普通刷新即可拿到新 CSS/JS（文件变了返回新内容，
+    没变返回 304），不会吃到浏览器启发式缓存里的旧样式；
+    /api/* 与页面本身不受影响。
+    """
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 @app.get("/")
 def index() -> FileResponse:
     """首页（static/index.html）。"""

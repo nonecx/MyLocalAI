@@ -642,7 +642,7 @@
         <div class="chat-dossier-view">
           ${renderDossierChapters(d)}
           <div class="muted">证据：${batches || "0 条"} · 快照 ${Number(d.snapshot_count) || 0} 次</div>
-          <a class="chat-dossier-export" href="${apiPath(CHAT_API.dossierExport, did)}?format=md" download="dossier-${Number(did)}.md">⬇ 导出 Markdown</a>
+          <a class="chat-dossier-export" href="${apiPath(CHAT_API.dossierExport, did)}?format=md" download="dossier-${Number(did)}.md">导出 Markdown</a>
         </div>`;
       box.dataset.loaded = "1";
     } catch (e) {
@@ -665,6 +665,15 @@
       if (activeController) activeController.abort();
     });
     $("#chatNewSession").addEventListener("click", newSession);
+    /* 欢迎态示例：点击填入输入框，不自动发送（纯前端便利） */
+    document.querySelectorAll(".chat-welcome-sample").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const inp = $("#chatInput");
+        inp.value = btn.dataset.sample || "";
+        inp.focus();
+        updateCharCount();
+      });
+    });
     const input = $("#chatInput");
     input.addEventListener("input", updateCharCount);
     input.addEventListener("keydown", (e) => {
