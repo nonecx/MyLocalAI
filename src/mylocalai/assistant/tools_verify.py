@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any, Callable, Dict, List, Optional
 
@@ -126,6 +127,43 @@ def _verify_digest(result: Dict[str, Any], card: Optional[Dict[str, Any]]) -> st
     return "\n".join(lines)
 
 
+def _legacy_claim_answer(original_text: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    """Expose a truthful transitional answer contract without fabricating v0.1 fields.
+
+    The legacy RumorAgent does not provide verified public-propagation records,
+    exact claim spans, or fetched-page quote locators. Its output therefore cannot
+    satisfy the validated claim-answer contract and must be labeled incomplete.
+    """
+    claims = result.get("claims") if isinstance(result.get("claims"), list) else []
+    claim_rows = []
+    for index, item in enumerate(claims[:3], 1):
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("claim") or item.get("text") or "").strip()
+        if not text:
+            continue
+        claim_rows.append({
+            "claim_id": f"LEGACY-C{index}",
+            "claim_excerpt": text[:120],
+            "truth_assessment": None,
+            "rumor_state": None,
+            "evidence_status": "unvalidated_legacy_evidence",
+            "propagation_status": "not_started",
+            "limitations": [
+                "旧核查引擎尚未提供可验证的传播记录、主张原文定位和页面引文锚点；"
+                "本对象不是可展示的五态核查结论。"
+            ],
+        })
+    return {
+        "schema_version": 1,
+        "answer_status": "insufficient_data",
+        "checked_at": "",
+        "claims": claim_rows,
+        "limitations": ["legacy_verdict_not_mapped_to_truth_or_rumor_state"],
+        "source_text_available_in_memory": bool(original_text),
+    }
+
+
 def _start_dossier(ctx: Any, text: str, input_kind: str = "text",
                    claim_excerpt: str = "") -> Optional[int]:
     """Build a dossier only when result saving is enabled; never turn refusal into failure."""
@@ -184,7 +222,27 @@ def _verify_claim(ctx: Any, text: str, deep: bool = False) -> Dict[str, Any]:
     card = rec.get("card")
     store_failed = bool(rec.get("degraded"))
     not_saved = dossier_id is None
+    claim_answer = _legacy_claim_answer(str(text), result)
     digest = _verify_digest(result, card)
+    # The new answer object is the only source the narrator may use for truth/rumor
+    # wording. Legacy risk scores remain compatibility card data, not a verdict.
+    answer_view = {
+        "answer_status": claim_answer["answer_status"],
+        "checked_at": claim_answer["checked_at"],
+        "claims": [{
+            "claim_id": item["claim_id"],
+            "claim_excerpt": item["claim_excerpt"],
+            "truth_assessment": item.get("truth_assessment"),
+            "rumor_assessment": item.get("rumor_assessment"),
+            "propagation_records": item.get("propagation_records", []),
+            "key_evidence": item.get("key_evidence", []),
+            "limitations": ((item.get("rumor_assessment") or {}).get("limitations", [])
+                            if isinstance(item.get("rumor_assessment"), dict)
+                            else item.get("limitations", [])),
+        } for item in claim_answer.get("claims", [])],
+        "limitations": claim_answer.get("limitations", []),
+    }
+    digest += "\n[claim_answer]\n" + json.dumps(answer_view, ensure_ascii=False)
     if not_saved:
         digest += "\n- 本次结果未保存到本机（保存偏好关闭或档案服务不可用）。"
     return _result(result, card, digest,
@@ -193,7 +251,8 @@ def _verify_claim(ctx: Any, text: str, deep: bool = False) -> Dict[str, Any]:
                    label=str(result.get("label", "")), risk_score=result.get("risk_score"),
                    version=rec.get("version"), batch=rec.get("batch"),
                    not_saved=not_saved,
-                   save_reason="results_disabled_or_store_unavailable" if not_saved else "")
+                   save_reason="results_disabled_or_store_unavailable" if not_saved else "",
+                    claim_answer=claim_answer)
 
 
 def _analyze_speech(ctx: Any, text: str) -> Dict[str, Any]:

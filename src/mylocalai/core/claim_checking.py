@@ -64,6 +64,12 @@ def validate_timestamp(value: Any, field: str = "timestamp", *, optional: bool =
                 pass
         raise ValueError(f"{field} must be ISO-8601") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
+        if allow_date_only:
+            try:
+                datetime.strptime(text, "%Y-%m-%d")
+                return text
+            except ValueError:
+                pass
         raise ValueError(f"{field} must include a timezone offset")
     return text
 
@@ -429,10 +435,12 @@ def derive_rumor_state(*, claim_id: str,
     limitations = _string_list(truth_assessment.get("limitations"), "limitations")
     if truth_assessment.get("review_required") is True:
         limitations.append("独立复核尚未完成；当前判断为初步判断。")
-    if propagation_status != "completed" and any(
-        isinstance(row, Mapping) and row.get("status") == "verified" for row in records
-    ):
+    has_verified_record = any(
+        isinstance(row, Mapping) and row.get("status") == "verified" for row in records)
+    if propagation_status != "completed" and has_verified_record:
         limitations.append("已核验至少一条公开发布记录，但传播检索未完整完成。")
+    if fact_search_status != "completed":
+        limitations.append("事实证据检索未完整完成，真实性判断仍有缺口。")
     return {
         "state": state,
         "label": RUMOR_STATE_LABELS.get(state) if state is not None else None,

@@ -1041,10 +1041,14 @@ class AssistantLoop:
                              "run_cost": run_cost})
 
             # ⑤ 卡片永远在叙述之前；卡片同时以 kind="card" 落库
+            claim_answer = out.get("claim_answer")
+            if isinstance(claim_answer, dict):
+                result["claim_answer"] = claim_answer
             card = out.get("card")
             if isinstance(card, dict) and card:
                 self._emit_card(events, sessions, session_id,
-                                _CARD_TYPE.get(str(step["action"]), "conclusion"), card, run_id)
+                                _CARD_TYPE.get(str(step["action"]), "conclusion"), card, run_id,
+                                claim_answer=claim_answer if isinstance(claim_answer, dict) else None)
                 result["card"] = card
             cost["requests"] += int(run_cost.get("requests", 0))
             cost["tokens"] += int(run_cost.get("tokens", 0))
@@ -1132,7 +1136,8 @@ class AssistantLoop:
     # ---- 组装件 ----
 
     def _emit_card(self, events: EventStream, sessions: Any, session_id: int,
-                   card_type: str, card: Dict[str, Any], run_id: Optional[int]) -> None:
+                   card_type: str, card: Dict[str, Any], run_id: Optional[int],
+                   claim_answer: Optional[Dict[str, Any]] = None) -> None:
         """card 事件 + kind="card" 落库。
 
         载荷形状（编排者契约，web 端按此实现）：{"card_type": ..., "card": {...}}；
@@ -1141,6 +1146,8 @@ class AssistantLoop:
         onCard 会先解 d.card，两种形状都成立（与 web 层实现逐一对过）。
         """
         payload: Dict[str, Any] = {"card_type": card_type, "card": card}
+        if isinstance(claim_answer, dict):
+            payload["claim_answer"] = claim_answer
         payload.update({k: v for k, v in card.items() if k not in payload})
         events.emit("card", **payload)
         sessions.add_message(session_id, "assistant", json.dumps(payload, ensure_ascii=False),
