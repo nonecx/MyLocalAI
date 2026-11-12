@@ -399,6 +399,20 @@ class TestChatFrontendConsistency(unittest.TestCase):
         # 三个渲染器都会输出 as_of 行（口径诚实：数字旁必须展示 as_of）
         self.assertGreaterEqual(self.cards_js.count("asOfLine("), 4)
 
+    def test_claim_answer_renderer_contract(self):
+        """新答案先于 legacy score card；未验证时不展示旧风险数值。"""
+        self.assertIn("function renderClaimAnswer", self.cards_js)
+        self.assertIn("payload.claim_answer", self.cards_js)
+        self.assertIn("insufficient_data", _read(ROOT / "src" / "mylocalai" / "assistant" / "prompts.json"))
+        self.assertIn("不得自行补状态", _read(ROOT / "src" / "mylocalai" / "assistant" / "prompts.json"))
+        self.assertIn("疑似谣言（尚未证实）", self.cards_js)
+        # The insufficient-data branch must not call renderConclusion.
+        branch = self.cards_js.split('if (answer.answer_status !== "validated")', 1)[1].split("const rows", 1)[0]
+        self.assertNotIn("renderConclusion", branch)
+        self.assertIn("rel=\"noopener noreferrer\"", self.cards_js)
+        self.assertIn("escapeHtml(claim.claim_excerpt", self.cards_js)
+        self.assertIn("本轮没有足够的已核验材料形成完整判断", self.cards_js)
+
     def test_index_references_chat_assets_exist(self):
         """index.html 引用的 chat.js / cards.js / chat.css 文件都存在，双 Tab 就位。"""
         for ref in ("static/chat.js", "static/cards.js", "static/chat.css"):

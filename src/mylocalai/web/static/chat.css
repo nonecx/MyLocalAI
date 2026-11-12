@@ -409,6 +409,20 @@
   background: var(--panel);
 }
 
+.chat-card-claim-answer { font-size: 13px; line-height: 1.55; }
+.chat-card-claim-answer > p { margin: 6px 0; }
+.claim-answer-item { margin: 10px 0; }
+.claim-answer-item > p { margin: 5px 0; }
+.claim-answer-item details { margin-top: 6px; }
+.claim-answer-item summary { cursor: pointer; font-weight: 600; }
+.claim-answer-item blockquote {
+  margin: 5px 0 5px 12px;
+  padding-left: 9px;
+  border-left: 2px solid var(--border);
+  color: var(--muted);
+}
+.claim-answer-item a { color: var(--primary); overflow-wrap: anywhere; }
+
 .chat-card-title {
   font-size: 13px;
   font-weight: 700;

@@ -206,6 +206,12 @@
   }
 
   function onCard(d) {
+    /* New answer contract takes precedence over legacy risk cards. */
+    if (d && typeof d === "object" && d.claim_answer) {
+      partEl(".chat-card-slot").innerHTML = window.ChatCards.renderClaimAnswer(d.claim_answer);
+      scrollBottom();
+      return;
+    }
     /* 卡片永远在叙述前（协议保证）；载荷可能是卡片本体或 {card: {...}} 包装 */
     const card = (d && typeof d === "object" && d.card && typeof d.card === "object") ? d.card : d;
     partEl(".chat-card-slot").innerHTML = window.ChatCards.renderCard(card);
