@@ -85,9 +85,15 @@ def _check_heat(ctx: Any, topic: str) -> Dict[str, Any]:
         dossier_id = None
     # 一次联网估参 = 1 轮检索（§5.2 成本口径）；占位/降级输出如实计 0
     requests = 0 if degraded else 1
-    return {"ok": True, "card": card, "digest": _heat_digest(str(topic), detail, card),
+    not_saved = dossier_id is None
+    digest = _heat_digest(str(topic), detail, card)
+    if not_saved:
+        digest += "\n- 本次热度结果未保存到本机（保存偏好关闭或档案服务不可用）。"
+    return {"ok": True, "card": card, "digest": digest,
             "cost": {"requests": requests, "tokens": 0},
             "dossier_id": dossier_id, "degraded": degraded,
+            "not_saved": not_saved,
+            "save_reason": "results_disabled_or_store_unavailable" if not_saved else "",
             "score": card["score"], "band": card["band"], "quality": detail.get("quality", "")}
 
 

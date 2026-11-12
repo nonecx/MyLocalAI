@@ -22,6 +22,7 @@ from tempfile import TemporaryDirectory
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from mylocalai.core.privacy import DEFAULT_PREFERENCES, PrivacyPreferences, _validated  # noqa: E402
 from mylocalai.dossier.service import DossierService  # noqa: E402
 from mylocalai.dossier.store import DossierStore  # noqa: E402
 
@@ -70,7 +71,11 @@ class DossierServiceTestBase(unittest.TestCase):
     def setUp(self):
         self.tmp = TemporaryDirectory()
         self.store = DossierStore(Path(self.tmp.name) / "dossier.db")
-        self.svc = DossierService(store=self.store)
+        prefs = dict(DEFAULT_PREFERENCES)
+        prefs["save_enabled"] = {"results": True, "raw_input": True,
+                                 "external_cache": True}
+        self.svc = DossierService(store=self.store,
+                                  privacy=PrivacyPreferences(_validated(prefs)))
 
     def tearDown(self):
         self.svc.close()

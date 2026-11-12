@@ -301,7 +301,7 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 1040 个用例（unittest discover 全量，2026-10-31 L4 实测；**M4 起由
+离线套件共 1089 个用例（unittest discover 全量，2026-10-31 L4 实测；**M4 起由
 `tests.test_readme_counts` 自动校验此数字与 mock 闸门条数，改动后须同步回写**）：
 M1-M3 的全部回归（详见 git 历史），加上 M4 新增模块：
 **成本真实计数**（llm_client 进程级计数器：真实上游调用数 + usage tokens，缓存命中/
@@ -333,6 +333,7 @@ source_profile 注入：空画像逐位不变守卫、抬分端到端、装配�
 
 ## 文档
 
+- `docs/Agent工作流规格-v0.1.md` —— **Agent 工作流实施基线**（用户能力、主张/传播证据双维判定、外发授权、分类保存与验收矩阵；规格不等于所有阶段已实现）。
 - `docs/使用说明书.md` —— **使用者操作手册**（安装/配置/启动/三个 Tab/命令行/MCP/配置调整/数据备份/常见问题）。
 - `docs/研究报告-2026-10-30.md` —— 重塑前的质量基线与实测证据（智能助手重塑的依据）。
 - `docs/评估-真流式-2026-10-31.md` —— M4 真流式评估（现状/要动的面/收益/风险；结论：建议 M5 前不做，拍板留给作者）。

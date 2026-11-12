@@ -28,6 +28,7 @@ sys.path.insert(0, str(ROOT))
 
 import mylocalai.assistant as assistant_pkg  # noqa: E402
 from mylocalai.assistant.loop import AssistantLoop  # noqa: E402
+from mylocalai.core.privacy import DEFAULT_PREFERENCES, PrivacyPreferences, _validated  # noqa: E402
 from mylocalai.assistant.events import EventStream  # noqa: E402
 from mylocalai.assistant.session_store import SessionStore  # noqa: E402
 from mylocalai.dossier.service import DossierService  # noqa: E402

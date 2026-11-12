@@ -263,11 +263,25 @@ def default_providers() -> List[object]:
 
 
 def search_all(query: str, k: int = 6,
-               providers: Optional[List[object]] = None) -> Dict[str, object]:
+               providers: Optional[List[object]] = None,
+               *, authorized: Optional[bool] = None) -> Dict[str, object]:
     """多后端搜索 + 按 URL 去重合并。返回 {query, results, engines}，绝不抛异常。
 
     providers 缺省时用 default_providers()（环境变量可插拔专用 API）。
     """
+    if authorized is None:
+        if providers is not None:
+            # Explicit providers are caller-owned transports (tests/local adapters).
+            authorized = True
+        else:
+            try:
+                from mylocalai.core.privacy import load_preferences
+                authorized = load_preferences().external_allowed("public-search")
+            except Exception:
+                authorized = False
+    if not authorized:
+        return {"query": query, "results": [], "engines": {}, "blocked": True,
+                "error": "external_processing_not_authorized"}
     engines: Dict[str, Dict[str, object]] = {}
     merged: List[SearchResult] = []
     seen = set()

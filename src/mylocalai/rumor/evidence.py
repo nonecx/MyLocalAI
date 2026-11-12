@@ -454,6 +454,10 @@ def collect_evidence(
         except Exception as exc:  # noqa: BLE001
             book["error"] = f"搜索异常: {type(exc).__name__}"
             break
+        if result.get("blocked"):
+            book["error"] = "外部搜索未授权，未执行网络检索"
+            book["search_status"] = "blocked"
+            break
         book["queries"].append({"query": q, "extra": extra,
                                 "engines": result.get("engines", {})})
         for r in result.get("results", []):
@@ -468,6 +472,9 @@ def collect_evidence(
             rounds.append([query + " 辟谣", True])
 
     if not book["entries"]:
+        if book.get("search_status") == "blocked":
+            book["verdict_hint"] = "外部搜索未授权，未执行核查"
+            return book
         if book["error"] is None:
             book["error"] = "搜索无结果"
         book["verdict_hint"] = "无证据"

@@ -11,7 +11,8 @@ import json
 import threading
 from typing import Any, Dict, List, Optional
 
-from mylocalai.dossier.store import connect, default_db_path
+from mylocalai.core.privacy import PrivacyPreferences, load_preferences
+from mylocalai.dossier.store import _expiry, connect, default_db_path
 
 __all__ = ["SessionStore"]
 
@@ -25,8 +26,12 @@ def _now() -> str:
 
 
 class SessionStore:
-    def __init__(self, db_path: Optional[object] = None) -> None:
+    def __init__(self, db_path: Optional[object] = None,
+                 privacy: Optional[PrivacyPreferences] = None,
+                 persist_input: Optional[bool] = None) -> None:
         self._conn = connect(db_path if db_path is not None else default_db_path())
+        self._privacy = privacy or load_preferences()
+        self._persist_input_override = persist_input
         self._lock = threading.RLock()
         from mylocalai.dossier.store import migrate
         with self._lock:
@@ -36,14 +41,25 @@ class SessionStore:
         with self._lock:
             self._conn.close()
 
+    def _can_persist_input(self) -> bool:
+        if self._persist_input_override is not None:
+            return bool(self._persist_input_override)
+        return self._privacy.raw_input_allowed()
+
+    def _can_persist_result(self) -> bool:
+        return self._privacy.result_allowed()
+
     # ---- sessions ----
 
     def create_session(self, title: str = "") -> int:
         now = _now()
+        persisted_title = str(title or "") if self._can_persist_input() else ""
+        raw_expiry = _expiry(self._privacy.retention_days("raw_input")) if persisted_title else None
         with self._lock, self._conn:
             cur = self._conn.execute(
-                "INSERT INTO sessions (title, created_at, updated_at) VALUES (?, ?, ?)",
-                (str(title or ""), now, now))
+                "INSERT INTO sessions (title, created_at, updated_at, raw_input_expires_at)"
+                " VALUES (?, ?, ?, ?)",
+                (persisted_title, now, now, raw_expiry))
             return int(cur.lastrowid)
 
     def get_session(self, session_id: int) -> Optional[Dict[str, Any]]:
@@ -81,11 +97,22 @@ class SessionStore:
                     tool_run_id: Optional[int] = None) -> int:
         assert role in VALID_ROLES, f"role 非法: {role}"
         assert kind in VALID_KINDS, f"kind 非法: {kind}"
+        if kind == "tool_event":
+            category = "operational"
+            allowed = True
+        else:
+            category = "raw_input" if role == "user" or role == "system_note" else "results"
+            allowed = self._can_persist_input() if category == "raw_input" else self._can_persist_result()
+        persisted = str(content or "") if allowed and category != "operational" else ""
+        expires = (_expiry(self._privacy.retention_days(category))
+                   if allowed and category in ("raw_input", "results") else None)
         with self._lock, self._conn:
             cur = self._conn.execute(
-                "INSERT INTO messages (session_id, role, kind, content, tool_run_id, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                (session_id, role, kind, str(content or ""), tool_run_id, _now()))
+                "INSERT INTO messages (session_id, role, kind, content, tool_run_id, created_at,"
+                " raw_input_expires_at, result_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (session_id, role, kind, persisted, tool_run_id, _now(),
+                 expires if category == "raw_input" else None,
+                 expires if category == "results" else None))
             self._conn.execute("UPDATE sessions SET updated_at = ? WHERE id = ?",
                                (_now(), session_id))
             return int(cur.lastrowid)
@@ -106,12 +133,28 @@ class SessionStore:
 
     # ---- tool_runs ----
 
+    @staticmethod
+    def _redact_args(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {str(key): SessionStore._redact_args(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [SessionStore._redact_args(item) for item in value]
+        if isinstance(value, str):
+            return ""  # tool args may contain raw user text, URLs, or model payloads
+        return value
+
     def start_run(self, session_id: int, tool: str, args: Optional[Dict[str, Any]]) -> int:
+        persisted_args = args or {}
+        if not self._can_persist_input():
+            persisted_args = self._redact_args(persisted_args)
+        raw_expiry = _expiry(self._privacy.retention_days("raw_input")) if self._can_persist_input() else None
+        result_expiry = _expiry(self._privacy.retention_days("results")) if self._can_persist_result() else None
         with self._lock, self._conn:
             cur = self._conn.execute(
-                "INSERT INTO tool_runs (session_id, tool, args, status, created_at)"
-                " VALUES (?, ?, ?, 'running', ?)",
-                (session_id, str(tool or ""), json.dumps(args or {}, ensure_ascii=False), _now()))
+                "INSERT INTO tool_runs (session_id, tool, args, status, created_at,"
+                " input_expires_at, result_expires_at) VALUES (?, ?, ?, 'running', ?, ?, ?)",
+                (session_id, str(tool or ""), json.dumps(persisted_args, ensure_ascii=False), _now(),
+                 raw_expiry, result_expiry))
             return int(cur.lastrowid)
 
     def finish_run(self, run_id: int, status: str, degraded: bool = False,

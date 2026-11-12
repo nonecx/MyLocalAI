@@ -48,6 +48,7 @@ from mylocalai.llm import llm_cache  # noqa: E402
 from mylocalai.llm import llm_client as _llm_client  # noqa: E402
 from mylocalai.util.console_io import force_utf8_stdio  # noqa: E402
 from mylocalai.util.text_safety import has_surrogates, sanitize_text  # noqa: E402
+from mylocalai.web.privacy_api import router as privacy_router  # noqa: E402
 
 # 非 UTF-8 控制台（英文 Windows 的 cp1252 等）下，日志里的中文会抛 UnicodeEncodeError。
 force_utf8_stdio()
@@ -98,6 +99,7 @@ app = FastAPI(
     description="情感 / 攻击性 / 逻辑三维分析 + 规则引擎裁判 + 报告生成（复用项目根目录分析链路）",
     version="1.0.0",
 )
+app.include_router(privacy_router)
 
 # 内存历史（最新在前）。仅作演示用途：重启服务即清空，不落盘。
 _history: List[Dict[str, Any]] = []

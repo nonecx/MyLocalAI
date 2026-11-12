@@ -828,7 +828,12 @@ class AssistantLoop:
 
         # ① 用户消息落库；历史快照定在"本回合产物之前"（叙述吃 digest，不吃卡片 JSON）
         sessions.add_message(session_id, "user", user_text)
+        # Persistence policy controls disk storage, not the in-flight conversation.
+        # When raw-input saving is disabled, SessionStore intentionally stores an
+        # empty marker; reconstruct this turn in memory so routing/narration still work.
         history = sessions.messages(session_id)
+        if not history or history[-1].get("role") != "user" or not history[-1].get("content"):
+            history = list(history) + [{"role": "user", "kind": "text", "content": user_text}]
 
         # ② 拒绝词表预检：注入指令在进路由模型之前就被拦下（§5.6 对话层第一道闸）。
         #    优先级最高：待决旁过也不豁免拒绝预检。

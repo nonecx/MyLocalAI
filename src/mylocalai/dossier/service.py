@@ -21,6 +21,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from mylocalai.core.card import derive_card
+from mylocalai.core.privacy import PrivacyPreferences, load_preferences
 from mylocalai.dossier.store import DossierStore
 
 __all__ = ["DossierService"]
@@ -81,18 +82,41 @@ def _now_iso() -> str:
 class DossierService:
     """档案域编排门面（store 之上的业务语义层）。"""
 
-    def __init__(self, store: Optional[DossierStore] = None) -> None:
+    def __init__(self, store: Optional[DossierStore] = None,
+                 privacy: Optional[PrivacyPreferences] = None) -> None:
         self.store = store or DossierStore()
+        self.privacy = privacy or load_preferences()
 
     def close(self) -> None:
         self.store.close()
 
+    def _require_results_enabled(self) -> None:
+        if not self.privacy.result_allowed():
+            raise PermissionError("核查结果保存未启用")
+
+    def _result_expiry_days(self) -> Optional[int]:
+        return self.privacy.retention_days("results") if self.privacy.result_allowed() else None
+
     # ---- 建档 ----
 
     def start_dossier(self, text: str, title: Optional[str] = None,
-                      input_kind: str = "text") -> int:
-        title = title or (str(text or "").strip()[:24] or "未命名核查")
-        return self.store.create_dossier(title, str(text or ""), input_kind=input_kind)
+                      input_kind: str = "text", *, claim_excerpt: str = "") -> Optional[int]:
+        """Create a result record only when enabled; raw input is stored independently."""
+        if not self.privacy.result_allowed():
+            return None
+        original = str(text or "")
+        save_raw_input = self.privacy.raw_input_allowed()
+        input_text = original if save_raw_input else ""
+        saved_claim = str(claim_excerpt or "")
+        title_source = saved_claim or input_text
+        title = title or (title_source.strip()[:24] or "未命名核查")
+        return self.store.create_dossier(
+            title, input_text, input_kind=input_kind, claim_excerpt=saved_claim,
+            save_result=True,
+            result_retention_days=self.privacy.retention_days("results"),
+            save_raw_input=bool(input_text),
+            raw_input_retention_days=(self.privacy.retention_days("raw_input")
+                                      if input_text else None))
 
     # ---- 结论落库（verify / recheck 共用） ----
 
@@ -107,6 +131,8 @@ class DossierService:
         独立兜底，成功时不加任何新键，失败只附加 "markers_error"。
         """
         out: Dict[str, Any] = {"version": None, "card": None, "batch": None}
+        if not self.privacy.result_allowed():
+            return {**out, "not_saved": True, "reason": "results_saving_disabled"}
         try:
             book = result.get("evidence_book") or {}
             entries = [e for e in (book.get("entries") or []) if isinstance(e, dict)]
@@ -114,7 +140,11 @@ class DossierService:
             prev = self.store.evidence(dossier_id)
             if prev:
                 batch = max(int(r.get("batch", 1)) for r in prev) + 1
-            self.store.add_evidence(dossier_id, batch, entries)
+            self.store.add_evidence(
+                dossier_id, batch, entries,
+                save_external_cache=self.privacy.cache_allowed(),
+                cache_retention_days=(self.privacy.retention_days("external_cache")
+                                      if self.privacy.cache_allowed() else None))
             out["batch"] = batch
 
             card = derive_card(result, entries, as_of=_now_iso())
@@ -126,7 +156,8 @@ class DossierService:
                 evidence_sufficiency=card["evidence_sufficiency"],
                 as_of=card["as_of"],
                 recheck_conditions=card["recheck_conditions"],
-                raw_verdict={k: result.get(k) for k in
+                result_retention_days=self.privacy.retention_days("results"),
+                 raw_verdict={k: result.get(k) for k in
                              ("label", "risk_score", "signals", "speech_tier", "confidence")
                              if k in result},
             )
@@ -150,7 +181,8 @@ class DossierService:
         if out.get("version") is not None:
             try:
                 dossier = self.store.get_dossier(dossier_id) or {}
-                input_text = str(dossier.get("input_text") or "")
+                input_text = (str(dossier.get("input_text") or "")
+                              if self.privacy.raw_input_allowed() else "")
                 if input_text:
                     from mylocalai.rumor.patterns import scan_markers
                     self.store.record_markers(dossier_id, scan_markers(input_text))
@@ -161,6 +193,7 @@ class DossierService:
     def record_speech_analysis(self, dossier_id: int, result: Dict[str, Any],
                                duration_s: float = 0.0) -> Dict[str, Any]:
         """classic（言论土壤）结果建档：四档结论为标签，无风险分，无证据本。"""
+        self._require_results_enabled()
         out: Dict[str, Any] = {"version": None, "card": None}
         try:
             conclusion = str(result.get("conclusion", ""))
@@ -170,7 +203,8 @@ class DossierService:
                 confidence=card["confidence"],
                 evidence_sufficiency=card["evidence_sufficiency"],
                 as_of=card["as_of"], recheck_conditions=card["recheck_conditions"],
-                raw_verdict={k: result.get(k) for k in
+                result_retention_days=self.privacy.retention_days("results"),
+                 raw_verdict={k: result.get(k) for k in
                              ("emotion", "attack", "logic", "conclusion") if k in result})
             out["version"] = version
             out["card"] = card
@@ -188,6 +222,7 @@ class DossierService:
 
     def record_heat(self, dossier_id: int, detail: Dict[str, Any],
                     profile: str = "") -> int:
+        self._require_results_enabled()
         return self.store.add_snapshot(
             dossier_id, float(detail.get("x", 0)), float(detail.get("y", 0)),
             float(detail.get("z", 0)), float(detail.get("score", 0)),
@@ -195,6 +230,7 @@ class DossierService:
             proxy_flags=list(detail.get("proxy_flags") or []))
 
     def record_opinions(self, dossier_id: int, payload: Dict[str, Any]) -> int:
+        self._require_results_enabled()
         book = payload.get("evidence_book") or {}
         prev = self.store.evidence(dossier_id)
         batch = (max(int(r.get("batch", 1)) for r in prev) if prev else 1)
@@ -203,6 +239,7 @@ class DossierService:
             summary=str(payload.get("summary", "")), degraded=bool(payload.get("degraded")))
 
     def record_deep_read(self, dossier_id: int, payload: Dict[str, Any]) -> int:
+        self._require_results_enabled()
         return self.store.add_deep_read(
             dossier_id, payload, degraded=bool(payload.get("degraded")),
             guard_dropped=list(payload.get("guard_dropped") or []))

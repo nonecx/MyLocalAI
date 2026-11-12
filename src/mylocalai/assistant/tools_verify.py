@@ -126,10 +126,12 @@ def _verify_digest(result: Dict[str, Any], card: Optional[Dict[str, Any]]) -> st
     return "\n".join(lines)
 
 
-def _start_dossier(ctx: Any, text: str, input_kind: str = "text") -> Optional[int]:
-    """建档失败不挡主结论：返回 None，档案写不进就如实 degraded（§5.7 降级也体面）。"""
+def _start_dossier(ctx: Any, text: str, input_kind: str = "text",
+                   claim_excerpt: str = "") -> Optional[int]:
+    """Build a dossier only when result saving is enabled; never turn refusal into failure."""
     try:
-        return ctx.dossiers.start_dossier(text, input_kind=input_kind)
+        return ctx.dossiers.start_dossier(text, input_kind=input_kind,
+                                          claim_excerpt=claim_excerpt)
     except Exception:  # noqa: BLE001
         return None
 
@@ -172,15 +174,26 @@ def _verify_claim(ctx: Any, text: str, deep: bool = False) -> Dict[str, Any]:
     # requests 口径：agent 返回的 llm_turns（M4 接 llm_client 计数包装后换真实值）
     requests = int(result.get("llm_turns") or 0)
 
-    dossier_id = _start_dossier(ctx, str(text))
+    claims = result.get("claims") if isinstance(result.get("claims"), list) else []
+    claim_excerpt = "；".join(
+        str(item.get("claim") or item.get("text") or "").strip()[:120]
+        for item in claims if isinstance(item, dict)
+        and str(item.get("claim") or item.get("text") or "").strip())[:500]
+    dossier_id = _start_dossier(ctx, str(text), claim_excerpt=claim_excerpt)
     rec = _record(ctx, dossier_id, result, kind="verify", duration_s=duration, requests=requests)
     card = rec.get("card")
     store_failed = bool(rec.get("degraded"))
-    return _result(result, card, _verify_digest(result, card),
+    not_saved = dossier_id is None
+    digest = _verify_digest(result, card)
+    if not_saved:
+        digest += "\n- 本次结果未保存到本机（保存偏好关闭或档案服务不可用）。"
+    return _result(result, card, digest,
                    {"requests": requests, "tokens": 0}, dossier_id,
                    degraded or store_failed,
                    label=str(result.get("label", "")), risk_score=result.get("risk_score"),
-                   version=rec.get("version"), batch=rec.get("batch"))
+                   version=rec.get("version"), batch=rec.get("batch"),
+                   not_saved=not_saved,
+                   save_reason="results_disabled_or_store_unavailable" if not_saved else "")
 
 
 def _analyze_speech(ctx: Any, text: str) -> Dict[str, Any]:
@@ -194,7 +207,8 @@ def _analyze_speech(ctx: Any, text: str) -> Dict[str, Any]:
         result = {}
     degraded = bool(result.get("degraded_components"))
 
-    dossier_id = _start_dossier(ctx, str(text))
+    speech_excerpt = str(result.get("conclusion") or "").strip()[:240]
+    dossier_id = _start_dossier(ctx, str(text), claim_excerpt=speech_excerpt)
     rec: Dict[str, Any] = {}
     if dossier_id is not None:
         try:
@@ -228,8 +242,13 @@ def _analyze_speech(ctx: Any, text: str) -> Dict[str, Any]:
     if degraded:
         lines.append("- 部分维度降级（组件结果缺失，如实标注）")
     digest = "\n".join(lines)
+    not_saved = dossier_id is None
+    if not_saved:
+        digest += "\n- 本次言论分析结果未保存到本机（保存偏好关闭或档案服务不可用）。"
     return _result(result, card, digest, {"requests": 0, "tokens": 0}, dossier_id, degraded,
-                   conclusion=str(result.get("conclusion", "")), version=rec.get("version"))
+                   conclusion=str(result.get("conclusion", "")), version=rec.get("version"),
+                   not_saved=not_saved,
+                   save_reason="results_disabled_or_store_unavailable" if not_saved else "")
 
 
 def _recheck_dossier(ctx: Any, id: int) -> Dict[str, Any]:  # noqa: A002  与路由参数名一致
@@ -245,7 +264,14 @@ def _recheck_dossier(ctx: Any, id: int) -> Dict[str, Any]:  # noqa: A002  与路
         return _result({}, None, f"档案 #{id} 不存在，无法复检。请先用 list_dossiers 确认档案号。",
                        {"requests": 0, "tokens": 0}, None, False, ok=False, not_found=True)
 
-    text = str(row.get("input_text") or "")
+    full_input_saved = bool(str(row.get("input_text") or "").strip())
+    text = str(row.get("input_text") or row.get("claim_excerpt") or "")
+    if not text.strip():
+        return _result({}, None,
+                       f"档案 #{id} 未保存可用于复检的原始输入或主张摘录。"
+                       "请重新提交原始说法发起一次新核查。",
+                       {"requests": 0, "tokens": 0}, int(id), False,
+                       ok=False, not_saved=True, reason="raw_input_unavailable")
     t0 = time.perf_counter()
     result = services["verify"](text, False, on_component_done=_progress_emitter(ctx.events),
                                 cancel_check=getattr(ctx, "cancel_check", None)) or {}
@@ -277,6 +303,8 @@ def _recheck_dossier(ctx: Any, id: int) -> Dict[str, Any]:  # noqa: A002  与路
         pass
 
     lines = ["[复检结论]", _verify_digest(result, card)]
+    if not full_input_saved:
+        lines.append("- 本次仅基于已保存的最小主张摘录复检，未包含原始输入全文。")
     lines.extend(compare_lines)
     return _result(result, card, "\n".join(lines), {"requests": requests, "tokens": 0},
                    int(id), degraded,

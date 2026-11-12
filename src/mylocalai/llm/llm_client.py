@@ -605,6 +605,14 @@ def _chat_raw_providers(
         if spec is None:
             errors.append(f"{name}: 未知提供方")
             continue
+        base_url = os.environ.get(spec["base_url_env"], "").strip() or spec["base_url"]
+        try:
+            from mylocalai.core.privacy import load_preferences
+            load_preferences().require_provider(name, base_url)
+        except Exception as exc:
+            # Fail closed before client construction or any outbound HTTP request.
+            errors.append(f"{name}: {type(exc).__name__}: {exc}")
+            continue
         # index 0 走模块级 create_client（保留"monkeypatch create_client -> None
         # 即可验证报告回退"这一既有测试手法）；备用链路按提供方各自取密钥
         if index == 0:

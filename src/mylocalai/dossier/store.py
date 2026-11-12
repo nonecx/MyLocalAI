@@ -26,7 +26,7 @@ from typing import Any, Dict, Iterable, List, Optional
 __all__ = ["SCHEMA_VERSION", "DEFAULT_DB_PATH", "connect", "migrate",
            "DossierStore", "default_db_path"]
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 #: 顺序迁移：索引 i 的脚本把库从版本 i 升到 i+1。永不修改已发布的条目，只允许追加。
 MIGRATIONS: List[str] = [
@@ -175,6 +175,35 @@ MIGRATIONS: List[str] = [
     );
     CREATE UNIQUE INDEX IF NOT EXISTS idx_dossier_markers_dossier ON dossier_markers(dossier_id);
     """,
+    # v5: retention classification and first-save expiry. Existing records receive
+    # one migration grace period; subsequent writes calculate expiry at insertion.
+    """
+    ALTER TABLE dossiers ADD COLUMN result_expires_at TEXT;
+    ALTER TABLE dossiers ADD COLUMN raw_input_expires_at TEXT;
+    ALTER TABLE dossiers ADD COLUMN claim_excerpt TEXT NOT NULL DEFAULT '';
+    ALTER TABLE evidence_entries ADD COLUMN cache_expires_at TEXT;
+    ALTER TABLE sessions ADD COLUMN raw_input_expires_at TEXT;
+    ALTER TABLE messages ADD COLUMN raw_input_expires_at TEXT;
+    ALTER TABLE messages ADD COLUMN result_expires_at TEXT;
+    ALTER TABLE tool_runs ADD COLUMN input_expires_at TEXT;
+    ALTER TABLE tool_runs ADD COLUMN result_expires_at TEXT;
+    UPDATE dossiers SET result_expires_at = datetime('now', '+90 days');
+    UPDATE dossiers SET raw_input_expires_at = datetime('now', '+30 days')
+        WHERE input_text IS NOT NULL AND input_text != '';
+    UPDATE evidence_entries SET cache_expires_at = datetime(fetched_at, '+7 days')
+        WHERE fetched_at IS NOT NULL AND fetched_at != '';
+    UPDATE sessions SET raw_input_expires_at = datetime('now', '+30 days');
+    UPDATE messages SET raw_input_expires_at = datetime('now', '+30 days')
+        WHERE role IN ('user', 'system_note') AND content IS NOT NULL AND content != '';
+    UPDATE messages SET result_expires_at = datetime('now', '+90 days')
+        WHERE role = 'assistant' AND content IS NOT NULL AND content != '';
+    CREATE INDEX IF NOT EXISTS idx_dossiers_result_expiry ON dossiers(result_expires_at);
+    CREATE INDEX IF NOT EXISTS idx_dossiers_input_expiry ON dossiers(raw_input_expires_at);
+    CREATE INDEX IF NOT EXISTS idx_evidence_cache_expiry ON evidence_entries(cache_expires_at);
+    CREATE INDEX IF NOT EXISTS idx_sessions_input_expiry ON sessions(raw_input_expires_at);
+    CREATE INDEX IF NOT EXISTS idx_messages_input_expiry ON messages(raw_input_expires_at);
+    CREATE INDEX IF NOT EXISTS idx_messages_result_expiry ON messages(result_expires_at);
+    """,
 ]
 
 
@@ -206,6 +235,24 @@ def connect(db_path: Optional[os.PathLike | str] = None) -> sqlite3.Connection:
 def _now() -> str:
     from datetime import datetime
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _expiry(days: Optional[int], *, from_time: Optional[str] = None) -> Optional[str]:
+    if days is None:
+        return None
+    from datetime import datetime, timedelta, timezone
+    if isinstance(days, bool) or not isinstance(days, int) or days < 1:
+        raise ValueError("retention days must be a positive integer")
+    if from_time:
+        try:
+            base = datetime.fromisoformat(str(from_time).replace("Z", "+00:00"))
+        except ValueError:
+            base = datetime.now().astimezone()
+        if base.tzinfo is None:
+            base = base.replace(tzinfo=timezone.utc)
+    else:
+        base = datetime.now().astimezone()
+    return (base + timedelta(days=days)).astimezone().isoformat(timespec="seconds")
 
 
 def _dump(value: Any) -> str:
@@ -337,14 +384,22 @@ class DossierStore:
 
     # ---- 档案本体 ----
 
-    def create_dossier(self, title: str, input_text: str, input_kind: str = "text") -> int:
+    def create_dossier(self, title: str, input_text: str, input_kind: str = "text", *,
+                       claim_excerpt: str = "", save_result: bool = True,
+                       result_retention_days: Optional[int] = None,
+                       save_raw_input: bool = True,
+                       raw_input_retention_days: Optional[int] = None) -> int:
         assert input_kind in ("text", "topic"), f"input_kind 非法: {input_kind}"
         now = _now()
+        saved_input = str(input_text or "") if save_raw_input else ""
+        result_expiry = _expiry(result_retention_days) if save_result else None
+        input_expiry = _expiry(raw_input_retention_days) if save_raw_input and saved_input else None
         with self._lock, self._conn:
             cur = self._conn.execute(
-                "INSERT INTO dossiers (created_at, updated_at, title, input_text, input_kind)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (now, now, str(title or ""), str(input_text or ""), input_kind))
+                "INSERT INTO dossiers (created_at, updated_at, title, input_text, input_kind,"
+                " result_expires_at, raw_input_expires_at, claim_excerpt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (now, now, str(title or ""), saved_input, input_kind, result_expiry, input_expiry,
+                 str(claim_excerpt or "") if save_result else ""))
             return int(cur.lastrowid)
 
     def get_dossier(self, dossier_id: int) -> Optional[Dict[str, Any]]:
@@ -376,12 +431,81 @@ class DossierStore:
             cur = self._conn.execute("DELETE FROM dossiers WHERE id = ?", (dossier_id,))
             return cur.rowcount > 0
 
+    def purge_expired(self, *, now: Optional[str] = None) -> Dict[str, int]:
+        """Idempotently purge expired data by category; preserve other categories.
+
+        Result expiry deletes the dossier and cascaded result rows. Raw-input expiry
+        clears only dossier input_text and user message content. External-cache expiry
+        clears only evidence snippets, retaining source/stance metadata. Physical WAL
+        and backup reclamation remains an operator retention/checkpoint responsibility.
+        """
+        from datetime import datetime, timezone
+        current = _now() if now is None else str(now)
+        try:
+            parsed = datetime.fromisoformat(current.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("now must be an ISO-8601 timestamp") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("now must include timezone")
+        current_utc = parsed.astimezone(timezone.utc).isoformat(timespec="seconds")
+        stats = {"results_deleted": 0, "input_rows_cleared": 0, "cache_rows_cleared": 0}
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM dossiers WHERE result_expires_at IS NOT NULL "
+                "AND julianday(replace(result_expires_at, 'Z', '+00:00')) <= julianday(?)",
+                (current_utc,))
+            stats["results_deleted"] = cur.rowcount
+            cur = self._conn.execute(
+                "UPDATE dossiers SET input_text='', raw_input_expires_at=NULL "
+                "WHERE raw_input_expires_at IS NOT NULL "
+                "AND julianday(replace(raw_input_expires_at, 'Z', '+00:00')) <= julianday(?)",
+                (current_utc,))
+            stats["input_rows_cleared"] += cur.rowcount
+            cur = self._conn.execute(
+                "UPDATE messages SET content='', raw_input_expires_at=NULL "
+                "WHERE raw_input_expires_at IS NOT NULL "
+                "AND julianday(replace(raw_input_expires_at, 'Z', '+00:00')) <= julianday(?)",
+                (current_utc,))
+            stats["input_rows_cleared"] += cur.rowcount
+            cur = self._conn.execute(
+                "UPDATE sessions SET raw_input_expires_at=NULL "
+                "WHERE raw_input_expires_at IS NOT NULL "
+                "AND julianday(replace(raw_input_expires_at, 'Z', '+00:00')) <= julianday(?)",
+                (current_utc,))
+            stats["input_rows_cleared"] += cur.rowcount
+            cur = self._conn.execute(
+                "UPDATE messages SET content='', result_expires_at=NULL "
+                "WHERE result_expires_at IS NOT NULL "
+                "AND julianday(replace(result_expires_at, 'Z', '+00:00')) <= julianday(?)",
+                (current_utc,))
+            stats["results_deleted"] += cur.rowcount
+            cur = self._conn.execute(
+                "UPDATE tool_runs SET args='{}', input_expires_at=NULL "
+                "WHERE input_expires_at IS NOT NULL "
+                "AND julianday(replace(input_expires_at, 'Z', '+00:00')) <= julianday(?)",
+                (current_utc,))
+            stats["input_rows_cleared"] += cur.rowcount
+            cur = self._conn.execute(
+                "UPDATE tool_runs SET args='{}', result_expires_at=NULL "
+                "WHERE result_expires_at IS NOT NULL "
+                "AND julianday(replace(result_expires_at, 'Z', '+00:00')) <= julianday(?)",
+                (current_utc,))
+            stats["results_deleted"] += cur.rowcount
+            cur = self._conn.execute(
+                "UPDATE evidence_entries SET snippet='', cache_expires_at=NULL "
+                "WHERE cache_expires_at IS NOT NULL "
+                "AND julianday(replace(cache_expires_at, 'Z', '+00:00')) <= julianday(?)",
+                (current_utc,))
+            stats["cache_rows_cleared"] = cur.rowcount
+        return stats
+
     # ---- 结论（版本化） ----
 
     def add_conclusion(self, dossier_id: int, label: str, risk_score: Optional[float],
                        confidence: str = "", evidence_sufficiency: Optional[Dict] = None,
                        as_of: str = "", recheck_conditions: Optional[Iterable[str]] = None,
-                       raw_verdict: Optional[Dict] = None) -> int:
+                       raw_verdict: Optional[Dict] = None,
+                       result_retention_days: Optional[int] = None) -> int:
         """追加下一版本结论；返回版本号。调用方随后应 touch 档案。"""
         with self._lock, self._conn:
             row = self._conn.execute(
@@ -395,6 +519,11 @@ class DossierStore:
                 (dossier_id, version, str(label or ""), risk_score, str(confidence or ""),
                  _dump(evidence_sufficiency), str(as_of or ""),
                  _dump(list(recheck_conditions or [])), _dump(raw_verdict), _now()))
+            if result_retention_days is not None:
+                expiry = _expiry(result_retention_days)
+                self._conn.execute(
+                    "UPDATE dossiers SET result_expires_at = COALESCE(result_expires_at, ?) WHERE id = ?",
+                    (expiry, dossier_id))
             return version
 
     def conclusions(self, dossier_id: int) -> List[Dict[str, Any]]:
@@ -418,16 +547,24 @@ class DossierStore:
 
     # ---- 章节与批次数据 ----
 
-    def add_evidence(self, dossier_id: int, batch: int, entries: List[Dict[str, Any]]) -> int:
-        rows = [(dossier_id, int(batch), str(e.get("url", "")), str(e.get("domain", "")),
-                 str(e.get("domain_tier", "")), str(e.get("source_kind", "")),
-                 str(e.get("stance", "")), str(e.get("title", "")), str(e.get("snippet", "")),
-                 str(e.get("fetched_at", ""))) for e in entries]
+    def add_evidence(self, dossier_id: int, batch: int, entries: List[Dict[str, Any]], *,
+                     save_external_cache: bool = True,
+                     cache_retention_days: Optional[int] = None) -> int:
+        rows = []
+        for entry in entries:
+            fetched_at = str(entry.get("fetched_at", ""))
+            snippet = str(entry.get("snippet", "")) if save_external_cache else ""
+            expiry = (_expiry(cache_retention_days, from_time=fetched_at)
+                      if save_external_cache and cache_retention_days is not None else None)
+            rows.append((dossier_id, int(batch), str(entry.get("url", "")),
+                         str(entry.get("domain", "")), str(entry.get("domain_tier", "")),
+                         str(entry.get("source_kind", "")), str(entry.get("stance", "")),
+                         str(entry.get("title", "")), snippet, fetched_at, expiry))
         with self._lock, self._conn:
             self._conn.executemany(
                 "INSERT INTO evidence_entries (dossier_id, batch, url, domain, domain_tier,"
-                " source_kind, stance, title, snippet, fetched_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+                " source_kind, stance, title, snippet, fetched_at, cache_expires_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
             return len(rows)
 
     def evidence(self, dossier_id: int, batch: Optional[int] = None) -> List[Dict[str, Any]]:

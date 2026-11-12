@@ -35,6 +35,12 @@ class TestMigrations(unittest.TestCase):
         for t in ("dossiers", "conclusions", "evidence_entries", "attention_snapshots",
                   "opinion_profiles", "deep_reads", "analysis_runs", "schema_migrations"):
             self.assertIn(t, names)
+        dossier_cols = {r["name"] for r in conn.execute("PRAGMA table_info(dossiers)")}
+        message_cols = {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}
+        evidence_cols = {r["name"] for r in conn.execute("PRAGMA table_info(evidence_entries)")}
+        self.assertTrue({"result_expires_at", "raw_input_expires_at"}.issubset(dossier_cols))
+        self.assertTrue({"raw_input_expires_at", "result_expires_at"}.issubset(message_cols))
+        self.assertIn("cache_expires_at", evidence_cols)
         conn.close()
 
     def test_migrate_is_idempotent(self):
