@@ -274,10 +274,10 @@ class TestVerifyFlow(LoopTestBase):
         self.assertEqual(dossier["input_kind"], "text")
         self.assertEqual(self.dossiers.store.conclusions(d_id)[0]["label"], "疑似谣言")
         self.assertEqual(len(self.dossiers.store.evidence(d_id)), 2)
-        # 返回 dict 形状（编排者契约的字段集）
+        # 返回 dict 形状（编排者契约的字段集；verify 段另带 claim_answer 过渡答案对象）
         self.assertEqual(set(out.keys()),
                          {"session_id", "reply", "action", "card", "tool_run_id",
-                          "dossier_id", "degraded", "cost"})
+                          "dossier_id", "degraded", "cost", "claim_answer"})
         self.assertEqual(out["action"], "verify_claim")
         self.assertFalse(out["degraded"])
         self.assertEqual(out["tool_run_id"], run["id"])

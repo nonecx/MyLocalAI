@@ -105,6 +105,10 @@ class TestReadmeCounts(unittest.TestCase):
 
     def test_mock_gate_count_matches_readme(self):
         """README mock 闸门 "28 条：26 条既有" 与检验脚本静态解析一致。"""
+        if not (VERIFY_DIR / "mlai_verify.py").is_file() \
+                or not (VERIFY_DIR / "mock_run.py").is_file():
+            self.skipTest("本地 mock 闸门脚本缺失（.tmp/ 属本地检验资产、不入库）："
+                          "恢复 .tmp/verify-2026-10-22/{mlai_verify,mock_run}.py 后本用例自动生效")
         text = _readme_text()
         match = re.search(r"不耗配额，\s*(\d+)\s*条：\s*(\d+)\s*条既有", text)
         self.assertIsNotNone(match, "README 缺少 mock 闸门 'N 条：M 条既有' 的守护锚点")

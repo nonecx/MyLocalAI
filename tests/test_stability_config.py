@@ -44,6 +44,22 @@ def _write_json(data) -> str:
     return path
 
 
+def _allow_external(*providers: str):
+    """测试用偏好快照：显式授权给定提供方。
+
+    生产默认是 fail-closed（外发授权默认关闭），所以夹具不能依赖本机
+    data/privacy_preferences.json；要真正走到上游替身的用例必须自己授权。
+    """
+    from mylocalai.core.privacy import PrivacyPreferences
+    return PrivacyPreferences({
+        "schema_version": 1,
+        "save_enabled": {"results": False, "raw_input": False, "external_cache": False},
+        "retention_days": {"results": 90, "raw_input": 30, "external_cache": 7},
+        "external_processing_enabled": True,
+        "external_processing_providers": list(providers),
+    })
+
+
 class FakeCompletion:
     """假的 chat.completions：记录调用次数，可控制返回值/异常。"""
 
@@ -418,7 +434,9 @@ class TestProviderBinding(unittest.TestCase):
             return backup if provider == "openai" else None
 
         with mock.patch.object(llm_client, "create_client", side_effect=fake_create_client), \
-             mock.patch.object(llm_client, "_client_for", side_effect=fake_client_for):
+             mock.patch.object(llm_client, "_client_for", side_effect=fake_client_for), \
+             mock.patch("mylocalai.core.privacy.load_preferences",
+                        return_value=_allow_external("longcat", "openai")):
             obj, err = llm_client.chat_json("sys", "文本")
         self.assertEqual(err, "")
         self.assertEqual(obj, {"ok": 1})

@@ -254,9 +254,9 @@ class TestStoreClaimFingerprints(unittest.TestCase):
                 " created_at) VALUES (?, 1, '疑似谣言', 62.0, 't0')", (did,))
         conn.close()
 
-        store = DossierStore(db)   # 构造即迁移 v2→当前（v4）
+        store = DossierStore(db)   # 构造即迁移 v2→当前版本
         try:
-            self.assertEqual(SCHEMA_VERSION, 4)
+            self.assertEqual(SCHEMA_VERSION, 5)
             row = store.get_dossier(did)
             self.assertEqual(row["title"], "旧档案")
             self.assertEqual(store.latest_conclusion(did)["label"], "疑似谣言")
@@ -270,7 +270,7 @@ class TestStoreClaimFingerprints(unittest.TestCase):
                     "SELECT version FROM schema_migrations")}
             finally:
                 conn2.close()
-            self.assertEqual(versions, {1, 2, 3, 4})
+            self.assertEqual(versions, {1, 2, 3, 4, 5})
         finally:
             store.close()
 
@@ -496,7 +496,7 @@ class TestFingerprintAskAndResolve(LoopTestBase):
         self.assertNotIn("fingerprint_hit", out)
         self.assertEqual(set(out.keys()),
                          {"session_id", "reply", "action", "card", "tool_run_id",
-                          "dossier_id", "degraded", "cost"})
+                          "dossier_id", "degraded", "cost", "claim_answer"})
         self.assertEqual(out["action"], "verify_claim")
         self.assertIsNotNone(out["dossier_id"])
 

@@ -42,6 +42,18 @@ ASSISTANT_DIR = Path(assistant_pkg.__file__).resolve().parent
 #: 每个缓存敏感测试都钉住缓存开启（防外部环境把 TTL/上限设成 0）
 CACHE_ENV = {"LLM_CACHE_TTL_S": "900", "LLM_CACHE_MAX": "256"}
 
+
+def _allow_external(*providers: str):
+    """测试用偏好快照：显式授权给定提供方（生产默认 fail-closed，不读本机偏好文件）。"""
+    from mylocalai.core.privacy import PrivacyPreferences
+    return PrivacyPreferences({
+        "schema_version": 1,
+        "save_enabled": {"results": False, "raw_input": False, "external_cache": False},
+        "retention_days": {"results": 90, "raw_input": 30, "external_cache": 7},
+        "external_processing_enabled": True,
+        "external_processing_providers": list(providers),
+    })
+
 OFFICIAL_ENTRY = {"url": "https://gov.example/1", "domain": "gov.example",
                   "domain_tier": "官方权威", "source_kind": "官方（新华网）",
                   "stance": "反驳", "title": "官方辟谣", "snippet": "不实信息",
@@ -163,7 +175,9 @@ class TestUsageCounter(UsageCounterBase):
         with mock.patch.object(llm_client, "_provider_names",
                                return_value=["longcat", "deepseek"]), \
              mock.patch.object(llm_client, "create_client", return_value=primary), \
-             mock.patch.object(llm_client, "_client_for", return_value=fallback):
+             mock.patch.object(llm_client, "_client_for", return_value=fallback), \
+             mock.patch("mylocalai.core.privacy.load_preferences",
+                        return_value=_allow_external("longcat", "deepseek")):
             text, err = llm_client.chat_text("系统提示", "备用链探针文本",
                                              namespace="cost_probe")
         self.assertEqual(err, "")

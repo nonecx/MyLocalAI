@@ -289,10 +289,13 @@ python -m mylocalai.cli --attention-online "某段待分析的文本"
 .venv/Scripts/python.exe -X utf8 -m unittest discover -s tests -p "test_*.py"
 
 # 一键 CI（M4）：compileall src → 离线套件 → mock 闸门，任一步失败即整体失败
+# （mock 闸门脚本在 .tmp/ 本地检验资产里，缺失时该步打印 SKIP，前两步照常判定）
 scripts\ci.cmd
 # （POSIX shell 环境参考 scripts/ci.sh；本机沙箱子进程跑 bash 会崩，Windows 一律用 ci.cmd）
 
 # 模拟上游闸门（不耗配额，28 条：26 条既有 + 对话轮预算/SSE 取消两条 M2 探针）
+# 注意：脚本在 .tmp/verify-2026-10-22/（.tmp/ 不入库），属本地检验资产；
+# 缺脚本时 ci.cmd 第 3 步自动跳过并打印 SKIP，离线套件不受影响
 .venv/Scripts/python.exe .tmp/verify-2026-10-22/mock_run.py
 
 # 真实 API 端到端（会消耗配额）
