@@ -87,6 +87,11 @@ python -m venv .venv
 # 2. 配置密钥：复制样例文件后填入自己的 Key
 cp .env.example .env        # Windows PowerShell: Copy-Item .env.example .env
 
+# 2b. 首次运行授权（默认 fail-closed，不授权就不落盘、不外发）
+#     保存三类数据 + 授权外部提供方，均在 data/privacy_preferences.json（不入库，见下）
+#     GET  /api/privacy/preferences   查看当前授权
+#     PUT  /api/privacy/preferences   设置（网页端调用或 curl 均可）
+
 # 3. 自检 + 跑一次分析
 .venv/Scripts/python.exe tests/smoke_api.py            # 配置自检 + 连通性
 .venv/Scripts/python.exe -m mylocalai.cli --text "气死了！听说自来水被人下毒了，官方根本不敢说！"
