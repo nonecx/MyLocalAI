@@ -27,68 +27,103 @@ Requires-Dist: modelscope<2.0.0,>=1.9.0; extra == "local-inference"
 
 ```text
 .
-├── main.py                     命令行入口：一次分析 + 打印报告
-├── core_judge.py               核心裁判：并行调用三个分析模块 → 四档结论 → 生成报告
-├── report_generator.py         报告生成（API 失败时回退本地模板，永不抛异常）
-├── module_language/            情感 + 攻击性分析（提示词与白名单可外置，越界回退）
-├── module_logic/               逻辑关联性与谬误分析
-├── shared_core/
-│   ├── llm_client.py           提供方成组绑定 + 配置自检 + 备用链路 + JSON 稳健解析
-│   ├── llm_cache.py            进程内结果缓存（同请求只调一次）+ 请求级时长预算
-│   ├── providers.json          提供方表（密钥/地址/模型/能否关思维链）——改这里而非改代码
-│   ├── prompt_config.py        提示词与枚举白名单的加载（整套替换 + 增量覆盖）
-│   ├── config_loader.py        上述两类配置共用的加载器（失败退回默认 + 告警）
-│   ├── console_io.py           非 UTF-8 控制台的 stdio 规整
-│   └── text_safety.py          孤立代理项规整（进模型/缓存/回显前统一调用）
-├── rumor_agent/                谣言识别 Agent（联网取证、受控浏览、确定性打分）
-│   ├── verdict_rules.json      判定口径（分层阈值/风险分阈值/封顶/抬分锚点/稳定性/话术权重）
-│   ├── sources_registry.json   信源分级名单与官方/非官方站名表——改这里而非改代码
-│   ├── prompts.json            提示词与枚举白名单——改这里而非改代码
-│   ├── tiering.py              四档言论分层的唯一实现（core_judge 与 verdict 共用）
-│   └── README.md               Agent 的详细说明（证据本、受控浏览、MCP、降级行为）
-├── attn_agent/                 关注度评分与深读（确定性公式 + 联网估参 + 受控生成）
-│   ├── attention.py            E/S 确定性公式、参数档位、derive_signals 结构化信号
-│   ├── estimate.py             话题联网估参（产出 x/y/z，带 estimated/quality 口径）
-│   ├── deep_read.py            深读主流程（触发判定、受控生成、回退、物理隔离）
-│   ├── deep_read_guard.py      后处理护栏（议题封闭/证据/L3 挂靠/禁词，代码实现）
-│   ├── attn_rules.json         公式参数、档位表、深读阈值
-│   ├── deep_read_rules.json    深读触发规则 + 受控生成参数 + 护栏禁词
-│   ├── society_issues.json     封闭议题清单（40 项，LLM 只能从中选）
-│   ├── prompts.json            受控生成提示词（system 硬约束 + few-shot 正反对比）
-│   └── README.md               关注度与深读的完整说明（公式、触发、护栏、隔离）
-├── my_website/                 展示网站（FastAPI + 原生前端；start.bat / start.sh）
-├── tests/                      离线测试套件与真实 API 端到端脚本
+├── src/mylocalai/              唯一的包（pip install -e . 后 import mylocalai.*）
+│   ├── core/
+│   │   └── tiering.py          四档言论分层的唯一实现（classic.judge 与 verdict 共用）
+│   ├── llm/                    LLM 网关（唯一构造路径）
+│   │   ├── llm_client.py       提供方成组绑定 + 配置自检 + 备用链路 + JSON 稳健解析 + 进程级真实用量计数（M4）
+│   │   ├── llm_cache.py        进程内结果缓存（同请求只调一次）+ 请求级时长预算
+│   │   ├── adapter.py          LangChain 聊天模型构造（Agent 侧，同源同一网关）
+│   │   └── providers.json      提供方表（密钥/地址/模型/能否关思维链）——改这里而非改代码
+│   ├── config/                 统一配置加载（叶子层）
+│   │   ├── config_loader.py    JSON 配置加载器（失败退回默认 + 告警）
+│   │   ├── prompt_config.py    提示词与枚举白名单的加载（整套替换 + 增量覆盖）
+│   │   ├── rules.py            判定口径/信源名单加载（阈值等全部外置）
+│   │   ├── verdict_rules.json  分层阈值/风险分阈值/封顶/抬分锚点/稳定性/话术权重
+│   │   └── sources_registry.json  信源分级名单与官方/非官方站名表——改这里而非改代码
+│   ├── retrieval/              联网取数基础设施
+│   │   ├── search.py           搜索聚合（可配置化）
+│   │   ├── browser.py          受控浏览（原文抓取约束）
+│   │   ├── dns_fallback.py     DNS 兜底
+│   │   └── sources.py          域名分级/站名归一（名单读 config/sources_registry.json）
+│   ├── classic/                classic 引擎
+│   │   ├── language.py         情感 + 攻击性分析（提示词与白名单可外置，越界回退）
+│   │   ├── logic.py            逻辑关联性与谬误分析
+│   │   ├── judge.py            核心裁判：并行三模块 → 四档结论 → 报告
+│   │   └── report.py           报告生成（API 失败回退本地模板，永不抛异常）
+│   ├── rumor/                  谣言识别 Agent（联网取证、受控浏览、确定性打分）
+│   │   ├── agent.py / verdict.py / evidence.py / state.py / tools.py / ...
+│   │   ├── mcp.py              MCP 服务器封装（python -m mylocalai.rumor.mcp）
+│   │   ├── prompts.json        Agent 提示词与枚举白名单——改这里而非改代码
+│   │   └── README.md           Agent 的详细说明（证据本、受控浏览、MCP、降级行为）
+│   ├── attention/              关注度评分与深读（确定性公式 + 联网估参 + 受控生成）
+│   │   ├── attention.py        E/S 确定性公式、参数档位、derive_signals 结构化信号
+│   │   ├── estimate.py         话题联网估参（产出 x/y/z，带 estimated/quality 口径）
+│   │   ├── attach.py           关注度挂载器（入口层接到 classic 结果上；classic 不 import attention）
+│   │   ├── deep_read.py        深读主流程（触发判定、受控生成、回退、物理隔离）
+│   │   ├── deep_read_guard.py  后处理护栏（议题封闭/证据/L3 挂靠/禁词，代码实现）
+│   │   ├── attn_rules.json / deep_read_rules.json / society_issues.json / prompts.json
+│   │   └── README.md           关注度与深读的完整说明（公式、触发、护栏、隔离）
+│   ├── dossier/                档案库（SQLite 单文件 + WAL）
+│   │   ├── store.py            连接工厂、schema_version 顺序迁移（v4 含指纹表+话术标记表）、档案域七表 + 会话域三表
+│   │   ├── service.py          建档编排：结论卡片化落库、证据批次、recheck 版本化、六章节聚合与导出、初扫 markers 沉淀
+│   │   └── insights.py         参谋三聚合纯函数：话术模式库 / 信源画像 / 周报（零 LLM，永不抛）
+│   ├── assistant/              智能助手核心（对话 → 路由 → 工具 → 叙述 → 落库）
+│   │   ├── loop.py             外层工具循环（事件流、单轮上限、轮预算 CHAT_TURN_DEADLINE_S、取消链）
+│   │   ├── router.py           意图路由（chat_json + 封闭枚举 + 四层防护链，绝不猜）
+│   │   ├── registry.py         工具注册表（schema 校验、权限分级、成本/延迟元数据）
+│   │   ├── tools_verify.py / tools_heat.py / tools_memory.py / tools_chapters.py
+│   │   ├── fingerprint.py      话术指纹纯函数（归一化/shingle/Jaccard——谣言库秒回的地基）
+│   │   ├── reminders.py        被动提醒纯函数（档案年龄/热度变化 → 一行提示）
+│   │   ├── context.py          上下文窗口构建器（12k 字符预算、裁剪与摘要）
+│   │   ├── events.py           SSE 事件协议（封闭枚举：meta…done/error）
+│   │   ├── session_store.py    会话域三表读写（sessions/messages/tool_runs）
+│   │   ├── mcp_server.py       助手 MCP（python -m mylocalai.assistant.mcp_server）
+│   │   ├── prompts.json        人设与固定话术——改这里而非改代码
+│   │   └── assistant_rules.json  路由模型/上限/预算/指纹阈值/信源画像阈值/拒绝词表——改这里而非改代码
+│   ├── web/                    FastAPI 网站 + static/（src/mylocalai/web/app.py）
+│   │   └── static/             app.js（工具模式，契约不变）+ chat.js/cards.js/chat.css（对话 Tab）+ insights.js（参谋 Tab）
+│   ├── util/                   text_safety（代理项规整）/ console_io（stdio 规整）
+│   └── cli.py                  命令行入口（python -m mylocalai.cli）
+├── my_website/                 启动器（start.bat / start.sh）与说明，实际代码在 src/mylocalai/web/
+├── tests/                      离线测试套件与真实 API 端到端脚本（import mylocalai.*）
 ├── docs/                       检验报告、修复说明、项目/研究报告与关注度标定报告
-├── pyproject.toml              项目元数据与依赖版本约束
+├── pyproject.toml              src 布局包定义（pip install -e .）
 └── archive/                    遗留资产归档区（2026-10-30 清场建立，不入库）
 ```
+
+依赖方向只有一条：`core ← llm ← retrieval ← {classic, rumor, attention} ← {dossier, assistant} ← web/cli/mcp`；
+classic / rumor / attention 互不 import，dossier/assistant 不得被上游反向 import
+（`tests/test_import_rules.py` 用 AST 锁定）。
 
 ## 快速开始
 
 ```bash
-# 1. 建虚拟环境并安装依赖（可选依赖见 requirements.txt 注释）
+# 1. 建虚拟环境并安装依赖（可选依赖见 requirements.txt 注释），再可编辑安装本包
 python -m venv .venv
 .venv/Scripts/python.exe -m pip install -r requirements.txt
+.venv/Scripts/python.exe -m pip install -e .            # src 布局：import mylocalai.* 全仓库可用
 
 # 2. 配置密钥：复制样例文件后填入自己的 Key
 cp .env.example .env        # Windows PowerShell: Copy-Item .env.example .env
 
 # 3. 自检 + 跑一次分析
 .venv/Scripts/python.exe tests/smoke_api.py            # 配置自检 + 连通性
-.venv/Scripts/python.exe main.py --text "气死了！听说自来水被人下毒了，官方根本不敢说！"
+.venv/Scripts/python.exe -m mylocalai.cli --text "气死了！听说自来水被人下毒了，官方根本不敢说！"
 
 # 4. 谣言识别 Agent（联网取证）
-.venv/Scripts/python.exe -m rumor_agent "网传喝隔夜茶会致癌，转给家人看看！"
+.venv/Scripts/python.exe -m mylocalai.rumor "网传喝隔夜茶会致癌，转给家人看看！"
 
 # 5. 展示网站
 双击 my_website/start.bat，或看 my_website/README.md 的命令行方式
 #    Linux / macOS：cd my_website && ./start.sh（端口用 PORT= 覆盖，解释器用 PYTHON= 覆盖）
+#    实际启动命令：python -m uvicorn mylocalai.web.app:app --host 127.0.0.1 --port 8000
 ```
 
 `.env` 里最关键的只有两条：`LLM_PROVIDER`（默认 longcat）与对应提供方的密钥
 （如 `LONGCAT_API_KEY`）。**密钥、接口地址、模型名按提供方成组绑定**，换供应商只改
 `LLM_PROVIDER`；密钥与提供方不匹配时启动自检会直接报错，不会静默把请求发到别家。
-完整变量说明见 `.env.example` 与 `rumor_agent/README.md`。
+完整变量说明见 `.env.example` 与 `src/mylocalai/rumor/README.md`。
 
 ## 两条分析路径
 
@@ -108,7 +143,7 @@ cp .env.example .env        # Windows PowerShell: Copy-Item .env.example .env
 
 ## 关注度（Attention）评估
 
-`attn_agent/` 把"一件事有多少人关注"变成一个**确定性分数**，**不调用大模型、不联网取数**
+`src/mylocalai/attention/` 把"一件事有多少人关注"变成一个**确定性分数**，**不调用大模型、不联网取数**
 （同一组输入离线必然复现同一分数）：
 
 ```
@@ -131,7 +166,7 @@ w=(0.2,0.5,0.3), λ=0.7, ε=1e-6`；约束 `w_x+w_y+w_z=1`、各权重 `>0`、`E
 | 能力 | 接口 | 说明 |
 | --- | --- | --- |
 | 手动算分 | `POST /api/attention` | 页面填 x/y/z，纯确定性返回 E、S、三个分项、档位、是否触发深读 |
-| 话题联网估参 | `POST /api/attention/search` | 输入话题，`attn_agent/estimate.py` 走真实检索估出 x/y/z 后算分 |
+| 话题联网估参 | `POST /api/attention/search` | 输入话题，`src/mylocalai/attention/estimate.py` 走真实检索估出 x/y/z 后算分 |
 | 深读解读 | 上述两个接口的 `deep_read` 字段 | 触发时做**受控生成**：议题标签 + 张力 + 现象 + 反方 + 边界；`applicable=false` 是正常出口；LLM 不可用或被护栏全丢时回退本地模板并标 `degraded` |
 | 分析记录内嵌 | `POST /api/analyze` 返回的 `attention` 字段 | classic / agent 两种模式都带一个确定性关注度分 |
 
@@ -157,7 +192,7 @@ w=(0.2,0.5,0.3), λ=0.7, ε=1e-6`；约束 `w_x+w_y+w_z=1`、各权重 `>0`、`E
 深读回答"为什么关注"。它**不参与任何打分**：是否触发由确定性代码决定，
 解读文本不改 E、不改档位、不进 verdict、不写主分析缓存（物理隔离）。
 
-**触发规则**外置在 `attn_agent/deep_read_rules.json`（`DEEP_READ_RULES_PATH` 整套替换、
+**触发规则**外置在 `src/mylocalai/attention/deep_read_rules.json`（`DEEP_READ_RULES_PATH` 整套替换、
 `DEEP_READ_RULES_EXTRA_PATH` 增量覆盖），四种模式：
 
 | 模式 | 含义 | 默认档位 |
@@ -175,7 +210,7 @@ w=(0.2,0.5,0.3), λ=0.7, ε=1e-6`；约束 `w_x+w_y+w_z=1`、各权重 `>0`、`E
 `spread`（x，传播广度）、`resonance`（z/x，单篇平均留言）、`share_x/y/z`（三项占 S 比例）、
 `profile`、`proxy_flags`，全部随 prompt 给模型——只给一个 E 值时模型只能复述"关注度高"。
 
-**封闭议题清单**：`attn_agent/society_issues.json`（40 个中性命名的中文议题，
+**封闭议题清单**：`src/mylocalai/attention/society_issues.json`（40 个中性命名的中文议题，
 每项含 `tension_a_hint`/`tension_b_hint`/`include`/`exclude`）。LLM 只能从清单里选
 `issue_tags`，不得自创 id；清单外一律归 `other`。写坏时退回内置最小默认
 （`info_transparency_trust` + `other`）并留告警。
@@ -195,7 +230,7 @@ w=(0.2,0.5,0.3), λ=0.7, ε=1e-6`；约束 `w_x+w_y+w_z=1`、各权重 `>0`、`E
 }
 ```
 
-**后处理护栏**（`attn_agent/deep_read_guard.py`，不依赖模型自觉，全部代码实现）：
+**后处理护栏**（`src/mylocalai/attention/deep_read_guard.py`，不依赖模型自觉，全部代码实现）：
 议题封闭性（清单外 → other/low 或丢弃）、证据有效性（无效 `evidence_id` 剔除，
 剔除后为空 → 丢条目）、L3 挂靠（全篇无 L1/L2 时 L3 降级为显式不确定性）、
 禁词禁归因（`banned_patterns` 正则：具体主体归因 / 样本推普遍 / 价值判断 / 预测，
@@ -208,7 +243,7 @@ w=(0.2,0.5,0.3), λ=0.7, ε=1e-6`；约束 `w_x+w_y+w_z=1`、各权重 `>0`、`E
 
 ```bash
 # 命令行分析时联网估算热度（需联网；失败自动退回占位值，不影响主流程）
-python main.py --attention-online "某段待分析的文本"
+python -m mylocalai.cli --attention-online "某段待分析的文本"
 ```
 
 **读数边界（页面会原样标注）**：话题模式下 `x` 是检索命中的独立文章数（下限，不是全网总数），
@@ -224,17 +259,17 @@ python main.py --attention-online "某段待分析的文本"
 风险分阈值、无事实声明封顶、证据抬分锚点、信源分级名单，以及**"哪几档算可靠/可抓/可扩链"
 与各档渠道权重**都在 JSON 里，**换行业/换判定标准（含重命名档位）不需要改 Python**：
 
-- `rumor_agent/verdict_rules.json` —— 言论分层阈值（`speech_tier`）、风险分阈值、封顶、
+- `src/mylocalai/config/verdict_rules.json` —— 言论分层阈值（`speech_tier`）、风险分阈值、封顶、
   抬分锚点、稳定性护栏、话术特征权重（`markers`）
-- `rumor_agent/sources_registry.json` —— 信源名单、站名表、`reliable_tiers` / `fetch_tiers` /
+- `src/mylocalai/config/sources_registry.json` —— 信源名单、站名表、`reliable_tiers` / `fetch_tiers` /
   `link_tiers` / `channel_score`（按档名声明，改档名不再静默失效）
-- `rumor_agent/prompts.json` —— 三模块 System Prompt、报告模板、枚举白名单（2026-10-22 修复 G8）
-- `shared_core/providers.json` —— 提供方表（密钥/地址/模型名成组绑定 + 能否关思维链，修复 G4）
-- `attn_agent/attn_rules.json` —— 关注度公式参数、档位表、深读阈值（2026-10-26）
-- `attn_agent/deep_read_rules.json` —— 深读触发规则（absolute/quantile/change_rate/any ×
+- `src/mylocalai/rumor/prompts.json` —— 三模块 System Prompt、报告模板、枚举白名单（2026-10-22 修复 G8）
+- `src/mylocalai/llm/providers.json` —— 提供方表（密钥/地址/模型名成组绑定 + 能否关思维链，修复 G4）
+- `src/mylocalai/attention/attn_rules.json` —— 关注度公式参数、档位表、深读阈值（2026-10-26）
+- `src/mylocalai/attention/deep_read_rules.json` —— 深读触发规则（absolute/quantile/change_rate/any ×
   按档位覆盖）、受控生成参数、护栏禁词正则（2026-10-29）
-- `attn_agent/society_issues.json` —— 封闭议题清单（40 项，LLM 只能从中选 `issue_tags`）
-- `attn_agent/prompts.json` —— 深读受控生成提示词（system 硬约束 + few-shot 正反对比）
+- `src/mylocalai/attention/society_issues.json` —— 封闭议题清单（40 项，LLM 只能从中选 `issue_tags`）
+- `src/mylocalai/attention/prompts.json` —— 深读受控生成提示词（system 硬约束 + few-shot 正反对比）
 用 `RUMOR_RULES_PATH` / `RUMOR_SOURCES_PATH` / `RUMOR_PROMPTS_PATH` / `LLM_PROVIDERS_PATH` /
 `DEEP_READ_RULES_PATH` / `DEEP_READ_ISSUES_PATH` / `DEEP_READ_PROMPTS_PATH`
 可整套替换，用对应的 `_EXTRA_PATH` 可只做增量。配置写坏只退回默认值并留告警
@@ -244,7 +279,7 @@ python main.py --attention-online "某段待分析的文本"
 档位角色、阈值/封顶/抬分锚点/稳定性/话术权重、提示词各段）在合并后会做类型校验，
 不合规的段退回内置默认并留下告警。
 
-**言论分层只有一处实现**（`rumor_agent/tiering.py`）：`core_judge.judge` 与
+**言论分层只有一处实现**（`src/mylocalai/core/tiering.py`）：`core_judge.judge` 与
 `verdict.speech_tier` 共用同一份规则与阈值，不再各写一遍 if-else；阈值改
 `verdict_rules.json` 的 `speech_tier` 段即可，两条链路一起变。
 
@@ -270,13 +305,15 @@ python main.py --attention-online "某段待分析的文本"
 ## 测试
 
 ```bash
-# 离线测试套件（不消耗 API 配额）
-.venv/Scripts/python.exe -m unittest tests.test_rumor_agent_offline tests.test_browser_mcp \
-    tests.test_mutations tests.test_opinions tests.test_stability_config \
-    tests.test_p0_fixes_2026_10_22 tests.test_prompt_config tests.test_p1p2_fixes_2026_10_23 \
-    tests.test_fixes_2026_10_24 tests.test_attention tests.test_attention_profiles \
-    tests.test_core_judge_attention tests.test_deep_read tests.test_deep_read_stage1 \
-    tests.test_deep_read_controlled tests.test_website_attention
+# 离线测试套件（不消耗 API 配额；全量 discover 一键跑）
+.venv/Scripts/python.exe -X utf8 -m unittest discover -s tests -p "test_*.py"
+
+# 一键 CI（M4）：compileall src → 离线套件 → mock 闸门，任一步失败即整体失败
+scripts\ci.cmd
+# （POSIX shell 环境参考 scripts/ci.sh；本机沙箱子进程跑 bash 会崩，Windows 一律用 ci.cmd）
+
+# 模拟上游闸门（不耗配额，28 条：26 条既有 + 对话轮预算/SSE 取消两条 M2 探针）
+.venv/Scripts/python.exe .tmp/verify-2026-10-22/mock_run.py
 
 # 真实 API 端到端（会消耗配额）
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py
@@ -284,25 +321,17 @@ python main.py --attention-online "某段待分析的文本"
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 624 个用例：Agent 流程与注入免疫、浏览与 MCP 约束、变异测试（确认约束真被验到）、
-民间观点聚合、两轮修复的验收（可配置口径与档位角色、稳定性护栏、时限与预算继承、
-提供方绑定与备用链路、single-flight 失败共享、并发上限、不可编码输入、无写死路径），
-以及 2026-10-22 检验报告 P0 的回归（配置告警不再被抹掉、关缓存不再连带关掉 single-flight、
-预算下限可配、瞬时故障不再被当成"参数不支持"、read_source 取消后不再抓取、
-空输入 0 次 API 调用、非 UTF-8 控制台规整、/api/health 暴露上游可用性），
-外加 P1/P2 的回归（提供方表/提示词/分层阈值/话术权重外置、三维模块并行、证据本空置信度、
-解释一致性、网站 agent 三维、多进程可观测、Agent 超时对齐、缓存清扫、依赖版本上限、启动脚本），
-以及 10-24 复核补修的回归（报告与结论一致性 + 不一致回退模板 + REPORT_MODE、
-证据本"全被过滤"标记的真实代码路径），
-以及 10-26 关注度模块的回归（公式与独立参考实现逐点对比、开区间边界、
-`python -O` 下边界守卫仍生效、配置写坏退回默认、档位与深读阈值语义、
-话题估参口径与时间短语假阳性、**前后端自洽性**：前端引用的接口路径与元素 id
-必须在后端路由和 HTML 里真实存在），
-以及 10-29 深读受控生成的回归（触发矩阵 absolute/quantile × spec/reachable、
-信号派生与公式逐点一致、议题封闭性、证据覆盖、L3 挂靠、禁词红队、
-`applicable=false` 出口、反方必填、字数上限、**物理隔离**（AST 检查 deep_read
-不 import verdict、深读异常不影响主结论、**LLM 缓存分区端到端验证**）、降级、
-配置告警、向后兼容）。
+离线套件共 1101 个用例（unittest discover 全量，2026-10-31 L4 实测；**M4 起由
+`tests.test_readme_counts` 自动校验此数字与 mock 闸门条数，改动后须同步回写**）：
+M1-M3 的全部回归（详见 git 历史），加上 M4 新增模块：
+**成本真实计数**（llm_client 进程级计数器：真实上游调用数 + usage tokens，缓存命中/
+single-flight 等待不计、取不到 usage 如实 0；loop 按"段前段后快照 delta"接线进
+done.cost / tool_runs / 档案 analysis_runs，计数面不可用退回粗口径）、
+**README 数字守护**（用例数 / mock 闸门条数 / 引用的测试与文档文件存在性，治文档漂移）、
+web 会话与档案成本汇总端点及前端会话累计徽章的自洽；
+加上 L4 新增模块：**参谋三聚合**（dossier/insights.py 纯函数 + dossier_markers v4
+沉淀 + 三端点与参谋 Tab 前端自洽）、**信源画像反哺抬分**（collect_evidence
+source_profile 注入：空画像逐位不变守卫、抬分端到端、装配透传）。
 另有 `tests/run_module_tests.py`（12 条内置用例全模块跑一遍并落盘）、
 `tests/smoke_api.py`（配置自检 + 连通性）。
 
@@ -316,12 +345,18 @@ python main.py --attention-online "某段待分析的文本"
 - **蒸馏实验已归档**：`distill/`（含教师标签测试集）移入 `archive/`，作为 L5 阶段的教师标注源按需重启。
 - **信源名单是人工整理的**：不完整，名单外的好来源会被归为"未知来源"（有意的保守取向）；
   可用增量配置文件补。
-- **演示级部署**：网站监听 127.0.0.1、单进程、无鉴权，历史记录在内存里（重启清空）。
-  多 worker 部署时缓存与历史各自独立（见 `my_website/README.md`）。
+- **演示级部署**：网站监听 127.0.0.1、单进程、无鉴权。对话会话/消息/工具运行与核查档案
+  已持久化到 `data/dossier.db`（SQLite + WAL，重启保留）；`/api/analyze` 的历史记录仍是
+  内存轻模式（重启清空，契约不变）。多 worker 部署时缓存与历史各自独立（见 `my_website/README.md`）。
+- **真实上游冒烟依赖提供方状态**：LongCat 有返回空 content 的前科（2026-10-14 检验报告、
+  2026-10-31 M2 末冒烟复现两次），冒烟失败不代表链路回退——离线套件与 mock 闸门全绿为准。
 
 ## 文档
 
+- `docs/Agent工作流规格-v0.1.md` —— **Agent 工作流实施基线**（用户能力、主张/传播证据双维判定、外发授权、分类保存与验收矩阵；规格不等于所有阶段已实现）。
+- `docs/使用说明书.md` —— **使用者操作手册**（安装/配置/启动/三个 Tab/命令行/MCP/配置调整/数据备份/常见问题）。
 - `docs/研究报告-2026-10-30.md` —— 重塑前的质量基线与实测证据（智能助手重塑的依据）。
+- `docs/评估-真流式-2026-10-31.md` —— M4 真流式评估（现状/要动的面/收益/风险；结论：建议 M5 前不做，拍板留给作者）。
 - `docs/工作指导-智能助手重塑-2026-10-30.md` —— 重塑工作的唯一执行依据（里程碑与验收）。
 - `docs/项目报告-2026-10-26.md` —— 项目现状报告（关注度接入网页端与深读之后）。
 - `docs/关注度评估报告-2026-10-26.md` —— 关注度公式与阈值的评估报告。
@@ -336,5 +371,103 @@ python main.py --attention-online "某段待分析的文本"
 - `docs/修复说明-2026-10-15-第二轮.md` —— 针对 10-15 报告的修复落地说明（含实测验证）。
 - `docs/修复说明-2026-10-15-第三轮.md` —— 档位角色随配置走的修复说明。
 - `docs/opinions_module_spec.md` —— 民间观点聚合模块的规格说明。
-- `rumor_agent/README.md` —— 谣言 Agent 的架构、证据本、受控浏览、MCP 与降级行为。
+- `src/mylocalai/rumor/README.md` —— 谣言 Agent 的架构、证据本、受控浏览、MCP 与降级行为。
 - `my_website/README.md` —— 展示网站的启动方式与页面功能。
+
+## 智能助手（2026-10-31，M2）
+
+网站首页双 Tab，**对话为默认 Tab**：把"这条消息是真的吗"丢进对话框，拿回一张带证据、
+带置信度、带"什么时候该再看一眼"的结论卡片。设计口径见 `docs/工作指导-智能助手重塑-2026-10-30.md`。
+
+- **三档车道**：闲聊/追问（轻）；analyze_speech 言论土壤（快）；verify_claim/recheck 联网核查（慢查 30-120s，
+  先发本地初扫 markers + 组件级进度，绝不允许白屏干等）。
+- **路由四层防护链**：封闭枚举白名单 → 参数 schema 校验 → 工具 allowlist → 权限；任一步失败降级
+  clarify（追问一次），绝不猜；用户消息里的"改分数/删档案/越权"指令一律 refuse，对话层注入由
+  15 个变异用例锁定无效。
+- **卡片三层信息架构**：标签+置信度 → 证据计数/as_of/degraded 徽章 → 证据本前 5 条；
+  卡片永远在叙述之前；叙述失败时以卡片+固定模板收尾，永不丢结论。
+- **结论卡片口径**（全纯函数派生，大模型不参与打分）：label/risk_score（兼容层）+ confidence +
+  evidence_sufficiency（official/unofficial/unknown/total）+ as_of + recheck_conditions +
+  verdict_basis 标记；映射外置在 `config/verdict_rules.json` 的 `card` 段。
+- **持久化**：核查自动建档（结论版本化 v1/v2…、证据按批次、分析运行记录），会话/消息/工具运行
+  落 SQLite；重启后档案与会话都在。删除档案不是助手工具（只有程序内部可达）。
+- **回合预算与取消**：`CHAT_TURN_DEADLINE_S`（默认 180s）经 llm_cache 预算继承进引擎链；
+  前端 AbortController → SSE 断开 → 协作取消（agent 轮询 cancel_check、judge 四取消位），
+  超时/取消都诚实降级、已有卡片照发。
+- **MCP 同期交付**：见下节。
+
+## 记忆与完整性（2026-10-31，M3）
+
+- **谣言库指纹秒回**：每次核查把原文归一化指纹（NFKC+去标点+blake2b shingle）沉淀进
+  `claim_fingerprints` 表；相似说法再次出现时**先问再查**（"查过相似说法，秒回旧结论还是重查？"），
+  绝不擅自断言同一谣言。阈值/ shingle 外置 `assistant_rules.json`。待决问句只对紧随的下一轮生效；
+  "重查"按旧档案原文新建档案（不自动版本化到旧档案——避免擅自断言同一谣言），用户当轮的新措辞
+  可在问句后直接发消息正常核查。
+- **档案库页**：左栏档案入口 → 六章节视图（核查结论版本对比、证据批次、言论土壤、热度趋势
+  SVG、观点光谱、背景解读），缺章如实标 absent。
+- **Markdown 导出**：`GET /api/dossiers/{id}/export?format=md` 六章节+徽章+免责语+as_of 页脚。
+- **被动提醒**：档案年龄/热度变化超阈值时，打开会话以一行浅色提示呈现（规则外置），无推送无打扰。
+- **change_rate 触发**：同一档案的快照序列环比增幅达阈值即触发深读（单快照不触发）。
+
+## 成本真实计数（2026-10-31，M4）
+
+M4 起 `requests/tokens` 是**真实上游用量**，不再是粗口径估算（§8 成本模型的落地）：
+
+- **计数点**：`src/mylocalai/llm/llm_client.py` 进程级计数器（`threading.Lock`，跨线程安全）。
+  requests 只在**真实发起并返回的上游调用**时 +1——缓存命中、single-flight 等待、预算耗尽
+  未发起都不计；tokens 从响应 `usage.total_tokens` 取，取不到**如实记 0，不估算**。备用链的
+  每次成功调用各计一次。
+- **接线**：助手回合内按"段前段后快照 delta"分别记入——路由/叙述/摘要段进 `done.cost`
+  （前端"本轮成本"徽章）；每个工具段进 `tool_runs`（会话域）与档案 `analysis_runs`
+  （经 record_analysis 调用点注入）。计数面不可用时逐段退回 M4 前粗口径，绝不挡回合。
+- **可见处**：每轮 done.cost 徽章；左栏会话列表的会话累计成本（`/api/sessions` 每项附
+  `cost`）；`/api/sessions/{sid}/messages` 与 `/api/dossiers/{id}` 附 `cost` 汇总
+  （sum 真实落库值）。
+- **口径边界（如实声明）**：Agent 的 LangChain 工具轮不经 llm_client，不计数；轮内路由/
+  叙述成本只在当轮徽章呈现、不落库（会话/档案汇总只累落库部分）；并发回合同时进行时，
+  进程级计数器的段归属是近似。守护测试：`tests.test_cost_accounting`。
+- **CI**：`scripts\ci.cmd` 一键（compileall src → 离线套件 → mock 闸门 28 条），用法见"测试"一节。
+- **真流式评估（M4 结论）**：收益集中在闲聊车道首字（省约 2-4s），慢查车道几乎不动且
+  LongCat SSE 支持未实测——**建议 M5 前不做**，拍板留给作者（详见 `docs/评估-真流式-2026-10-31.md`）。
+
+## 智能助手 MCP 接入（2026-10-31，M2-9）
+
+把助手核心（AssistantLoop）暴露成 MCP 工具，与网页端对话共用同一 loop 核心（同核：同一输入得到同一卡片）：
+
+    .venv/Scripts/python.exe -m mylocalai.assistant.mcp_server    # stdio 传输
+
+需要 mcp 包：`pip install mylocalai[mcp]`。暴露三个工具：
+
+- `assistant_chat(message, session_id?)` —— 与助手对话一回合，同步返回结构化 JSON：
+  reply（叙述）/ card（结论卡片载荷，与 web 端卡片事件同形状）/ action / dossier_id /
+  degraded / cost / events（事件名序列）。传回返回值里的 session_id 可延续会话上下文。
+- `assistant_sessions(limit)` —— 列出会话（id 可回传 assistant_chat）。
+- `assistant_dossiers(query?, limit?)` —— 列出核查档案。
+
+口径：助手**不判真假、只述证据**——汇总可核实的证据与来源立场并给出确定性结论卡片，
+真伪裁决留给用户；降级时如实说明，不编造。库路径与网页端同库（data/dossier.db，
+DOSSIER_DB_PATH 可覆盖）。测试：`tests.test_mcp_assistant`（同核对照、工具清单、守护路径）。
+
+## 参谋与洞察（2026-10-31，L4）
+
+"越用越聪明"（§2.5）的兑现点：三种积累全部 **SQLite 聚合 + 纯函数离线推导，零 LLM 调用**，
+数据只来自你自己的档案库。首页新增第三个 Tab「**参谋**」（默认 Tab 仍是对话），
+三个只读端点：`GET /api/insights/patterns`、`/api/insights/sources`、`/api/insights/weekly?days=7`。
+
+- **话术模式库**：核查落库时把初扫 markers（patterns 六类风险特征 + 三类可信度线索）结构化
+  沉淀进 `dossier_markers` 表（schema v4，一档案一条幂等）；跨档案聚合出"你查过的档案里
+  各话术模式命中多少、最新结论标签分布、常见组合是什么"（`tests.test_insights`）。
+- **信源画像反哺抬分**：按域名聚合证据史（域名从 url 现算，与引擎同口径 normalize）——
+  某域名在你的档案里反复为**已证伪结论**（高风险谣言/疑似谣言）提供反驳证据，默认 ≥2 次
+  （`assistant_rules.json` 的 `source_profile.min_refutes` 可调）即记入个人画像；此后
+  verify/recheck 装配引擎时把画像注入 `collect_evidence(source_profile=…)`，该域名当前的
+  "反驳"条目并入可靠反驳独立域名集合（官方口径不变），stance_summary 增加
+  `profile_refute_domains`/`profile_refute` 标注。**空画像/不传画像时输出与从前逐位不变**（守卫测试锁定）；
+  画像只来自档案库 SQL，LLM 输出没有写画像的通道（`tests.test_source_profile_lift`）。
+- **个人信息环境周报**：按时间窗（默认 7 天，1-90 可调）聚合新档案 / 结论分布 / 分析运行与
+  真实成本（requests/tokens）/ 高频话术 / 辟谣主力域名 / 热度快照 / 指纹沉淀量；无推送无打扰，
+  打开参谋页才算（§2.2 不制造新压力）。
+- 三端点全部只读、聚合函数永不抛；库不可用时降级为 503 或合法空结构（均为诚实降级）；
+  参谋页数据为空显示"暂无数据"。
+  测试：`tests.test_insights_api`（端点 + 前后端自洽）、`tests.test_insights`、
+  `tests.test_source_profile_lift`。
