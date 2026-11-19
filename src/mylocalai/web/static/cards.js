@@ -1,8 +1,10 @@
 /* ============================================================
    cards.js —— 对话卡片渲染器（M2，工作指导 §4.3）
-   三个渲染器：结论卡 / 言论土壤卡（classic 四档） / 热度 E 分卡。
-   标记从 app.js 现有卡片"复制 + 参数化"而来，不修改 app.js；
-   由 chat.js 调用（chat.js 不 import app.js 的任何符号）。
+   三个渲染器：结论卡 / 言论土壤卡（classic 四档） / 热度 E 分卡；
+   另加我的画像卡（insights 只读聚合）与事实核查答案渲染。
+   标记从原分析页卡片"复制 + 参数化"而来（原 app.js 已在单页化中删除，
+   卡片渲染逻辑现由本文件独家承载）。
+   由 chat.js 调用（chat.js 不直接拼卡片 HTML）。
 
    口径诚实铁律：数字旁必须展示 as_of 与徽章（置信度 / 降级 / 代理估计 /
    verdict_basis）——分数是纯函数从证据推导的，展示层不替它"说满"。
@@ -23,8 +25,8 @@
     return n.toLocaleString("zh-CN", { maximumFractionDigits: 2 });
   }
 
-  /* classic 四档展示配置（与 app.js CONCLUSION_META 同一份口径，复制而来；
-     两边只读不写，改档位文案要同步） */
+  /* classic 四档展示配置（与引擎 verdict 标签同一份口径，复制而来；
+     改档位文案要同步后端，展示层只读不写） */
   const SPEECH_META = {
     "高度疑似水军/煽动性言论": { cls: "danger", icon: "🚨", desc: "高情绪强度 + 高攻击性 + 弱逻辑，符合水军/煽动性言论的特征组合" },
     "疑似情绪化谣言": { cls: "warn", icon: "⚠️", desc: "情绪强度较高且论证逻辑薄弱，存在传播情绪化谣言的特征" },
@@ -50,11 +52,49 @@
     return `<div class="chat-asof">证据截至（as_of）：${escapeHtml(asOf || "未知")}</div>`;
   }
 
-  /* ---------- 1. 结论卡（§4.5：标签 + 置信度 + 证据充分度 + as_of + 复审条件） ---------- */
+  /* 安全外链：只接受 http(s)，其余（javascript: / data: 等）一律不生成 href。
+     证据链接来自联网检索结果，属于外部内容，必须按不可信输入处理。 */
+  function safeUrl(u) {
+    const s = String(u || "").trim();
+    return /^https?:\/\//i.test(s) ? escapeHtml(s) : "";
+  }
+
+  /* 证据本折叠（结论卡内）：title/stance/source_kind + 可点链接。
+     「前 N 条」与「共 M 条」都照后端给的数字写，缺 evidence_total 就只说前 N 条，
+     不编造总数（口径诚实）。 */
+  function renderEvidencePreview(preview, total) {
+    if (!Array.isArray(preview) || !preview.length) return "";
+    const items = preview.map((en) => {
+      en = en || {};
+      const url = safeUrl(en.url);
+      const meta = [];
+      if (en.stance) meta.push(`<span class="chat-ev-stance">${escapeHtml(String(en.stance))}</span>`);
+      if (en.source_kind) meta.push(`<span class="chat-ev-stance">${escapeHtml(String(en.source_kind))}</span>`);
+      if (en.domain) meta.push(`<span class="chat-ev-stance">${escapeHtml(String(en.domain))}</span>`);
+      const title = escapeHtml(String(en.title || en.url || "（无标题）"));
+      const body = url
+        ? `<a href="${url}" target="_blank" rel="noopener nofollow">${title}</a>`
+        : title;
+      return `<li>${meta.join("")}${body}</li>`;
+    }).join("");
+    const totalTxt = total > preview.length ? `（共 ${total} 条）` : "";
+    return `
+        <details class="chat-evidence-fold chat-card-evidence">
+          <summary>证据本前 ${preview.length} 条${totalTxt}</summary>
+          <ul class="chat-ev-list">${items}</ul>
+        </details>`;
+  }
+
+  /* ---------- 1. 结论卡（§4.5：标签 + 置信度 + 证据充分度 + as_of + 复审条件） ----------
+     新增 evidence_preview / evidence_total（M5 单页化）：把联网证据本的前 5 条折叠
+     呈现在卡里，用户不必翻档案就能看到支撑材料；只渲染后端给的条数与链接，
+     前端不推断、不补造任何证据。 */
   function renderConclusion(c) {
     c = c || {};
     const suff = (c.evidence_sufficiency && typeof c.evidence_sufficiency === "object")
       ? c.evidence_sufficiency : {};
+    const preview = Array.isArray(c.evidence_preview) ? c.evidence_preview.slice(0, 5) : [];
+    const evTotal = Number(c.evidence_total) || 0;
     const riskRaw = c.risk_score;
     const risk = Number(riskRaw);
     const hasRisk = riskRaw !== null && riskRaw !== undefined && Number.isFinite(risk);
@@ -74,6 +114,7 @@
           <span class="badge gray">证据充分度：官方 ${Number(suff.official) || 0} · 非官方 ${Number(suff.unofficial) || 0} · 未知 ${Number(suff.unknown) || 0} / 共 ${Number(suff.total) || 0} 条</span>
         </div>
         ${asOfLine(c.as_of)}
+        ${renderEvidencePreview(preview, evTotal)}
         ${recheck.length ? `
         <div class="chat-recheck">
           <b>何时该再看一眼（复审条件）：</b>
@@ -88,7 +129,7 @@
     p = p || {};
     const label = String(p.label || p.conclusion || "");
     const meta = SPEECH_META[label] || { cls: "info", icon: "💬", desc: "" };
-    /* 三维分项（analyze_speech 附带时展示；复制 app.js dim-row 参数化） */
+    /* 三维分项（analyze_speech 附带时展示；沿用原分析页 dim-row 的排版） */
     const e = (p.emotion && typeof p.emotion === "object") ? p.emotion : null;
     const a = (p.attack && typeof p.attack === "object") ? p.attack : null;
     const l = (p.logic && typeof p.logic === "object") ? p.logic : null;
@@ -98,6 +139,14 @@
           ${a ? `<div class="dim-row"><span class="k">攻击等级</span><span class="v">${escapeHtml(a.aggression_level || "未知")} · 对象 ${escapeHtml(a.attack_target || "未知")}</span></div>` : ""}
           ${l ? `<div class="dim-row"><span class="k">逻辑关联</span><span class="v">${escapeHtml(l.logic_relevance || "未知")}${l.logic_fallacy && l.logic_fallacy !== "无" ? ` · 谬误：${escapeHtml(l.logic_fallacy)}` : ""}</span></div>` : ""}
         </div>` : "";
+    /* 完整分析报告（后端 analyze_speech 附带 card.report）：折叠呈现，
+       超长被后端截断时如实标注「已截断」，不让用户以为看到的是全文。 */
+    const report = String(p.report || "");
+    const reportFold = report ? `
+        <details class="chat-evidence-fold chat-card-report">
+          <summary>完整分析报告${p.report_truncated ? "（原文过长，后端已截断）" : ""}</summary>
+          <pre class="chat-report-text">${escapeHtml(report)}</pre>
+        </details>` : "";
     return `
       <div class="chat-card chat-card-speech">
         <div class="chat-card-title">🗣️ 言论土壤<span class="badge gray">classic 四档</span>${degradedBadge(p)}</div>
@@ -110,6 +159,7 @@
         </div>
         ${dims}
         ${asOfLine(p.as_of)}
+        ${reportFold}
       </div>`;
   }
 
@@ -142,6 +192,168 @@
           <div class="dim-row"><span class="k">z · 文章留言量</span><span class="v">${fmtNum(p.z)}</span></div>
         </div>
         ${asOfLine(p.as_of)}
+      </div>`;
+  }
+
+  /* ---------- 4. 我的画像卡（insights 只读聚合：话术模式库 / 信源画像 / 本周简报） ----------
+     由后端 insights 工具产出：card = {card_type:"insights", kind, as_of, patterns|profiles|digest}。
+     渲染逻辑从原参谋页 insights.js 迁移而来（class 换 chat- 前缀，随对话流内嵌）。
+     口径不变：只给计数与排序，不对任何消息或站点判定真假；空数据一律「暂无数据」。 */
+  const INSIGHTS_META = {
+    patterns: { icon: "🧩", title: "话术模式库" },
+    sources: { icon: "🌐", title: "信源画像" },
+    weekly: { icon: "🗓️", title: "本周简报" },
+  };
+
+  function insightsEmpty() {
+    return '<p class="chat-insight-empty">暂无数据</p>';
+  }
+
+  function fmtPct(share) {
+    const n = Number(share);
+    return Number.isFinite(n) ? `${Math.round(n * 100)}%` : "—";
+  }
+
+  /* 时间戳展示：后端给 ISO（T 分隔），这里只做可读化，不改数值 */
+  function when(s) {
+    return escapeHtml(String(s || "").replace("T", " ") || "—");
+  }
+
+  /* 高风险类目口径：与引擎 verdict 标签一致，by_label 里命中的才计入 */
+  const HIGH_RISK_LABELS = ["高风险谣言", "疑似谣言"];
+
+  /* 4.1 话术模式库：结论分布 + 高风险话术榜 + 常一起出现的话术组合 */
+  function renderInsightPatterns(p) {
+    if (!p || typeof p !== "object") return insightsEmpty();
+    const risks = Array.isArray(p.risk_patterns) ? p.risk_patterns : [];
+    const pairs = Array.isArray(p.common_pairs) ? p.common_pairs : [];
+    if (!Number(p.total_dossiers) && !Number(p.with_markers) && !risks.length && !pairs.length) {
+      return insightsEmpty();
+    }
+    const labelMap = (p.by_label && typeof p.by_label === "object") ? p.by_label : {};
+    const labelBits = Object.keys(labelMap).map((k) => `${escapeHtml(k)} ×${Number(labelMap[k]) || 0}`);
+    let html = `<p class="chat-insight-count">有结论档案 <b>${Number(p.total_dossiers) || 0}</b> 篇 · 含话术标记 <b>${Number(p.with_markers) || 0}</b> 篇</p>
+      <p class="chat-insight-sub muted">结论分布：${labelBits.length ? labelBits.join(" · ") : "暂无数据"}</p>`;
+    if (risks.length) {
+      const items = risks.map((rp) => {
+        rp = rp || {};
+        const lab = (rp.by_label && typeof rp.by_label === "object") ? rp.by_label : {};
+        const hot = HIGH_RISK_LABELS.reduce((sum, name) => sum + (Number(lab[name]) || 0), 0);
+        return `<li><span class="chat-insight-rank-label">${escapeHtml(rp.label || rp.key || "（未命名类目）")}</span>
+          <span class="chat-insight-rank-num">${Number(rp.dossiers) || 0} 条 · 占 ${fmtPct(rp.share)} · 其中高风险/疑似 ${hot} 条</span></li>`;
+      }).join("");
+      html += `<div class="chat-insight-rank-title">高风险话术榜单（按命中档案数）</div>
+        <ul class="chat-insight-rank">${items}</ul>`;
+    }
+    if (pairs.length) {
+      const pairItems = pairs.map((pair) => {
+        pair = pair || {};
+        const labels = Array.isArray(pair.labels) ? pair.labels : [];
+        const keys = Array.isArray(pair.keys) ? pair.keys : [];
+        const a = labels[0] || keys[0] || "？";
+        const b = labels[1] || keys[1] || "？";
+        return `<li>${escapeHtml(a)} + ${escapeHtml(b)}
+          <span class="chat-insight-rank-num">${Number(pair.dossiers) || 0} 条</span></li>`;
+      }).join("");
+      html += `<div class="chat-insight-rank-title">常一起出现的话术组合</div>
+        <ul class="chat-insight-rank">${pairItems}</ul>`;
+    }
+    /* 可信度线索榜（credibility_patterns）：卡片载荷里本来就有这份聚合，旧参谋页
+       漏渲染了；单页化顺手补上——同样只列计数与占比，不给任何站点/消息判真假。 */
+    const creds = Array.isArray(p.credibility_patterns) ? p.credibility_patterns : [];
+    if (creds.length) {
+      const credItems = creds.map((cp) => {
+        cp = cp || {};
+        const lab = (cp.by_label && typeof cp.by_label === "object") ? cp.by_label : {};
+        const bits = Object.keys(lab).map((k) => `${escapeHtml(k)} ×${Number(lab[k]) || 0}`);
+        return `<li><span class="chat-insight-rank-label">${escapeHtml(cp.label || cp.key || "（未命名类目）")}</span>
+          <span class="chat-insight-rank-num">${Number(cp.dossiers) || 0} 条 · 占 ${fmtPct(cp.share)}${bits.length ? ` · ${bits.join(" · ")}` : ""}</span></li>`;
+      }).join("");
+      html += `<div class="chat-insight-rank-title">可信度线索榜（按命中档案数）</div>
+        <ul class="chat-insight-rank">${credItems}</ul>`;
+    }
+    return html;
+  }
+
+  /* 4.2 信源画像：域名 / 档位 / 条目计数 / 增信是否达标 */
+  function renderInsightSources(profiles) {
+    if (!Array.isArray(profiles) || !profiles.length) return insightsEmpty();
+    const rows = profiles.map((r) => {
+      r = r || {};
+      const badge = r.qualified
+        ? '<span class="badge green">个人增信生效</span>'
+        : '<span class="badge gray">未达标</span>';
+      return `<tr><td>${escapeHtml(r.domain || "—")}</td>
+        <td>${escapeHtml(r.tier || "—")}</td>
+        <td>${Number(r.total_entries) || 0}</td>
+        <td>${Number(r.refute_entries) || 0}</td>
+        <td>${Number(r.refuted_dossiers) || 0}</td>
+        <td>${when(r.last_seen)}</td>
+        <td>${badge}</td></tr>`;
+    }).join("");
+    return `<table class="chat-insight-table">
+        <thead><tr><th>域名</th><th>档位</th><th>条目数</th><th>反驳条目</th><th>证伪档案数</th><th>最近出现</th><th>增信</th></tr></thead>
+        <tbody>${rows}</tbody></table>
+      <p class="chat-insight-note muted">画像来自你自己的档案史，仅在历史证伪≥阈值时参与抬分；只述计数，不给任何站点打真假分。</p>`;
+  }
+
+  /* 4.3 本周简报：周期 + 新档案/结论 + 运行成本 + 高频话术 + 反驳最多的信源 */
+  function renderInsightWeekly(d) {
+    if (!d || typeof d !== "object") return insightsEmpty();
+    const period = d.period || {};
+    const doss = d.dossiers || {};
+    const concl = d.conclusions || {};
+    const runs = d.runs || {};
+    const tool = d.tool_runs || {};
+    const heat = d.heat || {};
+    if (!Number(period.days) && !Number(doss.new_count) && !Number(heat.snapshot_count)) {
+      return insightsEmpty();
+    }
+    const cmap = (concl.by_label && typeof concl.by_label === "object") ? concl.by_label : {};
+    const conBits = Object.keys(cmap).map((k) => `${escapeHtml(k)} ×${Number(cmap[k]) || 0}`);
+    let html = `<p class="chat-insight-count">${when(period.start)} ~ ${when(period.end)}（${Number(period.days) || 0} 天）</p>
+      <ul class="chat-insight-facts">
+        <li>新档案 <b>${Number(doss.new_count) || 0}</b> 篇；新结论：${conBits.length ? conBits.join(" · ") : "暂无数据"}</li>
+        <li>分析运行 <b>${Number(runs.count) || 0}</b> 次 · 成本 ${Number(runs.requests) || 0} 次调用 / ${Number(runs.tokens) || 0} tokens；工具调用 <b>${Number(tool.count) || 0}</b> 次 · 成本 ${Number(tool.requests) || 0} / ${Number(tool.tokens) || 0} tokens</li>
+        <li>热度快照 <b>${Number(heat.snapshot_count) || 0}</b> 次</li>
+      </ul>
+      ${d.as_of ? `<p class="chat-insight-sub muted">数据截至 ${when(d.as_of)}</p>` : ""}`;
+    const top = (d.patterns && Array.isArray(d.patterns.top)) ? d.patterns.top : [];
+    if (top.length) {
+      html += `<div class="chat-insight-rank-title">本周高频话术</div><ul class="chat-insight-rank">${top.map((tp) => {
+        tp = tp || {};
+        return `<li><span class="chat-insight-rank-label">${escapeHtml(tp.label || tp.key || "（未命名类目）")}</span>
+          <span class="chat-insight-rank-num">${Number(tp.dossiers) || 0} 条</span></li>`;
+      }).join("")}</ul>`;
+    }
+    const refutes = (d.sources && Array.isArray(d.sources.top_refute)) ? d.sources.top_refute : [];
+    if (refutes.length) {
+      html += `<div class="chat-insight-rank-title">本周反驳条目最多的信源</div><ul class="chat-insight-rank">${refutes.map((tr) => {
+        tr = tr || {};
+        return `<li>${escapeHtml(tr.domain || "—")}
+          <span class="chat-insight-rank-num">${Number(tr.refute_entries) || 0} 条反驳</span></li>`;
+      }).join("")}</ul>`;
+    }
+    return html;
+  }
+
+  function renderInsights(card) {
+    card = card || {};
+    const kind = String(card.kind || "");
+    const meta = INSIGHTS_META[kind] || { icon: "🧩", title: "我的画像" };
+    let body;
+    if (kind === "patterns") body = renderInsightPatterns(card.patterns);
+    else if (kind === "sources") body = renderInsightSources(card.profiles);
+    else if (kind === "weekly") body = renderInsightWeekly(card.digest);
+    /* 未知 kind 不猜：如实「暂无数据」，避免把聚合结构错当另一类画像展示 */
+    else body = insightsEmpty();
+    const kindBadge = INSIGHTS_META[kind] ? `<span class="badge gray">只读聚合 · 零 LLM</span>` : "";
+    const asOf = card.as_of || (card.digest && card.digest.as_of) || "";
+    return `
+      <div class="chat-card chat-card-insights">
+        <div class="chat-card-title">${meta.icon} ${escapeHtml(meta.title)}${kindBadge}${degradedBadge(card)}</div>
+        ${body}
+        ${asOfLine(asOf)}
       </div>`;
   }
 
@@ -203,15 +415,22 @@
       return renderClaimAnswer(payload.claim_answer);
     }
     const type = String(payload.card_type || payload.type || "").toLowerCase();
+    if (type === "insights") return renderInsights(payload);
     if (type === "conclusion") return renderConclusion(payload);
     if (type === "speech" || type === "classic") return renderSpeech(payload);
     if (type === "heat" || type === "attention") return renderHeat(payload);
-    /* 无 card_type 时按字段形态识别（三个渲染器互不混淆的判据） */
+    /* 无 card_type 时按字段形态识别（各渲染器互不混淆的判据） */
     if (payload.score !== undefined || payload.e_score !== undefined) return renderHeat(payload);
     if (payload.emotion || payload.attack || payload.logic) return renderSpeech(payload);
+    /* insights 卡即使没带 card_type，也能按聚合字段名识别出来 */
+    if (payload.patterns !== undefined || payload.profiles !== undefined
+        || (payload.digest !== undefined && payload.kind)) return renderInsights(payload);
     return renderConclusion(payload);
   }
 
   /* 供 chat.js 调用的唯一入口（不污染全局命名空间） */
-  window.ChatCards = { renderCard, renderClaimAnswer, renderConclusion, renderSpeech, renderHeat, escapeHtml };
+  window.ChatCards = {
+    renderCard, renderClaimAnswer, renderConclusion, renderSpeech, renderHeat,
+    renderInsights, escapeHtml,
+  };
 })();

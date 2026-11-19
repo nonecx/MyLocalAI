@@ -62,7 +62,9 @@
 │   │   ├── prompts.json        人设与固定话术——改这里而非改代码
 │   │   └── assistant_rules.json  路由模型/上限/预算/指纹阈值/信源画像阈值/拒绝词表——改这里而非改代码
 │   ├── web/                    FastAPI 网站 + static/（src/mylocalai/web/app.py）
-│   │   └── static/             app.js（工具模式，契约不变）+ chat.js/cards.js/chat.css（对话 Tab）+ insights.js（参谋 Tab）
+│   │   └── static/             单一对话页的全部界面：index.html + shell.js（file:// 引导/服务状态）
+│   │                           + chat.js/cards.js（会话、档案库、事件流与全部卡片渲染）+ chat.css
+│   │                           （单页化后 app.js 与 insights.js 已删除：工具模式、参谋 Tab 下线）
 │   ├── util/                   text_safety（代理项规整）/ console_io（stdio 规整）
 │   └── cli.py                  命令行入口（python -m mylocalai.cli）
 ├── my_website/                 启动器（start.bat / start.sh）与说明，实际代码在 src/mylocalai/web/
@@ -146,12 +148,14 @@ w=(0.2,0.5,0.3), λ=0.7, ε=1e-6`；约束 `w_x+w_y+w_z=1`、各权重 `>0`、`E
 .venv/Scripts/python.exe -X utf8 -m attn_agent.attention --x 1000 --y 100000000 --z 1000000 --json
 ```
 
-**网页端已实现**（双击 `my_website/start.bat`，首页下方「📈 关注度（Attention）评估」面板）：
+**网页端已实现**（双击 `my_website/start.bat`：单页对话 composer 上方的「算热度」快捷面板，
+填 x/y/z 后经结构化 `action={"name":"compute_heat","args":{x,y,z}}` 发一轮对话，纯公式、零 LLM）。
+接口契约全部不变，只是页面入口由原「工具模式」页合并进对话页：
 
 | 能力 | 接口 | 说明 |
 | --- | --- | --- |
-| 手动算分 | `POST /api/attention` | 页面填 x/y/z，纯确定性返回 E、S、三个分项、档位、是否触发深读 |
-| 话题联网估参 | `POST /api/attention/search` | 输入话题，`src/mylocalai/attention/estimate.py` 走真实检索估出 x/y/z 后算分 |
+| 手动算分 | `POST /api/attention` | 对话页「算热度」面板填 x/y/z（等价于 `compute_heat` action），纯确定性返回 E、S、三个分项、档位、是否触发深读 |
+| 话题联网估参 | `POST /api/attention/search` | 输入话题，`src/mylocalai/attention/estimate.py` 走真实检索估出 x/y/z 后算分；单页化后只保留接口，页面暂无联网估参入口 |
 | 深读解读 | 上述两个接口的 `deep_read` 字段 | 触发时做**受控生成**：议题标签 + 张力 + 现象 + 反方 + 边界；`applicable=false` 是正常出口；LLM 不可用或被护栏全丢时回退本地模板并标 `degraded` |
 | 分析记录内嵌 | `POST /api/analyze` 返回的 `attention` 字段 | classic / agent 两种模式都带一个确定性关注度分 |
 
@@ -309,7 +313,7 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 1101 个用例（unittest discover 全量，2026-10-31 L4 实测；**M4 起由
+离线套件共 1129 个用例（unittest discover 全量，2026-11-19 单页化后实测；**M4 起由
 `tests.test_readme_counts` 自动校验此数字与 mock 闸门条数，改动后须同步回写**）：
 M1-M3 的全部回归（详见 git 历史），加上 M4 新增模块：
 **成本真实计数**（llm_client 进程级计数器：真实上游调用数 + usage tokens，缓存命中/
@@ -318,8 +322,12 @@ done.cost / tool_runs / 档案 analysis_runs，计数面不可用退回粗口径
 **README 数字守护**（用例数 / mock 闸门条数 / 引用的测试与文档文件存在性，治文档漂移）、
 web 会话与档案成本汇总端点及前端会话累计徽章的自洽；
 加上 L4 新增模块：**参谋三聚合**（dossier/insights.py 纯函数 + dossier_markers v4
-沉淀 + 三端点与参谋 Tab 前端自洽）、**信源画像反哺抬分**（collect_evidence
-source_profile 注入：空画像逐位不变守卫、抬分端到端、装配透传）。
+沉淀 + 三端点与对话内 insights 卡前端自洽）、**信源画像反哺抬分**（collect_evidence
+source_profile 注入：空画像逐位不变守卫、抬分端到端、装配透传）；
+加上单页化新增模块：**insights 只读工具**（kind 封闭枚举 patterns/sources/weekly、
+零 LLM、空库合法空卡）、**结构化 action 通道**（未注册/不在 allowlist/写工具/坏参数
+一律 400，合法时跳过路由直达只读工具，事件协议不新增）、**卡片折叠字段**
+（结论卡 evidence_preview 前 5 条、言论土壤卡 report 完整报告）。
 另有 `tests/run_module_tests.py`（12 条内置用例全模块跑一遍并落盘）、
 `tests/smoke_api.py`（配置自检 + 连通性）。
 
@@ -342,7 +350,7 @@ source_profile 注入：空画像逐位不变守卫、抬分端到端、装配�
 ## 文档
 
 - `docs/Agent工作流规格-v0.1.md` —— **Agent 工作流实施基线**（用户能力、主张/传播证据双维判定、外发授权、分类保存与验收矩阵；规格不等于所有阶段已实现）。
-- `docs/使用说明书.md` —— **使用者操作手册**（安装/配置/启动/三个 Tab/命令行/MCP/配置调整/数据备份/常见问题）。
+- `docs/使用说明书.md` —— **使用者操作手册**（安装/配置/启动/单页对话与左栏/命令行/MCP/配置调整/数据备份/常见问题）。
 - `docs/研究报告-2026-10-30.md` —— 重塑前的质量基线与实测证据（智能助手重塑的依据）。
 - `docs/评估-真流式-2026-10-31.md` —— M4 真流式评估（现状/要动的面/收益/风险；结论：建议 M5 前不做，拍板留给作者）。
 - `docs/工作指导-智能助手重塑-2026-10-30.md` —— 重塑工作的唯一执行依据（里程碑与验收）。
@@ -362,11 +370,22 @@ source_profile 注入：空画像逐位不变守卫、抬分端到端、装配�
 - `src/mylocalai/rumor/README.md` —— 谣言 Agent 的架构、证据本、受控浏览、MCP 与降级行为。
 - `my_website/README.md` —— 展示网站的启动方式与页面功能。
 
-## 智能助手（2026-10-31，M2）
+## 智能助手（2026-10-31，M2；单页化后入口全部合并进对话页）
 
-网站首页双 Tab，**对话为默认 Tab**：把"这条消息是真的吗"丢进对话框，拿回一张带证据、
-带置信度、带"什么时候该再看一眼"的结论卡片。设计口径见 `docs/工作指导-智能助手重塑-2026-10-30.md`。
+网站首页是**单一对话页 + 左栏**，不再有"工具模式""参谋"两个 Tab：把"这条消息是真的吗"
+丢进对话框，拿回一张带证据、带置信度、带"什么时候该再看一眼"的结论卡片。
+设计口径见 `docs/工作指导-智能助手重塑-2026-10-30.md`。
 
+- **单页 + 左栏（单页化）**：页面只有一个对话流——顶栏（品牌 + 服务状态 chip + 「关于」弹层）、
+  左栏三块（会话 / 档案库 / 我的画像）、消息流、composer 上方四个快捷 chips
+  （核查真伪 / 言论土壤 / 算热度 / 我的画像）。原「工具模式」与「参谋」Tab 已下线、
+  `static/app.js` 与 `static/insights.js` 已删除（改为 `shell.js` 只做 file:// 引导与服务状态）；
+  能力全部并入对话，`/api/analyze`、`/api/attention*`、`/api/insights/*` 端点契约不变，只是页面入口变了。
+- **结构化 action 通道**：`POST /api/chat` 支持可选 `action={"name","args"}`，供精确输入类入口
+  （「算热度」的 x/y/z、「我的画像」的三种 kind）使用——只放行只读白名单工具，未注册/越界参数/
+  写工具一律在 SSE 开始前 400 拒绝；合法时跳过路由模型直达工具，事件协议一个都不新增。
+- **我的画像（原参谋三块）**：话术模式库 / 信源画像 / 本周简报由 `insights` 只读工具
+  （kind 封闭枚举、零 LLM、成本恒 0）在**消息流里出一张 insights 卡**呈现，数据只来自本机档案库。
 - **三档车道**：闲聊/追问（轻）；analyze_speech 言论土壤（快）；verify_claim/recheck 联网核查（慢查 30-120s，
   先发本地初扫 markers + 组件级进度，绝不允许白屏干等）。
 - **路由四层防护链**：封闭枚举白名单 → 参数 schema 校验 → 工具 allowlist → 权限；任一步失败降级
@@ -374,6 +393,8 @@ source_profile 注入：空画像逐位不变守卫、抬分端到端、装配�
   15 个变异用例锁定无效。
 - **卡片三层信息架构**：标签+置信度 → 证据计数/as_of/degraded 徽章 → 证据本前 5 条；
   卡片永远在叙述之前；叙述失败时以卡片+固定模板收尾，永不丢结论。
+  折叠细节：结论卡把证据本前 5 条收进 `<details>`，言论土壤卡把完整分析报告收进 `<details>`
+  （超长由后端截断并标 `report_truncated`）。
 - **结论卡片口径**（全纯函数派生，大模型不参与打分）：label/risk_score（兼容层）+ confidence +
   evidence_sufficiency（official/unofficial/unknown/total）+ as_of + recheck_conditions +
   verdict_basis 标记；映射外置在 `config/verdict_rules.json` 的 `card` 段。
@@ -439,8 +460,11 @@ DOSSIER_DB_PATH 可覆盖）。测试：`tests.test_mcp_assistant`（同核对�
 ## 参谋与洞察（2026-10-31，L4）
 
 "越用越聪明"（§2.5）的兑现点：三种积累全部 **SQLite 聚合 + 纯函数离线推导，零 LLM 调用**，
-数据只来自你自己的档案库。首页新增第三个 Tab「**参谋**」（默认 Tab 仍是对话），
-三个只读端点：`GET /api/insights/patterns`、`/api/insights/sources`、`/api/insights/weekly?days=7`。
+数据只来自你自己的档案库。单页化后不再单独开「参谋」Tab：左栏「**我的画像**」三个按钮
+（话术模式库 / 信源画像 / 本周简报）点一下就在对话流里出一张 `insights` 卡，
+也可以直接对助手说"看看我的画像"。三个只读端点契约不变，仍可直连：
+`GET /api/insights/patterns`、`/api/insights/sources`、`/api/insights/weekly?days=7`
+（页面走 `insights` 工具的 `action` 通道，不直连端点——直连会绕开会话史、事件流与取消链）。
 
 - **话术模式库**：核查落库时把初扫 markers（patterns 六类风险特征 + 三类可信度线索）结构化
   沉淀进 `dossier_markers` 表（schema v4，一档案一条幂等）；跨档案聚合出"你查过的档案里
@@ -454,8 +478,9 @@ DOSSIER_DB_PATH 可覆盖）。测试：`tests.test_mcp_assistant`（同核对�
   画像只来自档案库 SQL，LLM 输出没有写画像的通道（`tests.test_source_profile_lift`）。
 - **个人信息环境周报**：按时间窗（默认 7 天，1-90 可调）聚合新档案 / 结论分布 / 分析运行与
   真实成本（requests/tokens）/ 高频话术 / 辟谣主力域名 / 热度快照 / 指纹沉淀量；无推送无打扰，
-  打开参谋页才算（§2.2 不制造新压力）。
+  点「本周简报」才算（§2.2 不制造新压力）。
 - 三端点全部只读、聚合函数永不抛；库不可用时降级为 503 或合法空结构（均为诚实降级）；
-  参谋页数据为空显示"暂无数据"。
+  画像卡数据为空显示"暂无数据"。`insights` 工具的 digest 只把**计数**交给叙述层，
+  域名明细只进卡片、不进模型上下文。
   测试：`tests.test_insights_api`（端点 + 前后端自洽）、`tests.test_insights`、
   `tests.test_source_profile_lift`。

@@ -22,241 +22,136 @@
         <p>粘贴一条消息，拿回带证据与复审条件的核查卡片 —— 只述证据，不判定真假</p>
       </div>
     </div>
-    <span id="apiStatus" class="status-chip checking">服务检查中…</span>
+    <div class="header-actions">
+      <span id="apiStatus" class="status-chip checking">服务检查中…</span>
+      <button id="aboutBtn" class="btn-ghost about-open-btn" type="button"
+        aria-haspopup="dialog" aria-controls="aboutDialog">关于</button>
+    </div>
   </header>
 
-  <!-- ============ 首页三 Tab（M2/L4）：对话为默认 Tab；工具模式 = 原分析页；
-       参谋 = L4 只读聚合页（insights.js 接管，切进时刷新） ============ -->
-  <nav class="top-tabs" id="topTabs" role="tablist">
-    <button class="top-tab active" data-tab="chat" type="button">对话</button>
-    <button class="top-tab" data-tab="tools" type="button">工具模式</button>
-    <button class="top-tab" data-tab="insights" type="button">参谋</button>
-  </nav>
-
-  <!-- ============ 对话 Tab（M2 新增，chat.js 接管） ============ -->
-  <div id="chatTab" class="chat-tab">
-    <main class="chat-layout">
-      <aside class="col-side chat-side">
-        <!-- 会话列表 -->
-        <section class="panel chat-sessions-panel">
-          <div class="panel-head">
-            <h2>会话</h2>
-            <button id="chatNewSession" class="btn-ghost chat-new-btn" type="button">＋ 新建会话</button>
-          </div>
-          <ul id="chatSessionList" class="chat-session-list">
-            <li class="empty">暂无会话，发消息即可自动创建</li>
-          </ul>
-        </section>
-        <!-- 档案库（M3：完整六章节档案库视图，chat.js 渲染） -->
-        <section class="panel chat-dossier-panel">
-          <div class="panel-head">
-            <h2>档案库</h2>
-            <span id="chatDossierCount" class="count-chip">0</span>
-          </div>
-          <ul id="chatDossierList" class="chat-dossier-list">
-            <li class="empty">暂无档案；完成一次核查后自动沉淀</li>
-          </ul>
-          <p class="chat-dossier-hint muted">点开档案查看六章节：结论版本对比 · 证据批次 · 言论土壤 · 热度趋势 · 观点光谱 · 背景解读；可导出 Markdown。</p>
-        </section>
-      </aside>
-
-      <!-- 消息流 + 输入区 -->
-      <section class="panel chat-main-panel">
-          <div id="chatMessages" class="chat-messages">
-            <div class="chat-welcome">
-              <h2>把要核查的消息发给我</h2>
-              <p>先给零成本本地初扫，再按需联网取证；结论永远带证据截至时间（as_of）与复审条件，只述证据、不判定真假。</p>
-              <div class="chat-welcome-samples">
-                <button class="chat-welcome-sample" type="button"
-                  data-sample="网传喝隔夜茶会致癌，转给家人看看！这条是真的吗？">网传喝隔夜茶会致癌，是真的吗？</button>
-                <button class="chat-welcome-sample" type="button"
-                  data-sample="气死了！听说自来水被人下毒了，官方根本不敢说！帮我分析一下这段话的言论土壤">分析这段话的言论土壤</button>
-                <button class="chat-welcome-sample" type="button"
-                  data-sample="最近有什么我查过的档案需要复核吗？">我的档案需要复核吗</button>
-              </div>
-            </div>
-          </div>
-        <div id="chatError" class="error-box hidden"></div>
-        <div class="chat-composer">
-          <textarea id="chatInput" maxlength="8000" rows="3"
-            placeholder="粘贴一条网络消息、传言或话题……（最多 8000 字，Enter 发送，Shift+Enter 换行）"></textarea>
-          <div class="chat-actions">
-            <span id="chatCharCount" class="chat-char-count">0 / 8000</span>
-            <button id="chatCancelBtn" class="btn-ghost hidden" type="button">停止</button>
-            <button id="chatSendBtn" class="btn-primary" type="button">发送</button>
-          </div>
-        </div>
-      </section>
-    </main>
+  <!-- 关于弹层（原「关于系统」面板要点迁移到这里；不再占右栏位置） -->
+  <div id="aboutDialog" class="about-dialog hidden" role="dialog" aria-modal="true"
+    aria-labelledby="aboutTitle">
+    <div class="about-dialog-card">
+      <div class="panel-head">
+        <h2 id="aboutTitle">关于系统</h2>
+        <button id="aboutCloseBtn" class="btn-ghost about-close-btn" type="button">关闭</button>
+      </div>
+      <p>本系统不训练模型：通过结构化提示词调用大模型 API 完成情感、
+        攻击性、逻辑三个维度的分析，再用纯 Python 规则引擎得出确定性结论，
+        最后生成解释报告。</p>
+      <ul>
+        <li>三模块独立容错，单模块失败不影响整体</li>
+        <li>结论由确定性规则得出，不靠模型"自己当裁判"</li>
+        <li>只述证据、不判定真假：结论永远带证据截至时间（as_of）与复审条件</li>
+        <li>谣言 Agent 模式：联网检索证据本（来源分级 + 立场判定）辅助谣言识别</li>
+        <li>「我的画像」与「算热度」都是零成本只读/纯公式计算，不调用大模型</li>
+        <li>接口文档：<a href="/docs" target="_blank" rel="noopener noreferrer">/docs</a></li>
+      </ul>
+    </div>
   </div>
 
-  <!-- ============ 参谋 Tab（L4）：话术模式库 / 信源画像 / 本周简报 ============
-       三块容器由 insights.js 渲染（切进本 Tab 时刷新）；数据全部来自
-       /api/insights/* 只读聚合端点，零 LLM、不判定真假，空数据显示"暂无数据"。 -->
-  <section class="panel insight-panel hidden" id="insightsPanel" hidden>
-    <div class="panel-head">
-      <h2>参谋 · 你的个人档案画像</h2>
-      <span class="count-chip">零 LLM · 纯只读聚合</span>
-    </div>
-    <p class="insight-intro muted">
-      以下全部由你自己的档案库统计得出：只述证据、计数与排序，不对任何消息或站点判定真假。
-    </p>
-    <div class="insight-cards">
-      <article class="insight-card" id="insightPatterns">
-        <h3 class="insight-card-title">话术模式库</h3>
-        <div class="insight-card-body"><p class="insight-empty">暂无数据</p></div>
-      </article>
-      <article class="insight-card" id="insightSources">
-        <h3 class="insight-card-title">信源画像</h3>
-        <div class="insight-card-body"><p class="insight-empty">暂无数据</p></div>
-      </article>
-      <article class="insight-card" id="insightWeekly">
-        <h3 class="insight-card-title">本周简报</h3>
-        <div class="insight-card-body"><p class="insight-empty">暂无数据</p></div>
-      </article>
-    </div>
-  </section>
-
-  <!-- ============ 工具模式 Tab（原分析页，契约不动） ============ -->
-  <main class="layout hidden" id="toolsTab">
-    <div class="col-main">
-      <!-- 输入区 -->
-      <section class="panel">
+  <!-- ============ 单页对话：左栏（会话 / 档案库 / 我的画像）+ 消息流 + composer ============ -->
+  <main class="chat-layout">
+    <aside class="col-side chat-side">
+      <!-- 会话列表 -->
+      <section class="panel chat-sessions-panel">
         <div class="panel-head">
-          <h2>输入待分析的网络言论</h2>
+          <h2>会话</h2>
+          <button id="chatNewSession" class="btn-ghost chat-new-btn" type="button">＋ 新建会话</button>
         </div>
-        <div class="mode-row">
-          <span class="mode-label">分析模式</span>
-          <div class="mode-switch" id="modeSwitch">
-            <button class="mode-btn active" data-mode="classic" type="button">快速分析</button>
-            <button class="mode-btn" data-mode="agent" type="button">谣言 Agent · 联网取证</button>
-          </div>
-          <span class="mode-tip" id="modeTip">三维分析 + 规则引擎，约 10–30 秒</span>
-        </div>
-        <textarea id="inputText" maxlength="8000"
-          placeholder="粘贴一段网络评论、弹幕、帖子或聊天记录……（最多 8000 字）"></textarea>
-        <div class="input-meta">
-          <span id="charCount">0 / 8000</span>
-          <div class="samples" id="sampleBar"><span class="samples-label">试试示例：</span></div>
-        </div>
-        <div class="actions">
-          <button id="analyzeBtn" class="btn-primary">开始分析</button>
-          <button id="cancelBtn" class="btn-ghost hidden">取消分析</button>
-          <button id="clearBtn" class="btn-ghost">清空</button>
-        </div>
-        <div id="loading" class="loading hidden">
-          <div class="steps" id="steps">
-            <div class="step"><span class="dot"></span>情感分析</div>
-            <div class="step"><span class="dot"></span>攻击性分析</div>
-            <div class="step"><span class="dot"></span>逻辑分析</div>
-            <div class="step"><span class="dot"></span>生成报告</div>
-          </div>
-          <p class="loading-hint">大模型分析约需 10–30 秒，请稍候…</p>
-        </div>
-        <div id="errorBox" class="error-box hidden"></div>
-      </section>
-
-      <!-- 结果区 -->
-      <section id="resultPanel" class="panel hidden">
-        <div id="conclusionBanner" class="conclusion"></div>
-        <div id="classicResult">
-          <div id="classicAttention" class="attn-inline-box hidden"></div>
-          <div class="dims">
-            <article class="dim-card" id="dimEmotion"></article>
-            <article class="dim-card" id="dimAttack"></article>
-            <article class="dim-card" id="dimLogic"></article>
-          </div>
-          <div class="report-box">
-            <h2>完整分析报告</h2>
-            <pre id="reportText"></pre>
-          </div>
-        </div>
-        <div id="agentResult" class="hidden"></div>
-      </section>
-
-      <!-- 关注度（Attention）评估 -->
-      <section id="attentionPanel" class="panel">
-        <div class="panel-head">
-          <h2>关注度（Attention）评估</h2>
-          <span class="count-chip">确定性公式 · 不调大模型</span>
-        </div>
-        <p class="attn-intro">
-          公式 <code>E = 100·(1 − e^(−λ·S))</code>，其中
-          <code>S = w_x·ln(1+x)/ln(1+x0) + w_y·ln(1+y)/ln(1+y0) + w_z·ln(1+z)/ln(1+z0) + ε</code>。
-          <b>x</b>=文章数量，<b>y</b>=文章阅读量，<b>z</b>=文章留言量。
-          默认参数 <code>x0=100, y0=100000, z0=1000, w=(0.2,0.5,0.3), λ=0.7, ε=1e-6</code>。
-        </p>
-        <div class="attn-profile-row">
-          <label for="attnProfile">参数档位</label>
-          <select id="attnProfile"></select>
-          <span class="attn-profile-desc" id="attnProfileDesc"></span>
-        </div>
-        <div class="attn-tabs" id="attnTabs">
-          <button class="attn-tab active" data-attn-tab="manual" type="button">手动输入 x/y/z</button>
-          <button class="attn-tab" data-attn-tab="search" type="button">话题联网估参</button>
-        </div>
-
-        <!-- 手动输入 -->
-        <div id="attnManual" class="attn-pane">
-          <div class="attn-fields">
-            <label>x 文章数量<input id="attnX" type="number" min="0" step="1" value="100" /></label>
-            <label>y 文章阅读量<input id="attnY" type="number" min="0" step="1" value="100000" /></label>
-            <label>z 文章留言量<input id="attnZ" type="number" min="0" step="1" value="1000" /></label>
-          </div>
-          <div class="actions">
-            <button id="attnCalcBtn" class="btn-primary" type="button">计算关注度</button>
-            <button id="attnResetBtn" class="btn-ghost" type="button">恢复默认</button>
-          </div>
-        </div>
-
-        <!-- 话题联网估参 -->
-        <div id="attnSearch" class="attn-pane hidden">
-          <div class="attn-fields attn-fields-wide">
-            <label>话题关键词
-              <input id="attnQuery" type="text" maxlength="200"
-                placeholder="输入一个话题，例如：老干妈回应AI裁员传闻" />
-            </label>
-          </div>
-          <div class="actions">
-            <button id="attnSearchBtn" class="btn-primary" type="button">联网估参并算分</button>
-          </div>
-          <p class="attn-hint">
-            会真实联网检索该话题，从检索结果估出 x/y/z。<b>y/z 是代理值</b>：
-            没有任何站点公开文章级精确阅读量，页面会把「代理/估计」明确标出来。
-          </p>
-        </div>
-
-        <div id="attnError" class="error-box hidden"></div>
-        <div id="attnResult" class="attn-result hidden"></div>
-      </section>
-    </div>
-
-    <aside class="col-side">
-      <!-- 历史记录 -->
-      <section class="panel">
-        <div class="panel-head">
-          <h2>分析记录</h2>
-          <span id="historyCount" class="count-chip">0</span>
-        </div>
-        <ul id="historyList" class="history-list">
-          <li class="empty">暂无记录，去分析第一条言论吧</li>
+        <ul id="chatSessionList" class="chat-session-list">
+          <li class="empty">暂无会话，发消息即可自动创建</li>
         </ul>
       </section>
 
-      <!-- 关于 -->
-      <section class="panel about-panel">
-        <h2>关于系统</h2>
-        <p>本系统不训练模型：通过结构化提示词调用大模型 API 完成情感、
-          攻击性、逻辑三个维度的分析，再用纯 Python 规则引擎得出确定性结论，
-          最后生成解释报告。</p>
-        <ul>
-          <li>三模块独立容错，单模块失败不影响整体</li>
-          <li>结论由确定性规则得出，不靠模型"自己当裁判"</li>
-          <li>谣言 Agent 模式：联网检索证据本（来源分级 + 立场判定）辅助谣言识别</li>
-          <li>接口文档：<a href="/docs" target="_blank">/docs</a></li>
+      <!-- 档案库（完整六章节档案库视图，chat.js 渲染） -->
+      <section class="panel chat-dossier-panel">
+        <div class="panel-head">
+          <h2>档案库</h2>
+          <span id="chatDossierCount" class="count-chip">0</span>
+        </div>
+        <ul id="chatDossierList" class="chat-dossier-list">
+          <li class="empty">暂无档案；完成一次核查后自动沉淀</li>
         </ul>
+        <p class="chat-dossier-hint muted">点开档案查看六章节：结论版本对比 · 证据批次 · 言论土壤 · 热度趋势 · 观点光谱 · 背景解读；可导出 Markdown。</p>
+      </section>
+
+      <!-- 我的画像（L4）：三块只读聚合不再单开 Tab，点击即在消息流里出一张 insights 卡。
+           数据全部来自你自己的档案史（零 LLM），空数据显示「暂无数据」。 -->
+      <section class="panel chat-insights-panel" id="chatInsights">
+        <div class="panel-head">
+          <h2>我的画像</h2>
+          <span class="count-chip">零 LLM · 只读</span>
+        </div>
+        <div class="chat-insights-actions">
+          <button class="chat-insights-btn" data-insights-kind="patterns" type="button">话术模式库</button>
+          <button class="chat-insights-btn" data-insights-kind="sources" type="button">信源画像</button>
+          <button class="chat-insights-btn" data-insights-kind="weekly" type="button">本周简报</button>
+        </div>
+        <p class="chat-insights-hint muted">按你的档案史统计话术命中、信源计数与本周工作量；只给计数与排序，不对任何消息或站点判定真假。</p>
       </section>
     </aside>
+
+    <!-- 消息流 + 输入区 -->
+    <section class="panel chat-main-panel">
+      <div id="chatMessages" class="chat-messages">
+        <div class="chat-welcome">
+          <h2>把要核查的消息发给我</h2>
+          <p>先给零成本本地初扫，再按需联网取证；结论永远带证据截至时间（as_of）与复审条件，只述证据、不判定真假。</p>
+          <div class="chat-welcome-samples">
+            <button class="chat-welcome-sample" type="button"
+              data-sample="网传喝隔夜茶会致癌，转给家人看看！这条是真的吗？">网传喝隔夜茶会致癌，是真的吗？</button>
+            <button class="chat-welcome-sample" type="button"
+              data-sample="气死了！听说自来水被人下毒了，官方根本不敢说！帮我分析一下这段话的言论土壤">分析这段话的言论土壤</button>
+            <button class="chat-welcome-sample" type="button"
+              data-sample="最近有什么我查过的档案需要复核吗？">我的档案需要复核吗</button>
+            <button class="chat-welcome-sample" type="button"
+              data-quick="heat">算一下这条消息有多热</button>
+            <button class="chat-welcome-sample" type="button"
+              data-insights-kind="patterns">看看我的画像</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="chatError" class="error-box hidden"></div>
+
+      <!-- 快捷 chips：核查真伪 / 言论土壤 只把提示词填进输入框（原文仍由用户提供，
+           本系统不为用户编造待核查文本）；算热度 / 我的画像 走结构化只读 action。 -->
+      <div class="chat-quick-row">
+        <span class="chat-quick-label">快捷</span>
+        <button class="chat-quick-chip" data-quick="verify" type="button">核查真伪</button>
+        <button class="chat-quick-chip" data-quick="speech" type="button">言论土壤</button>
+        <button id="chatHeatChip" class="chat-quick-chip" data-quick="heat" type="button"
+          aria-expanded="false" aria-controls="chatHeatPanel">算热度</button>
+        <button class="chat-quick-chip" data-quick="insights" type="button">我的画像</button>
+      </div>
+
+      <!-- 算热度小面板（x/y/z 三个数字 → 结构化 action compute_heat，纯公式零 API） -->
+      <div id="chatHeatPanel" class="chat-quick-panel hidden">
+        <div class="chat-quick-panel-head">算热度：填 x / y / z（确定性公式 E = 100·(1 − e^(−λS))，不调大模型）</div>
+        <div class="chat-heat-fields">
+          <label>x 文章数量<input id="chatHeatX" type="number" min="0" step="1" value="100" /></label>
+          <label>y 文章阅读量<input id="chatHeatY" type="number" min="0" step="1" value="100000" /></label>
+          <label>z 文章留言量<input id="chatHeatZ" type="number" min="0" step="1" value="1000" /></label>
+        </div>
+        <div class="chat-quick-panel-actions">
+          <button id="chatHeatCalc" class="btn-primary chat-quick-submit" type="button">计算关注度</button>
+          <button id="chatHeatReset" class="btn-ghost" type="button">恢复默认</button>
+        </div>
+        <p class="chat-quick-note muted">y / z 是代理 / 估计口径：没有任何站点公开文章级精确阅读量，结果旁会标出「代理 / 估计值」徽章。</p>
+      </div>
+
+      <div class="chat-composer">
+        <textarea id="chatInput" maxlength="8000" rows="3"
+          placeholder="粘贴一条网络消息、传言或话题……（最多 8000 字，Enter 发送，Shift+Enter 换行）"></textarea>
+        <div class="chat-actions">
+          <span id="chatCharCount" class="chat-char-count">0 / 8000</span>
+          <button id="chatCancelBtn" class="btn-ghost hidden" type="button">停止</button>
+          <button id="chatSendBtn" class="btn-primary" type="button">发送</button>
+        </div>
+      </div>
+    </section>
   </main>
 
   <footer class="site-footer">
@@ -264,9 +159,8 @@
     最终判断权与事实核查请由用户自行把握。
   </footer>
 
-  <script src="static/app.js"></script>
+  <script src="static/shell.js"></script>
   <script src="static/cards.js"></script>
-  <script src="static/insights.js"></script>
   <script src="static/chat.js"></script>
 </body>
 </html>

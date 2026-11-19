@@ -7,10 +7,12 @@
   - 空库 → 三个端点都 200 且返回合法零结构（"暂无数据"是合法输出）；
   - weekly 的 days 用字符串手工解析：0 / 91 / abc / -1 → 400 {"error": "invalid_days"}，
     缺省 7 天（不用 FastAPI 类型校验，保持 400 语义）；
-  - 前后端自洽（照 test_website_chat / test_dossier_api 先例）：用正则从
-    static/insights.js 源码提取它点号访问的 snake_case 响应字段，断言每个都
-    真实出现在对应端点的响应 JSON 里，并点名核对 risk_patterns / common_pairs /
-    qualified / top_refute / by_label / period 六个关键字段。
+  - 前后端自洽（照 test_website_chat / test_dossier_api 先例）：单页化后渲染层
+    在 static/cards.js 的「我的画像」区（renderInsights），用正则从该区提取它点号
+    访问的 snake_case 响应字段，断言每个都真实出现在对应端点的响应 JSON 里，
+    并点名核对 risk_patterns / common_pairs / qualified / top_refute / by_label /
+    period 六个关键字段；入口在 index.html 左栏「我的画像」（id=chatInsights +
+    三个 data-insights-kind 按钮），经 chat.js 的 insights action 走 /api/chat。
 
 数据用 DossierStore 临时库预置，mock.patch.object 注入 app.get_dossier_service
 （与 tests/test_dossier_api.py 的 DossierApiTestBase 同一模式）。
@@ -253,86 +255,130 @@ class TestInsightsEmptyStore(InsightsApiTestBase):
 
 
 class TestInsightsFrontendConsistency(InsightsApiTestBase):
-    """前后端自洽（照 test_website_chat / test_dossier_api 先例）。
+    """前后端自洽（单页化：原 static/insights.js 的渲染逻辑迁进 static/cards.js）。
 
-    用正则从 static/insights.js 源码提取它点号访问的 snake_case 响应字段，
-    断言每个都真实出现在对应端点的响应 JSON 里；并点名核对六个关键字段。
+    单页化把「我的画像」从独立参谋 Tab 改成左栏入口 + 消息流里的 insights 卡：
+      - 入口：index.html 的 id=chatInsights 面板 + 三个 data-insights-kind 按钮
+        （patterns / sources / weekly），点击经 chat.js 发 /api/chat 的 insights action；
+      - 渲染：cards.js 的 renderInsights（card_type==="insights" 分发分支）；
+      - 后端：/api/insights/* 三个只读端点契约不变（本模块前四组用例照旧全量覆盖）。
+    因此本类断言的不再是 insights.js 源码，而是 cards.js「我的画像」渲染区 +
+    chat.js action 通道 + index.html 入口三者与后端响应的自洽。
     """
 
-    #: 点名核对的字段 → 各自归属端点（insights.js 的三个消费块）
+    #: 点名核对的字段 → 各自归属端点（cards.js renderInsights 的三个消费块）
     REQUIRED = {
         "patterns": ("risk_patterns", "common_pairs", "by_label"),
         "sources": ("qualified",),
         "weekly": ("top_refute", "period"),
     }
 
+    #: 左栏「我的画像」三个按钮的 kind（后端 tools_insights.KINDS 的封闭枚举）
+    KINDS = ("patterns", "sources", "weekly")
+
+    #: cards.js 里「我的画像」渲染区的物理边界（"4. 我的画像卡" → 下一节"新事实核查答案"）
+    RENDER_SECTION_START = "4. 我的画像卡"
+    RENDER_SECTION_END = "新事实核查答案"
+
     @classmethod
     def setUpClass(cls) -> None:
         super().setUpClass()
-        cls.insights_js = _read_static("insights.js")
+        cls.cards_js = _read_static("cards.js")
         cls.index_html = _read_static("index.html")
         cls.chat_css = _read_static("chat.css")
         cls.chat_js = _read_static("chat.js")
 
+    def _insights_renderer_source(self) -> str:
+        """切出 cards.js 里「我的画像」渲染区，避免把 claim_answer 等无关字段算进来。"""
+        parts = self.cards_js.split(self.RENDER_SECTION_START, 1)
+        self.assertEqual(len(parts), 2,
+                         "cards.js 缺少「4. 我的画像卡」渲染区标记（渲染逻辑被挪走了？）")
+        body = parts[1].split(self.RENDER_SECTION_END, 1)[0]
+        self.assertIn("function renderInsights", body,
+                      "cards.js 画像渲染区里没有 renderInsights")
+        return body
+
     def test_consumed_fields_exist_in_api_responses(self):
-        """insights.js 消费的每个响应字段都真实出现在 API 响应里（含六个关键字段点名）。"""
+        """cards.js 画像渲染区消费的每个响应字段都真实出现在 API 响应里（含六个关键字段点名）。"""
         self._seed_pattern_library()
         self._seed_source_profiles()
         self._seed_window()
-        pat = self.get("/api/insights/patterns").json()["patterns"]
-        prof = self.get("/api/insights/sources").json()["profiles"]
-        dig = self.get("/api/insights/weekly").json()["digest"]
+        pat = self.get("/api/insights/patterns").json()
+        prof = self.get("/api/insights/sources").json()
+        dig = self.get("/api/insights/weekly").json()
         union = _deep_keys(pat) | _deep_keys(prof) | _deep_keys(dig)
-        # insights.js 渲染层只以 .snake_case 形式取响应字段（方法/属性全是驼峰，不会误伤）
-        consumed = set(re.findall(r"\.([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b", self.insights_js))
-        self.assertTrue(consumed, "提取不到 insights.js 消费的字段：正则或文件失效")
+        src = self._insights_renderer_source()
+        # 渲染层只以 .snake_case 形式取响应字段（方法/属性全是驼峰，不会误伤）
+        consumed = set(re.findall(r"\.([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b", src))
+        self.assertTrue(consumed, "提取不到 cards.js 画像渲染区消费的字段：正则或文件失效")
         missing = sorted(consumed - union)
-        self.assertEqual(missing, [], f"insights.js 消费了 API 不提供的字段：{missing}")
+        self.assertEqual(missing, [], f"cards.js 画像渲染区消费了 API 不提供的字段：{missing}")
         # 六个关键字段逐点名：源码里真的点号访问了 + 对应端点响应里真的有
-        self.assertRegex(self.insights_js, r"\.risk_patterns\b")
-        self.assertRegex(self.insights_js, r"\.common_pairs\b")
-        self.assertRegex(self.insights_js, r"\.by_label\b")
-        self.assertRegex(self.insights_js, r"\.qualified\b")
-        self.assertRegex(self.insights_js, r"\.top_refute\b")
-        self.assertRegex(self.insights_js, r"\.period\b")
+        self.assertRegex(src, r"\.risk_patterns\b")
+        self.assertRegex(src, r"\.common_pairs\b")
+        self.assertRegex(src, r"\.by_label\b")
+        self.assertRegex(src, r"\.qualified\b")
+        self.assertRegex(src, r"\.top_refute\b")
+        self.assertRegex(src, r"\.period\b")
         for field in self.REQUIRED["patterns"]:
-            self.assertIn(field, _deep_keys(pat), field)
+            self.assertIn(field, _deep_keys(pat["patterns"]), field)
         for field in self.REQUIRED["sources"]:
-            self.assertIn(field, _deep_keys(prof), field)
+            self.assertIn(field, _deep_keys(prof["profiles"]), field)
         for field in self.REQUIRED["weekly"]:
-            self.assertIn(field, _deep_keys(dig), field)
+            self.assertIn(field, _deep_keys(dig["digest"]), field)
 
     def test_api_paths_match_backend_routes(self):
-        """insights.js 消费的三个端点在 FastAPI 路由表里都存在（去掉查询串后比对）。"""
+        """三个 /api/insights/* 端点仍在 FastAPI 路由表里；前端只走 /api/chat 的 action 通道。
+
+        单页化契约：卡片由 /api/chat 的 insights action 产出（SSE card 事件），
+        前端不直连 /api/insights/*——直连会绕开会话史、事件流与取消链。
+        """
         routes = {getattr(r, "path", "") for r in self.webapp.app.routes}
         for path in ("/api/insights/patterns", "/api/insights/sources",
-                     "/api/insights/weekly?days=7"):
-            self.assertIn(path, self.insights_js, path)
-            self.assertIn(path.split("?")[0], routes, path)
+                     "/api/insights/weekly"):
+            self.assertIn(path, routes, path)
+        self.assertIn('chat: "/api/chat"', self.chat_js)
+        self.assertIn("body.action = action", self.chat_js)
+        self.assertNotIn("/api/insights", self.chat_js)
+        self.assertNotIn("/api/insights", self.cards_js)
 
-    def test_assets_wired_and_default_tab_unchanged(self):
-        """index.html：参谋 Tab/section/三容器/脚本在位且默认 Tab 仍是对话；
-        chat.js setTab 带存在性守卫调 InsightsPanel.refresh()；insight-* 样式齐。"""
-        for marker in ('data-tab="insights"', 'id="insightsPanel"', 'id="insightPatterns"',
-                       'id="insightSources"', 'id="insightWeekly"', "insights.js", "参谋"):
-            self.assertIn(marker, self.index_html, f"index.html 缺少：{marker}")
-        # 默认 Tab 仍是对话：active 在 chat 按钮上，insights 按钮不带 active
-        self.assertIsNotNone(
-            re.search(r'<button class="top-tab active" data-tab="chat"', self.index_html))
-        self.assertIsNotNone(
-            re.search(r'<button class="top-tab" data-tab="insights"', self.index_html))
-        # chat.js 的接线：守卫调用在位；insights.js 暴露契约在位
-        self.assertIn("window.InsightsPanel", self.chat_js)
-        self.assertIn("InsightsPanel.refresh()", self.chat_js)
-        self.assertIn("window.InsightsPanel = { refresh: refresh }", self.insights_js)
-        # insights.js / index.html 里用到的 insight-* class 都在 chat.css 有定义
+    def test_insights_entry_and_renderer_wired(self):
+        """index.html 入口 + chat.js action 发送 + cards.js 渲染分支，三段接线齐全。"""
+        # 1) 左栏「我的画像」面板：id 在位，三个按钮的 kind 正好是后端封闭枚举
+        self.assertIn('id="chatInsights"', self.index_html)
+        panel = self.index_html.split('id="chatInsights"', 1)[1].split("</section>", 1)[0]
+        kinds = re.findall(r'data-insights-kind="([A-Za-z]+)"', panel)
+        self.assertEqual(kinds, list(self.KINDS),
+                         "左栏画像按钮的 kind 与后端 tools_insights.KINDS 不一致")
+        self.assertIn("我的画像", panel)
+        # 2) chat.js：左栏按钮点击 → insights action（message 由 describeAction 生成）
+        self.assertIn('document.querySelectorAll("#chatInsights [data-insights-kind]")',
+                      self.chat_js)
+        self.assertIn("sendInsights(btn.dataset.insightsKind)", self.chat_js)
+        self.assertIn('{ name: "insights", args: { kind } }', self.chat_js)
+        self.assertIn("function sendInsights(kind)", self.chat_js)
+        # 3) cards.js：渲染器 + card_type 分发分支 + 导出（未导出 chat.js 调不到）
+        self.assertIn("function renderInsights(card)", self.cards_js)
+        self.assertIn('if (type === "insights") return renderInsights(payload);', self.cards_js)
+        self.assertIn("renderInsights,", self.cards_js)   # window.ChatCards 导出名单
+        # 4) 渲染器用到的 chat-insight-* class 在 chat.css 有定义（否则画像卡裸奔）
         used = set()
-        for src in (self.insights_js, self.index_html):
-            for chunk in re.findall(r'class="([^"]+)"', src):
-                used.update(re.findall(r"[A-Za-z][\w-]*", chunk))
-        insight_classes = sorted(c for c in used if c.startswith("insight-"))
-        missing = [c for c in insight_classes if f".{c}" not in self.chat_css]
-        self.assertEqual(missing, [], f"chat.css 缺少定义：{missing}")
+        for chunk in re.findall(r'class="([^"]+)"', panel + self._insights_renderer_source()):
+            used.update(re.findall(r"[A-Za-z][\w-]*", chunk))
+        insight_classes = sorted(c for c in used if c.startswith("chat-insight-"))
+        self.assertTrue(insight_classes, "画像区没有解析到 chat-insight-* class")
+        css_missing = [c for c in insight_classes if f".{c}" not in self.chat_css]
+        self.assertEqual(css_missing, [], f"chat.css 缺少定义：{css_missing}")
+        self.assertIn(".chat-card-insights", self.chat_css)
+
+    def test_old_frontend_files_removed(self):
+        """单页化后 static/app.js 与 static/insights.js 必须已删除且页面不再引用。"""
+        for name in ("app.js", "insights.js"):
+            self.assertFalse((STATIC_DIR / name).exists(), f"旧前端文件仍在：static/{name}")
+            self.assertNotIn(f"static/{name}", self.index_html)
+        for name in ("shell.js", "cards.js", "chat.js"):
+            self.assertTrue((STATIC_DIR / name).is_file(), f"新前端文件缺失：static/{name}")
+            self.assertIn(f'src="static/{name}"', self.index_html)
 
 
 if __name__ == "__main__":

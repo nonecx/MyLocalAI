@@ -4,8 +4,10 @@
 覆盖三件事：
   1. 后端 /api/attention 与 /api/attention/search 的行为（含非法输入、检索失败降级）
   2. mylocalai.attention.estimate 的参数估计口径（x/y/z 的来源、estimated 标记、解析边界）
-  3. 前端三件套与后端接口的自洽性：HTML 里的元素 id 必须被 app.js 引用、
-     接口路径必须与后端路由一致——这类"改了后端忘了改前端"的错只有这种测试能抓到。
+  3. 前端单页与后端接口的自洽性：关注度表单已并入对话页「算热度」小面板
+     （index.html #chatHeatX/Y/Z + chat.js 的 compute_heat action），chat.js 引用的
+     元素 id 必须真实存在、接口路径必须与后端路由一致——这类"改了后端忘了改前端"
+     的错只有这种测试能抓到。
 
 运行（项目根目录下）：
     ./.venv/Scripts/python.exe -m unittest tests.test_website_attention -v
@@ -30,7 +32,9 @@ from mylocalai.attention import attention as A# noqa: E402
 from mylocalai.attention.estimate import estimate_from_search# noqa: E402
 
 STATIC = ROOT / "src" / "mylocalai" / "web" / "static"
-APP_JS = STATIC / "app.js"
+CHAT_JS = STATIC / "chat.js"
+CARDS_JS = STATIC / "cards.js"
+SHELL_JS = STATIC / "shell.js"
 INDEX_HTML = STATIC / "index.html"
 
 
@@ -171,11 +175,14 @@ class TestAttentionApi(unittest.TestCase):
         self.assertEqual(resp.status_code, 400)
 
     def test_health_and_static_still_ok(self):
-        """新端点不能把既有的首页/健康检查/静态资源搞坏。"""
+        """新端点不能把既有的首页/健康检查/静态资源搞坏；旧前端资源必须真的下线。"""
         self.assertEqual(self.client.get("/api/health").status_code, 200)
         self.assertEqual(self.client.get("/").status_code, 200)
-        self.assertEqual(self.client.get("/static/app.js").status_code, 200)
-        self.assertEqual(self.client.get("/static/style.css").status_code, 200)
+        for asset in ("shell.js", "cards.js", "chat.js", "chat.css", "style.css"):
+            self.assertEqual(self.client.get(f"/static/{asset}").status_code, 200, asset)
+        # 单页化删除的旧前端文件：静态路由必须 404，否则"删了 app.js 却还能被浏览器加载"
+        for gone in ("app.js", "insights.js"):
+            self.assertEqual(self.client.get(f"/static/{gone}").status_code, 404, gone)
 
     def test_attention_profiles_endpoint(self):
         """GET /api/attention/profiles 必须返回可用档位，默认档为 spec。"""
@@ -346,69 +353,117 @@ class TestEstimate(unittest.TestCase):
 
 # ---------------------------------------------------------------- 3. 前后端自洽
 class TestFrontendBackendConsistency(unittest.TestCase):
-    """抓"改了后端忘了改前端"这类错：id 引用、接口路径、元素是否存在。"""
+    """抓"改了后端忘了改前端"这类错：id 引用、接口路径、元素是否存在。
+
+    单页化后承载文件从 static/app.js 换成 chat.js / cards.js / shell.js：
+    关注度表单（原 #attnXxx 独立面板）并入对话页「算热度」小面板，
+    提交走 POST /api/chat 的结构化 action（compute_heat），/api/attention* 的
+    后端契约不变（见 TestAttentionApi 全量后端用例）。
+    """
+
+    #: 算热度小面板在对话页里的元素 id（chat.js 引用 → index.html 必须存在）
+    HEAT_IDS = ("chatHeatChip", "chatHeatPanel", "chatHeatX", "chatHeatY",
+                "chatHeatZ", "chatHeatCalc", "chatHeatReset")
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.js = _read(APP_JS)
+        cls.js = _read(CHAT_JS)
+        cls.cards_js = _read(CARDS_JS)
+        cls.shell_js = _read(SHELL_JS)
         cls.html = _read(INDEX_HTML)
 
+    @staticmethod
+    def _normalize(path: str) -> str:
+        """路径参数名前后端可以不同（前端 {sid} / 后端 {session_id}），归一成 {} 再比。"""
+        return re.sub(r"\{[^}]*\}", "{}", path.split("?")[0])
+
     def test_all_api_paths_exist_in_backend(self):
-        """前端 API 对象里的每个路径，后端都必须真有这个路由。"""
+        """前端（chat.js / shell.js）出现的每个 /api/* 路径，后端都必须真有这个路由。"""
         from app import app
-        routes = {getattr(r, "path", "") for r in app.routes}
-        paths = re.findall(r'^\s{2}(\w+):\s*"([^"]+)"', self.js, re.M)
-        self.assertTrue(paths, "没从 app.js 里解析到 API 路径")
-        for name, path in paths:
-            self.assertIn(path, routes, f"前端引用了后端不存在的接口：{name} -> {path}")
+        routes = {self._normalize(getattr(r, "path", "")) for r in app.routes}
+        paths = set(re.findall(r'"(/api/[^"]+)"', self.js))
+        paths |= set(re.findall(r'"(/api/[^"]+)"', self.shell_js))
+        self.assertTrue(paths, "没从 chat.js / shell.js 里解析到 API 路径")
+        for path in sorted(paths):
+            self.assertIn(self._normalize(path), routes,
+                          f"前端引用了后端不存在的接口：{path}")
+        # 关注度三端点契约不变（单页化合并入口，不删后端能力）
+        for path in ("/api/attention", "/api/attention/search", "/api/attention/profiles"):
+            self.assertIn(self._normalize(path), routes, f"关注度后端端点缺失：{path}")
 
-    def test_attention_ids_used_by_js_exist_in_html(self):
-        """app.js 里 $("#attnXxx") 引用的每个 id，index.html 里都必须有。"""
-        used = set(re.findall(r'\$\("#(attn[A-Za-z]+)"\)', self.js))
-        used |= set(re.findall(r'getElementById\("(attn[A-Za-z]+)"\)', self.js))
-        self.assertTrue(used, "app.js 里没引用任何 attn* 元素")
-        missing = sorted(i for i in used if f'id="{i}"' not in self.html)
-        self.assertEqual(missing, [], f"app.js 引用了 HTML 里不存在的元素 id: {missing}")
+    def test_heat_form_ids_used_by_chat_js_exist_in_html(self):
+        """chat.js 里 $("#chatHeatXxx") 引用的每个 id，index.html 里都必须有。
 
-    def test_inline_attention_ids_exist(self):
-        """分析记录里挂关注度的容器必须可达。
-
-        classicAttention 是静态 HTML 里的；agentAttention 是 renderAgentResult
-        动态拼进 #agentResult 的模板字符串里的——两者都必须存在，但来源不同，
-        所以分开校验（否则会漏掉"HTML 里找不到"这种假告警）。
+        这是原「app.js #attnXxx 用例」的等价替代：承载文件换成 chat.js，
+        表单元素从独立关注度面板迁进对话页「算热度」小面板（x/y/z + 计算/重置）。
         """
-        self.assertIn('id="classicAttention"', self.html, "HTML 缺少 classicAttention")
-        self.assertIn('id="agentAttention"', self.js,
-                      "app.js 的 agent 模板里缺少 agentAttention 容器")
-        # 两处容器都要被 renderXxxResult 真的填内容
-        self.assertIn("classicAttention", self.js)
-        self.assertIn("agentAttention", self.js)
-        self.assertIn("attentionInline", self.js)
+        used = set(re.findall(r'\$\("#(chatHeat[A-Za-z]+)"\)', self.js))
+        self.assertTrue(used, "chat.js 里没引用任何 chatHeat* 元素")
+        missing = sorted(i for i in used if f'id="{i}"' not in self.html)
+        self.assertEqual(missing, [], f"chat.js 引用了 HTML 里不存在的元素 id: {missing}")
+        for element_id in self.HEAT_IDS:
+            self.assertIn(element_id, used, f"chat.js 未接线算热度面板元素：{element_id}")
+        # 面板接线函数齐全（开合 / 重置 / 提交），缺一个表单就是半残
+        for fn in ("setHeatPanelOpen", "toggleHeatPanel", "resetHeatInputs", "submitHeat"):
+            self.assertIn(f"function {fn}", self.js, f"chat.js 缺少 {fn}")
 
-    def test_frontend_has_profile_selector(self):
-        """前端必须暴露档位选择控件并被 JS 引用。"""
-        self.assertIn('id="attnProfile"', self.html)
-        self.assertIn("attnProfileDesc", self.html)
-        self.assertIn("loadAttnProfiles", self.js)
-        self.assertIn("attentionProfiles", self.js)
-        css = _read(STATIC / "style.css")
-        self.assertIn(".attn-profile-row", css)
-        self.assertIn(".attn-profile-desc", css)
+    def test_heat_card_rendering_wired(self):
+        """热度结果卡渲染链路接通：cards.js renderHeat + x/y/z 三项 + 对应样式。
 
-    def test_deep_read_rendering_wired(self):
-        """深读渲染链路必须接通：JS 有渲染函数、CSS 有对应样式。"""
-        self.assertIn("renderDeepRead", self.js)
-        self.assertIn("d.deep_read", self.js)
-        css = _read(STATIC / "style.css")
-        for cls in ("attn-deep-body", "attn-deep-text", "attn-deep-head"):
-            self.assertIn(f".{cls}", css, f"style.css 缺少 .{cls} 定义")
+        原 app.js 把关注度结果内联渲染进分析记录（classicAttention/agentAttention），
+        单页化后结果统一走消息流里的热度卡（card_type=heat/attention），
+        容器由协议保证，不再有页面内联挂载点。
+        """
+        self.assertIn("function renderHeat", self.cards_js)
+        self.assertIn("chat-card-heat", self.cards_js)
+        for field in ("p.x", "p.y", "p.z"):
+            self.assertIn(field, self.cards_js, f"cards.js 热度卡未渲染 {field}")
+        self.assertIn("HEAT_BAND_CLS", self.cards_js)
+        self.assertIn(".chat-card-heat", _read(STATIC / "chat.css"))
+        # 工具模式分析页的内联容器已随 app.js 删除，页面里不应再残留
+        for gone in ('id="classicAttention"', 'id="agentAttention"', "attentionInline"):
+            self.assertNotIn(gone, self.html + self.js)
+
+    def test_profile_selector_removed_and_badge_rendered(self):
+        """档位（profile）契约：后端仍提供 spec/reachable 两档，卡片如实展示生效档位。
+
+        诚实记录：单页化移除了原分析页的档位选择控件（#attnProfile 已不在页面里），
+        对话页「算热度」只走默认 spec 档——这里锁定"卡片展示后端返回的生效档位"
+        这一半契约；选择控件缺失作为已知回归在测试维护报告中反馈，不在此假装还有。
+        """
+        # 后端两档仍在（可选能力没被后端删掉）
+        self.assertEqual({"spec", "reachable"} - set(A.PROFILES), set(),
+                         f"后端档位缺失：{set(A.PROFILES)}")
+        # 卡片渲染生效档位（后端给 profile 就展示，不给则没有这一行）
+        self.assertIn("档位 ${escapeHtml(profile)}", self.cards_js)
+        # 选择控件确实已随 app.js 下线
+        for gone in ('id="attnProfile"', "attnProfileDesc", "loadAttnProfiles"):
+            self.assertNotIn(gone, self.html + self.js, f"档位选择控件残留：{gone}")
+
+    def test_deep_read_chapter_rendering_wired(self):
+        """背景解读（深读）渲染链路：chat.js renderDeepReadChapter + 降级/护栏丢弃徽章 + 样式。
+
+        诚实记录：原 app.js 的 renderDeepReadResult（issue_tags/tensions/phenomena/
+        counter_reading/uncertainty 结构化五件套）随分析页一起下线；单页化后档案库
+        「背景解读」只渲染 payload.text/body + 降级/护栏丢弃徽章，测试按新契约锁定。
+        """
+        for fn in ("renderDossierChapters", "renderDeepReadChapter", "renderHeatChapter"):
+            self.assertIn(f"function {fn}", self.js, f"chat.js 缺少 {fn}")
+        self.assertIn("payload.text", self.js)
+        self.assertIn("payload.body", self.js)
+        self.assertIn("guard_dropped", self.js)
+        css = _read(STATIC / "chat.css")
+        for cls in ("chat-deepread-text", "chat-dossier-chapter", "chat-dossier-absent"):
+            self.assertIn(f".{cls}", css, f"chat.css 缺少 .{cls} 定义")
 
     def test_band_labels_match_backend(self):
-        """前端档位配色表必须覆盖后端 DEFAULT_BANDS 的全部 label。"""
+        """前端热度档位配色表 HEAT_BAND_CLS 必须覆盖后端 DEFAULT_BANDS 的全部 label。"""
         labels = {b["label"] for b in A.DEFAULT_BANDS}
+        block = self.cards_js.split("HEAT_BAND_CLS", 1)[1].split("}", 1)[0]
         for label in labels:
-            self.assertIn(f'"{label}"', self.js,
-                          f"前端 ATTN_BAND_CLS 缺少后端档位：{label}")
+            self.assertIn(f'"{label}"', block,
+                          f"cards.js HEAT_BAND_CLS 缺少后端档位：{label}")
+        self.assertIn("HEAT_BAND_CLS[band]", self.cards_js)   # 卡片真的按档位取色
 
     def test_threshold_constant_matches_backend(self):
         """后端深读阈值常量必须仍是 66（spec 档默认口径，改造不许悄悄改掉）。"""
@@ -420,39 +475,73 @@ class TestFrontendBackendConsistency(unittest.TestCase):
         """前端不得写死深读阈值。
 
         触发口径已外置到 deep_read_rules.json（可为绝对阈值，也可为同批分位），
-        前端写死 66 会在 quantile 模式下谎称一个并不存在的绝对阈值。
+        前端写死 66 会在 quantile 模式下谎称一个并不存在的绝对阈值。单页化后前端
+        不再渲染「触发深读」徽章（原 app.js 的徽章已下线），契约简化为：任何前端
+        文件里都不得出现 66 阈值的断言式文案。
         """
-        self.assertNotIn("触发深读（E", self.js)
-        self.assertNotIn("E &gt; 66，已触发深读", self.js)
-        self.assertIn("触发深读", self.js)   # 徽章本身要在
+        for src in (self.js, self.cards_js, self.shell_js):
+            self.assertNotRegex(src, r"E\s*(&gt;|>)\s*66")
+            self.assertNotRegex(src, r"触发深读（E")
+        self.assertEqual(A.DEEP_READ_THRESHOLD, 66.0)
 
-    def test_frontend_renders_new_deep_read_badges(self):
-        """前端必须渲染新 schema 的三个徽章：未触发解读 / 降级模板 / 代理估计值。"""
-        for marker in ("未触发深读解读", "降级：本地模板", "代理/估计值"):
-            self.assertIn(marker, self.js, f"app.js 缺少徽章文案：{marker}")
+    def test_heat_badges_honest(self):
+        """热度卡口径诚实：降级 / 代理估计值 / as_of 三个徽章文案都在。
 
-    def test_frontend_renders_structured_result(self):
-        """前端必须能渲染深读的结构化产出（议题标签/张力/现象/反方/不确定性）。"""
-        self.assertIn("renderDeepReadResult", self.js)
-        self.assertIn("deepReadBadges", self.js)
-        for field in ("issue_tags", "tensions", "phenomena", "counter_reading", "uncertainty"):
-            self.assertIn(field, self.js, f"app.js 未渲染深读字段：{field}")
-        css = _read(STATIC / "style.css")
-        self.assertIn(".attn-deep-result", css, "style.css 缺少 .attn-deep-result 定义")
+        这是原「深读新 schema 三徽章」用例在单页化后的等价替代：未触发解读 /
+        降级：本地模板两个徽章随分析页下线（已作为已知回归反馈），热度卡这一侧
+        必须保留「代理 / 估计值」与 as_of 的诚实标注。
+        """
+        for marker in ("降级输出", "代理 / 估计值", "证据截至（as_of）"):
+            self.assertIn(marker, self.cards_js, f"cards.js 缺少徽章文案：{marker}")
+        # 有 proxy_flags 时逐项展示代理口径，没有也要标「代理 / 估计值」
+        self.assertIn("proxy_flags", self.cards_js)
+        self.assertIn("代理值", self.js)   # 档案库热度章节同样标注
 
-    def test_attention_panel_present_in_html(self):
-        """关注度面板本体必须在页面里（否则功能等于没上线）。"""
-        for marker in ('id="attentionPanel"', 'id="attnTabs"',
-                       'id="attnManual"', 'id="attnSearch"', 'id="attnResult"'):
-            self.assertIn(marker, self.html, f"页面缺少关注度面板组成：{marker}")
+    def test_dossier_six_chapters_rendered(self):
+        """档案库六章节区块渲染器齐全（原分析页结构化深读展示的等价替代）。
 
-    def test_css_classes_used_by_js_are_defined(self):
-        """app.js 用到的主要 attn-* class 必须在 style.css 里有定义（否则样式丢）。"""
-        css = _read(STATIC / "style.css")
-        for cls in ("attn-intro", "attn-tab", "attn-fields", "attn-result",
-                    "attn-score", "attn-band", "attn-grid", "attn-col",
-                    "attn-deep", "attn-notes", "attn-inline"):
-            self.assertIn(f".{cls}", css, f"style.css 缺少 .{cls} 定义")
+        单页化把六章节（结论版本对比 / 证据批次 / 言论土壤 / 热度快照与趋势 /
+        观点光谱 / 背景解读）搬进对话页档案库；缺章如实显示「本节暂无数据」。
+        """
+        for fn in ("renderConclusionChapter", "renderEvidenceChapter", "renderSpeechChapter",
+                   "renderHeatChapter", "renderOpinionsChapter", "renderDeepReadChapter"):
+            self.assertIn(f"function {fn}", self.js, f"chat.js 缺少 {fn}")
+        for title in ("结论版本对比", "证据批次", "言论土壤", "热度快照与趋势",
+                      "观点光谱", "背景解读"):
+            self.assertIn(title, self.js, f"chat.js 缺少档案章节标题：{title}")
+        self.assertIn("本节暂无数据", self.js)   # 缺章如实文案（不编造）
+
+    def test_heat_action_channel_wired(self):
+        """算热度面板本体在页面里，且走 POST /api/chat 的结构化 action（compute_heat）。
+
+        后端 /api/attention 契约仍在（TestAttentionApi 全量覆盖）；对话页这一层
+        只负责把 x/y/z 三个数交给 compute_heat，保证"纯公式零 API"的秒答车道。
+        """
+        for marker in ('id="chatHeatChip"', 'id="chatHeatPanel"', 'id="chatHeatX"',
+                       'id="chatHeatY"', 'id="chatHeatZ"', 'id="chatHeatCalc"',
+                       'id="chatHeatReset"', 'data-quick="heat"'):
+            self.assertIn(marker, self.html, f"页面缺少算热度面板组成：{marker}")
+        self.assertIn('chat: "/api/chat"', self.js)
+        self.assertIn('sendMessage({ name: "compute_heat", args: { x, y, z } })', self.js)
+        self.assertIn("heat: () => toggleHeatPanel()", self.js)
+        self.assertIn("body.action = action", self.js)
+
+    def test_heat_panel_css_classes_defined(self):
+        """对话页算热度面板用到的 chat-* class 必须在 chat.css 里有定义（否则样式丢）。"""
+        css = _read(STATIC / "chat.css")
+        for cls in ("chat-quick-chip", "chat-quick-label", "chat-quick-panel",
+                    "chat-quick-panel-head", "chat-heat-fields",
+                    "chat-quick-panel-actions", "chat-quick-submit", "chat-quick-note"):
+            self.assertIn(f".{cls}", css, f"chat.css 缺少 .{cls} 定义")
+        # 面板内部实际用到的 class 逐个回查（防"改了结构忘了补样式"）
+        panel = self.html.split('id="chatHeatPanel"', 1)[1].split(
+            '<div class="chat-composer">', 1)[0]
+        used = set()
+        for chunk in re.findall(r'class="([^"]+)"', panel):
+            used.update(re.findall(r"[A-Za-z][\w-]*", chunk))
+        self.assertTrue(used, "算热度面板里没解析到 class")
+        missing = sorted(c for c in used if c.startswith("chat-") and f".{c}" not in css)
+        self.assertEqual(missing, [], f"chat.css 缺少定义：{missing}")
 
     def test_rules_json_bands_match_module(self):
         """外置 attn_rules.json 的档位表必须与模块 DEFAULT_BANDS 一致。"""
@@ -463,8 +552,8 @@ class TestFrontendBackendConsistency(unittest.TestCase):
 
     def test_no_hardcoded_drive_paths_in_frontend(self):
         """前端不允许出现写死的 D:\\ 路径（换机器就废）。"""
-        self.assertNotRegex(self.html, r"[A-Za-z]:\\\\")
-        self.assertNotRegex(self.js, r"[A-Za-z]:\\\\")
+        for src in (self.html, self.js, self.cards_js, self.shell_js):
+            self.assertNotRegex(src, r"[A-Za-z]:\\\\")
 
 
 if __name__ == "__main__":

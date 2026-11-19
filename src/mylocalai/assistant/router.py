@@ -28,9 +28,10 @@ META_ACTIONS = ("chitchat", "clarify", "refuse")
 
 #: M2 工具类 action（封闭枚举的路由面；allowlist 仍以 assistant_rules 为准）。
 #: M3 追加章节类两项（与 tools_chapters.register_all 的注册名一致，§5.2 M3-3/M3-5）。
+#: L4 追加参谋类 insights（tools_insights：三类只读画像视图，kind 为封闭枚举）。
 TOOL_ACTIONS = ("verify_claim", "analyze_speech", "check_heat", "compute_heat",
                 "list_dossiers", "get_dossier", "recheck_dossier", "export_card",
-                "search_web", "read_opinions", "deep_read")
+                "search_web", "read_opinions", "deep_read", "insights")
 
 #: 带 id 参数的工具：缺 id 时允许"本会话最近档案"的确定性兜底（§5.4 ②）。
 #: 章节类两项同规：用户说"看看刚才那条的观点"没带档案号，用会话最近档案补。

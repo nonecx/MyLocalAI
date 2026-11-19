@@ -1,19 +1,21 @@
 /* ============================================================
-   chat.js —— 对话 Tab 前端（M2，工作指导 §4.3/§5.3）
-   独立文件：不 import app.js 的任何符号（旧前端契约不动）。
+   chat.js —— 对话页前端（M2 起步，单页化后接管原「工具模式 / 参谋」入口）
+   独立文件：只依赖 index.html 的元素与 cards.js 的 window.ChatCards。
    职责：
      - fetch POST /api/chat + ReadableStream 手工解析 SSE 帧
        （EventSource 不支持 POST，必须手工拆帧）；
      - AbortController 取消：abort 即断开连接，后端据此走协作取消链；
      - 渲染 §5.3 全部事件：meta/status/tool_start/scan/progress/card/
        narrative/tool_end/done/error（集合 ⊆ events.py EVENT_NAMES，测试锁定）；
-     - 会话列表加载/切换/新建（左侧栏）+ 档案库视图（M3：列表 → 详情六章节区块
-       + Markdown 导出）+ 被动提醒一行呈现（M3-7，§2.2 不制造新压力）。
+     - 会话列表加载/切换/新建（左侧栏）+ 档案库视图（列表 → 详情六章节区块
+       + Markdown 导出）+ 被动提醒一行呈现（不制造新压力）；
+     - 结构化只读入口：左栏「我的画像」三按钮、composer 上方快捷 chips 与
+       「算热度」小面板——都走 POST /api/chat 的可选 action 字段，不新开 Tab。
    ============================================================ */
 "use strict";
 
 (function () {
-  /* file:// 双击打开时 app.js 已给出启动引导，这里静默退出 */
+  /* file:// 双击打开时 shell.js 已给出启动引导，这里静默退出 */
   if (location.protocol === "file:") return;
 
   const $ = (sel) => document.querySelector(sel);
@@ -48,24 +50,6 @@
 
   function apiPath(tpl, id) {
     return String(tpl).replace(/\{sid\}|\{id\}/g, encodeURIComponent(String(id)));
-  }
-
-  /* ---------- Tab 切换 ---------- */
-  function setTab(tab) {
-    document.querySelectorAll("#topTabs .top-tab")
-      .forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
-    const chat = $("#chatTab");
-    const tools = $("#toolsTab");
-    const insights = $("#insightsPanel");
-    if (chat) chat.classList.toggle("hidden", tab !== "chat");
-    if (tools) tools.classList.toggle("hidden", tab !== "tools");
-    if (insights) {
-      insights.classList.toggle("hidden", tab !== "insights");
-      insights.hidden = tab !== "insights";
-    }
-    /* 参谋 Tab（L4）：每次切进来刷新一次只读聚合；InsightsPanel 由 insights.js
-       提供，带存在性守卫——组件文件缺失时只影响刷新，不挡 Tab 切换 */
-    if (tab === "insights" && window.InsightsPanel) InsightsPanel.refresh();
   }
 
   /* ---------- 错误与提示 ---------- */
@@ -293,10 +277,36 @@
     $("#chatCancelBtn").classList.toggle("hidden", !sending);
   }
 
-  async function sendMessage() {
+  /* 我的画像三块的默认话术（与左栏按钮一一对应；kind 是后端封闭枚举） */
+  const INSIGHTS_MESSAGES = {
+    patterns: "查看我的画像：话术模式库（只读聚合，零 LLM）",
+    sources: "查看我的画像：信源画像（只读聚合，零 LLM）",
+    weekly: "查看我的画像：本周简报（只读聚合，零 LLM）",
+  };
+
+  /* 结构化 action → 人类可读 message。
+     message 在 /api/chat 上仍然必填（同一条 8000 字校验路径），所以只读工具入口
+     也要自己写一句说明；这句话同时会进会话史，用户回看时能看懂这一轮在做什么。 */
+  function describeAction(action) {
+    if (!action || typeof action !== "object") return "";
+    const args = (action.args && typeof action.args === "object") ? action.args : {};
+    if (action.name === "insights") {
+      return INSIGHTS_MESSAGES[String(args.kind || "")] || "查看我的画像（只读聚合，零 LLM）";
+    }
+    if (action.name === "compute_heat") {
+      /* 原样保留用户填的数字（不加千分位），让这句话和 args 能一一对上 */
+      return `计算关注度：x=${args.x}, y=${args.y}, z=${args.z}`;
+    }
+    return `执行只读工具：${String(action.name || "")}`;
+  }
+
+  /* 发一轮对话。action 可选（{name, args} 结构化只读工具）；
+     有 action 时 message 由 describeAction 生成、不消费输入框内容，
+     但事件流 / 取消 / 错误处理与普通消息走完全同一条路径（SSE 处理器一个不改）。 */
+  async function sendMessage(action) {
     if (activeController) return;   // 一轮未结束时不叠加请求
     const input = $("#chatInput");
-    const text = input.value.trim();
+    const text = action ? describeAction(action) : input.value.trim();
     if (!text) { chatError("请先输入要核查的消息。"); return; }
     if (text.length > MAX_MESSAGE_LENGTH) {
       chatError(`消息过长（最多 ${MAX_MESSAGE_LENGTH} 字）。`);
@@ -304,13 +314,14 @@
     }
     chatClearError();
     appendUserMessage(text);
-    input.value = "";
-    updateCharCount();
+    if (!action) { input.value = ""; updateCharCount(); }
     currentTurnEl = null;   // 新起一轮容器
     turnEl();
 
     const body = { message: text };
     if (currentSessionId) body.session_id = currentSessionId;
+    /* 有 action 时走后端结构化通道：跳过路由大模型，直接执行该只读工具 */
+    if (action) body.action = action;
 
     activeController = new AbortController();
     setSending(true);
@@ -344,6 +355,80 @@
       loadSessions();   // 会话 updated_at 变了，刷新排序
     }
   }
+
+  /* ---------- 快捷只读入口（左栏「我的画像」+ composer 上方快捷 chips） ----------
+     两类入口都只是"发一轮 action 对话"，卡片落在消息流里：
+     不新开 Tab、不弹抽屉、不额外维护一份状态——能力合并但入口不增加心智负担。 */
+
+  /* 我的画像三块：kind 只允许三个封闭值，非法值直接忽略（不猜、不发请求） */
+  function sendInsights(kind) {
+    if (!INSIGHTS_MESSAGES[kind]) return;
+    sendMessage({ name: "insights", args: { kind } });
+  }
+
+  /* 「算热度」小面板：x/y/z 三个数字 → 结构化 action compute_heat（纯公式零 API）。
+     前端先校验一次（非负有限数），后端仍会再校验并可能回 400，两边都不放水。 */
+  const HEAT_DEFAULTS = { x: 100, y: 100000, z: 1000 };
+
+  function setHeatPanelOpen(open) {
+    const panel = $("#chatHeatPanel");
+    const chip = $("#chatHeatChip");
+    if (!panel) return;
+    panel.classList.toggle("hidden", !open);
+    if (chip) {
+      chip.setAttribute("aria-expanded", open ? "true" : "false");
+      chip.classList.toggle("active", open);
+    }
+    if (open) {
+      const first = $("#chatHeatX");
+      if (first) first.focus();
+    }
+  }
+
+  function toggleHeatPanel() {
+    const panel = $("#chatHeatPanel");
+    if (panel) setHeatPanelOpen(panel.classList.contains("hidden"));
+  }
+
+  function resetHeatInputs() {
+    if ($("#chatHeatX")) $("#chatHeatX").value = HEAT_DEFAULTS.x;
+    if ($("#chatHeatY")) $("#chatHeatY").value = HEAT_DEFAULTS.y;
+    if ($("#chatHeatZ")) $("#chatHeatZ").value = HEAT_DEFAULTS.z;
+    chatClearError();
+  }
+
+  function submitHeat() {
+    const x = Number($("#chatHeatX").value);
+    const y = Number($("#chatHeatY").value);
+    const z = Number($("#chatHeatZ").value);
+    if (![x, y, z].every((v) => Number.isFinite(v) && v >= 0)) {
+      chatError("x / y / z 都必须是非负数字，请检查输入。");
+      return;
+    }
+    chatClearError();
+    setHeatPanelOpen(false);
+    sendMessage({ name: "compute_heat", args: { x, y, z } });
+  }
+
+  /* 「核查真伪 / 言论土壤」只把提示词填进输入框：待核查原文必须由用户提供，
+     前端不代写、不猜测（口径：不显示未经证实的结论，更不编造输入文本）。 */
+  function seedComposer(prefix) {
+    const inp = $("#chatInput");
+    if (!inp) return;
+    if (!inp.value.trim()) inp.value = prefix;
+    inp.focus();
+    const len = inp.value.length;
+    try { inp.setSelectionRange(len, len); } catch (e) { /* 老浏览器不支持也不影响发送 */ }
+    updateCharCount();
+  }
+
+  /* 快捷 chips 分发：一个 data-quick 值对应一个动作（新增 chip 只加一行） */
+  const QUICK_ACTIONS = {
+    verify: () => seedComposer("请核查这条消息的真伪："),
+    speech: () => seedComposer("帮我分析这段话的言论土壤："),
+    heat: () => toggleHeatPanel(),
+    insights: () => sendInsights("patterns"),
+  };
 
   /* ---------- 会话列表 ---------- */
   function highlightActiveSession() {
@@ -663,17 +748,38 @@
 
   /* ---------- 初始化 ---------- */
   document.addEventListener("DOMContentLoaded", () => {
-    document.querySelectorAll("#topTabs .top-tab").forEach((b) => {
-      b.addEventListener("click", () => setTab(b.dataset.tab));
-    });
-    $("#chatSendBtn").addEventListener("click", sendMessage);
+    /* 发送按钮只发普通消息：直接传 sendMessage 会把 MouseEvent 当 action 收下 */
+    $("#chatSendBtn").addEventListener("click", () => sendMessage());
     $("#chatCancelBtn").addEventListener("click", () => {
       if (activeController) activeController.abort();
     });
     $("#chatNewSession").addEventListener("click", newSession);
-    /* 欢迎态示例：点击填入输入框，不自动发送（纯前端便利） */
+
+    /* 左栏「我的画像」：三个按钮 → insights action（kind 取自 data-insights-kind） */
+    document.querySelectorAll("#chatInsights [data-insights-kind]").forEach((btn) => {
+      btn.addEventListener("click", () => sendInsights(btn.dataset.insightsKind));
+    });
+
+    /* composer 上方快捷 chips（核查真伪 / 言论土壤 / 算热度 / 我的画像） */
+    document.querySelectorAll(".chat-quick-chip").forEach((btn) => {
+      const fn = QUICK_ACTIONS[btn.dataset.quick];
+      if (fn) btn.addEventListener("click", fn);
+    });
+
+    /* 算热度小面板：计算 / 恢复默认 / 输入框回车即算 */
+    if ($("#chatHeatCalc")) $("#chatHeatCalc").addEventListener("click", submitHeat);
+    if ($("#chatHeatReset")) $("#chatHeatReset").addEventListener("click", resetHeatInputs);
+    document.querySelectorAll(".chat-heat-fields input").forEach((inp) => {
+      inp.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); submitHeat(); }
+      });
+    });
+
+    /* 欢迎态示例：普通示例填入输入框（不自动发送）；算热度/看画像 直接走只读入口 */
     document.querySelectorAll(".chat-welcome-sample").forEach((btn) => {
       btn.addEventListener("click", () => {
+        if (btn.dataset.quick === "heat") { setHeatPanelOpen(true); return; }
+        if (btn.dataset.insightsKind) { sendInsights(btn.dataset.insightsKind); return; }
         const inp = $("#chatInput");
         inp.value = btn.dataset.sample || "";
         inp.focus();

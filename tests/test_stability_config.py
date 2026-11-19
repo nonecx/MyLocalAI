@@ -812,7 +812,11 @@ class TestTransportRobustness(unittest.TestCase):
         # 预算只剩 0.2s 时发一次完整尝试会让整条链路超出预算（2026-10-22 检验报告发现 4）。
         floor = float(os.environ.get("LLM_MIN_ATTEMPT_S") or 0.25)
         self.assertAlmostEqual(box2["timeout"], floor, places=6)
-        self.assertLessEqual(box3["timeout"], 0.3, "有剩余预算时不得超过剩余预算")
+        # 容差同 test_p0_fixes_2026_10_22 的 _BUDGET_FLOAT_TOL：remaining_seconds() 是
+        # (monotonic()+预算)-monotonic()，粗粒度时钟 + 大绝对值会把 0.3 抬成
+        # 0.3000000000029104（实测）。1e-6 只吃浮点噪声，不放松"不得超预算"的契约。
+        self.assertLessEqual(box3["timeout"], 0.3 + 1e-6,
+                             "有剩余预算时不得超过剩余预算（允许浮点噪声）")
 
 
 class TestConfigShapeContract(unittest.TestCase):
