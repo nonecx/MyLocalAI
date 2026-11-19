@@ -812,7 +812,9 @@ class TestTransportRobustness(unittest.TestCase):
         # 预算只剩 0.2s 时发一次完整尝试会让整条链路超出预算（2026-10-22 检验报告发现 4）。
         floor = float(os.environ.get("LLM_MIN_ATTEMPT_S") or 0.25)
         self.assertAlmostEqual(box2["timeout"], floor, places=6)
-        self.assertLessEqual(box3["timeout"], 0.3, "有剩余预算时不得超过剩余预算")
+        # 浮点容差同 test_p0_fixes：剩余预算 = at - monotonic，长开机基数下
+        # 0.3s 的表示误差可达 1e-12 量级，严格 <= 0.3 会误报。
+        self.assertLessEqual(box3["timeout"], 0.3 + 1e-9, "有剩余预算时不得超过剩余预算")
 
 
 class TestConfigShapeContract(unittest.TestCase):

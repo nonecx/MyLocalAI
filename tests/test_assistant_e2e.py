@@ -393,14 +393,22 @@ class TestCancelChainE2E(AssistantE2EBase):
         self.assertEqual(resp.status_code, 200)
         frames = parse_sse(resp.text)
         names = self.names(frames)
-        self.assertEqual(names[-1], "error")
-        err = frames[-1][1]
+        # 终止帧断言走事件流对象（协议真相）：取消时 loop 必发 error{cancelled}。
+        # 不能只断言"已送达的最后一帧"——drain 在 request.is_disconnected() 为真时
+        # 立即停发（产品语义：客户端断开后送不到），而 TestClient 的断开探测存在竞态，
+        # 会偶发把最后一个 error 帧截掉（实测约 2/25）。事件流里有、帧里没有，属传送
+        # 层截断，不是协议违约。
+        stream_events = captured[0].snapshot()
+        self.assertTrue(stream_events, "事件流应至少有一个事件")
+        self.assertEqual(stream_events[-1]["event"], "error", "取消时事件流必须以 error 收尾")
+        err = stream_events[-1]
         self.assertEqual(err["code"], "cancelled")
         self.assertTrue(err["recoverable"])
         self.assertTrue(captured[0].cancelled)
-        # 工具执行过（收到 tool_start）但卡片未发出（取消优先，断开后也送不到）
+        # 已送达帧：工具执行过（收到 tool_start），且不出现卡片 / 正常收尾
         self.assertIn("tool_start", names)
         self.assertNotIn("card", names)
+        self.assertNotIn("done", names)
         sid = frames[0][1]["session_id"]
         run = self.store.runs_for_session(sid)[0]
         self.assertEqual(run["status"], "cancelled")

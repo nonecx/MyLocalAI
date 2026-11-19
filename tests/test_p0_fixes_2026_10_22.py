@@ -142,10 +142,15 @@ class TestCacheAndBudget(unittest.TestCase):
         self.assertEqual(outs, [("ok", "")] * 4)
 
     def test_attempt_timeout_never_exceeds_the_remaining_budget(self):
-        """P0-4：单次尝试超时不能突破剩余预算（原下限写死 1.0s）。"""
+        """P0-4：单次尝试超时不能突破剩余预算（原下限写死 1.0s）。
+
+        断言带浮点容差：剩余预算由 `at - time.monotonic()` 相减得出，
+        monotonic 基数越大（机器开机越久），0.3s 的表示误差可达 1e-12 量级，
+        严格 `<= 0.3` 会在长开机机器上误报。容差不放松语义（1e-9 秒）。
+        """
         with llm_cache.deadline_scope(0.3):
             timeout = llm_cache.attempt_timeout(30.0)
-        self.assertLessEqual(timeout, 0.3)
+        self.assertLessEqual(timeout, 0.3 + 1e-9)
         self.assertGreater(timeout, 0.0)
 
     def test_attempt_timeout_floor_is_configurable(self):
@@ -162,7 +167,7 @@ class TestCacheAndBudget(unittest.TestCase):
         """P0-4：预算已用尽时等待者不再空等 30s。"""
         self.assertEqual(llm_cache._wait_budget(), 120.0, "未设预算时的兜底")
         with llm_cache.deadline_scope(0.05):
-            self.assertLessEqual(llm_cache._wait_budget(), 0.05)
+            self.assertLessEqual(llm_cache._wait_budget(), 0.05 + 1e-9)
             self.assertGreaterEqual(llm_cache._wait_budget(), 0.0)
 
 
