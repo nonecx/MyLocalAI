@@ -12,16 +12,21 @@
 拒绝预检（pre_refuse）在路由之前独立执行：用户消息命中 refusal_triggers 词表
 （子串匹配）就直接拒绝，不进路由模型——"把风险分改成0"这类注入指令永远到不了
 工具层（§5.6 对话层注入防护的第一道闸）。
+
+ 混合表达闸（mixed_choice，总览 §6.3）同样在路由 LLM 之前：一句话同时要求“核查
+ 真假”与“解释热度”时不拼接工具，固定选择话术让用户定先后——确定性子串匹配、
+ 零 LLM 成本，与 pre_refuse 同族。
 """
 
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Callable, Dict, List, Optional
 
 from mylocalai.assistant.registry import ToolNotAllowed, ToolRegistry, ValidationError
 
-__all__ = ["META_ACTIONS", "TOOL_ACTIONS", "pre_refuse", "route"]
+__all__ = ["META_ACTIONS", "TOOL_ACTIONS", "pre_refuse", "mixed_choice", "route"]
 
 #: 非工具类 action：不调引擎、不建档，只产出一段直接回复。
 META_ACTIONS = ("chitchat", "clarify", "refuse")
@@ -29,9 +34,10 @@ META_ACTIONS = ("chitchat", "clarify", "refuse")
 #: M2 工具类 action（封闭枚举的路由面；allowlist 仍以 assistant_rules 为准）。
 #: M3 追加章节类两项（与 tools_chapters.register_all 的注册名一致，§5.2 M3-3/M3-5）。
 #: L4 追加参谋类 insights（tools_insights：三类只读画像视图，kind 为封闭枚举）。
+#: 第二波追加 collect_evidence（取证三技能流水线，只读：不建档、不出真假分）。
 TOOL_ACTIONS = ("verify_claim", "analyze_speech", "check_heat", "compute_heat",
                 "list_dossiers", "get_dossier", "recheck_dossier", "export_card",
-                "search_web", "read_opinions", "deep_read", "insights")
+                "search_web", "read_opinions", "deep_read", "insights", "collect_evidence")
 
 #: 带 id 参数的工具：缺 id 时允许"本会话最近档案"的确定性兜底（§5.4 ②）。
 #: 章节类两项同规：用户说"看看刚才那条的观点"没带档案号，用会话最近档案补。
@@ -79,6 +85,35 @@ def pre_refuse(user_text: Any, rules: Optional[Dict[str, Any]],
     except Exception:  # noqa: BLE001  预检失败不能挡住正常对话
         return None
     return None
+
+
+#: 混合表达（总览 §6.3）的两组确定性模式：真假疑问短语 × 热度疑问短语，同句双命中才触发。
+_TRUTH_RE = re.compile(r"真的[吗呢]|是真的|真的假|真假|核实|核查|辟谣|是不是真")
+_HEAT_RE = re.compile(r"多热|热度|受关注|这么火|为什么火|关注度|有多少人关注|热度如何")
+
+#: prompts.json 缺 mixed_choose_reply 时的内置兜底（与 JSON 同文，改文案只改一处生效优先）。
+_MIXED_CHOICE_FALLBACK = ("我可以先帮你核查这条说法，也可以再补充它为什么受到关注。"
+                          "你希望我先核查真实性，还是两部分一起看？")
+
+
+def mixed_choice(user_text: Any, prompts: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """一句话同时要求“核查真假”与“解释热度” → 不拼接工具，回选择话术让用户定先后。
+
+    与 pre_refuse 同族：确定性子串匹配、零 LLM 成本、永不抛异常。
+    只认“热度疑问短语”，不认“热搜”这类话题名词——“帮我核实这个热搜是不是真的”
+    只有一个意图（核查），不能误触发。
+    """
+    try:
+        text = str(user_text or "")
+        if not text:
+            return None
+        if not (_TRUTH_RE.search(text) and _HEAT_RE.search(text)):
+            return None
+        reply = str((prompts or {}).get("mixed_choose_reply") or "").strip()
+        return {"action": "clarify", "args": {}, "reply": reply or _MIXED_CHOICE_FALLBACK,
+                "error": ""}
+    except Exception:  # noqa: BLE001  预检失败不能挡住正常对话（交给路由层兜底）
+        return None
 
 
 def _router_system(registry: Optional[ToolRegistry], prompts: Dict[str, Any]) -> str:
@@ -142,6 +177,13 @@ def route(user_text: Any, registry: ToolRegistry,
     user_text_s = str(user_text or "")
     if history_hint:
         user_text_s = f"【会话背景】{history_hint}\n【用户消息】{user_text_s}"
+
+    # 混合表达（总览 §6.3）：一句里同时要"核查真假"和"解释热度"时不拼接工具、不猜
+    # 主次——固定选择话术让用户定先后。顺序：pre_refuse（loop 层）> 本闸 > 路由 LLM，
+    # 命中即返回，零 LLM 成本。
+    mixed = mixed_choice(user_text, prompts)
+    if mixed is not None:
+        return mixed
 
     obj: Any = None
     err = ""
