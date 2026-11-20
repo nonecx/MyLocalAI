@@ -313,7 +313,7 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 1412 个用例（unittest discover 全量，2026-11-20 平台巡检编排落地后实测；**M4 起由
+离线套件共 1450 个用例（unittest discover 全量，2026-11-20 平台调度器与 CLI 落地后实测；**M4 起由
 `tests.test_readme_counts` 自动校验此数字与 mock 闸门条数，改动后须同步回写**）：
 M1-M3 的全部回归（详见 git 历史），加上 M4 新增模块：
 **成本真实计数**（llm_client 进程级计数器：真实上游调用数 + usage tokens，缓存命中/
