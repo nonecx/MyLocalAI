@@ -26,7 +26,7 @@ from typing import Any, Dict, Iterable, List, Optional
 __all__ = ["SCHEMA_VERSION", "DEFAULT_DB_PATH", "connect", "migrate",
            "DossierStore", "default_db_path"]
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 #: 顺序迁移：索引 i 的脚本把库从版本 i 升到 i+1。永不修改已发布的条目，只允许追加。
 MIGRATIONS: List[str] = [
@@ -268,6 +268,44 @@ MIGRATIONS: List[str] = [
         updated_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_batch_items_batch ON batch_items(batch_id, position);
+    """,
+    # v8：领域监测订阅（专业用户 B · 阶段 3，2026-11-20）。每个订阅一个监测档案
+    # （dossiers.input_kind='topic'，证据按批次追加、快照进 attention_snapshots），
+    # 每轮运行一行 subscription_runs（status：ok/partial/blocked/error；
+    # blocked = 外发授权未开，零外发）。
+    """
+    CREATE TABLE IF NOT EXISTS subscriptions (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        profile_id   INTEGER,
+        topic        TEXT NOT NULL DEFAULT '',
+        keywords     TEXT NOT NULL DEFAULT '[]',
+        domains      TEXT NOT NULL DEFAULT '[]',
+        frequency_s  INTEGER NOT NULL DEFAULT 3600,
+        enabled      INTEGER NOT NULL DEFAULT 1,
+        dossier_id   INTEGER REFERENCES dossiers(id) ON DELETE SET NULL,
+        last_run_at  TEXT,
+        next_run_at  TEXT,
+        last_status  TEXT NOT NULL DEFAULT '',
+        paused_reason TEXT NOT NULL DEFAULT '',
+        created_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_subscriptions_profile ON subscriptions(profile_id);
+    CREATE INDEX IF NOT EXISTS idx_subscriptions_due ON subscriptions(enabled, next_run_at);
+    CREATE TABLE IF NOT EXISTS subscription_runs (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+        started_at     TEXT NOT NULL,
+        finished_at    TEXT NOT NULL DEFAULT '',
+        status         TEXT NOT NULL DEFAULT 'running'
+                       CHECK (status IN ('running', 'ok', 'partial', 'blocked', 'error')),
+        results_count  INTEGER NOT NULL DEFAULT 0,
+        new_count      INTEGER NOT NULL DEFAULT 0,
+        summary        TEXT NOT NULL DEFAULT '{}',
+        error          TEXT NOT NULL DEFAULT '',
+        created_at     TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_sub_runs_sub ON subscription_runs(subscription_id, id);
     """,
 ]
 

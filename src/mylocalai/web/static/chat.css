@@ -1102,3 +1102,227 @@
 @media (max-width: 900px) {
   .chat-batch-list { max-height: 220px; }
 }
+
+/* ============================================================
+   领域监测面板（专业用户 · 领域监测）：左栏「材料批次」与「我的画像」之间，
+   初始 hidden，由 monitor.js 按当前档案角色（role=monitor）显隐。
+   只复用 style.css 的 :root 令牌，不另起配色；写法参考 .chat-batch-* 与
+   .chat-insights-*（同一套左栏小面板惯例）。
+   ============================================================ */
+.chat-side > .chat-monitor-panel { flex: 0 0 auto; }
+
+.chat-monitor-hint { font-size: 11.5px; margin: 0 0 10px; line-height: 1.7; }
+
+/* 新建表单：一列标签 + 输入（同 .chat-heat-fields 的标签排版） */
+.chat-monitor-create { display: flex; flex-direction: column; gap: 8px; }
+
+.chat-monitor-create label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.chat-monitor-create input,
+.chat-monitor-create select {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 9px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--panel);
+}
+
+/* 错误行：后端 detail 原文照抄，不替它改写（同 .chat-batch-error 写法） */
+.chat-monitor-error {
+  font-size: 12px;
+  color: var(--danger);
+  background: var(--panel);
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  padding: 7px 10px;
+  margin: 4px 0 0;
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+.chat-monitor-actions { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+
+.chat-monitor-submit { padding: 7px 16px; font-size: 13px; }
+.chat-monitor-submit:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* 订阅列表 */
+.chat-monitor-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.chat-monitor-list li.empty {
+  cursor: default;
+  color: var(--muted);
+  font-size: 12px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  padding: 9px 12px;
+}
+
+.chat-monitor-item {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.chat-monitor-item:hover { border-color: var(--primary); background: var(--primary-soft); }
+
+.chat-monitor-item.active {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  box-shadow: inset 3px 0 0 var(--primary);
+}
+
+.chat-monitor-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.chat-monitor-item-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-monitor-item-meta { font-size: 11.5px; margin-top: 3px; line-height: 1.6; }
+
+.chat-monitor-item-actions { display: flex; gap: 6px; margin-top: 7px; }
+
+.chat-monitor-btn {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 3px 10px;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.chat-monitor-btn:hover {
+  border-color: var(--primary);
+  color: var(--primary-dark);
+  background: var(--primary-soft);
+}
+
+.chat-monitor-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.chat-monitor-btn-danger:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: var(--panel);
+}
+
+/* 订阅详情：头部 + 变化卡槽 + 运行历史 */
+.chat-monitor-detail {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.chat-monitor-detail-title { font-size: 13px; font-weight: 700; }
+.chat-monitor-detail-meta { font-size: 11.5px; line-height: 1.6; }
+
+/* 暂停原因 / 错误说明：提示框（同 .chat-batch-error 写法，换 warn 色） */
+.chat-monitor-notice {
+  font-size: 12px;
+  color: var(--warn);
+  background: var(--panel);
+  border: 1px solid var(--warn);
+  border-radius: 8px;
+  padding: 7px 10px;
+  margin: 0;
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+/* 变化卡由 ChatCards.renderCard 产出（cards.js 内转义），这里只给外间距 */
+.chat-monitor-card-slot > .chat-card { margin: 0; }
+
+.chat-monitor-runs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.chat-monitor-run {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  border-bottom: 1px dashed var(--border);
+  padding-bottom: 5px;
+}
+
+.chat-monitor-run:last-child { border-bottom: none; }
+.chat-monitor-run-meta { font-size: 11.5px; }
+
+.chat-monitor-run-error {
+  flex-basis: 100%;
+  font-size: 11.5px;
+  color: var(--danger);
+  word-break: break-all;
+}
+
+/* ---------- 监测变化卡（cards.js renderMonitorChange 的 monitor-* 类） ---------- */
+.chat-card-monitor-change { font-size: 12.5px; line-height: 1.8; }
+
+.chat-monitor-urls-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  margin: 10px 0 4px;
+}
+
+.chat-monitor-urls {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.chat-monitor-urls li {
+  font-size: 11.5px;
+  color: var(--text);
+  word-break: break-all;
+  border-bottom: 1px dashed var(--border);
+  padding-bottom: 4px;
+}
+
+.chat-monitor-urls li:last-child { border-bottom: none; }
+
+/* ---------- 窄屏补充：监测面板铺满左栏 ---------- */
+@media (max-width: 900px) {
+  .chat-monitor-list { max-height: 240px; }
+}

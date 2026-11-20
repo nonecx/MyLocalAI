@@ -202,6 +202,47 @@
         <div id="batchDetail" class="chat-batch-detail hidden"></div>
       </section>
 
+      <!-- 领域监测（专业用户 · 领域监测）：订阅话题（关键词/域名/频率），立即运行或等
+           调度线程到期跑检，看每轮运行历史与变化卡。面板初始 hidden，由 monitor.js 按
+           当前档案角色显隐（active.role === "monitor" 才显示，snapshot 为空时隐藏）；
+           所有 id 由 monitor.js 接线，本文件只放骨架（同材料批次面板的分工）。
+           运行是后端后台线程：run-now 返回 202 后由 monitor.js 轮询详情等收尾。 -->
+      <section class="panel chat-monitor-panel hidden" id="chatMonitorPanel">
+        <div class="panel-head">
+          <h2>领域监测</h2>
+          <span class="count-chip">专业用户</span>
+        </div>
+        <p class="chat-monitor-hint muted">订阅话题后按频率跑检（立即运行或等调度）；调度仅在服务运行期间有效，关服即停；频率下限 300 秒（保护搜索引擎），域名限定每轮最多 3 个 site:。</p>
+        <form id="monCreateForm" class="chat-monitor-create" novalidate>
+          <label>话题（必填，最多 200 字）
+            <input id="monTopic" type="text" maxlength="200" autocomplete="off"
+              placeholder="要持续监测的话题，如：某地自来水" />
+          </label>
+          <label>关键词（可选，逗号分隔，最多 10 个）
+            <input id="monKeywords" type="text" autocomplete="off"
+              placeholder="可选：逗号分隔，如：下毒, 水质" />
+          </label>
+          <label>域名限定（可选，逗号分隔，每轮最多 3 个 site:）
+            <input id="monDomains" type="text" autocomplete="off"
+              placeholder="可选：逗号分隔，如：gov.cn, news.cn" />
+          </label>
+          <label>频率
+            <select id="monFrequency">
+              <option value="1800">30 分钟</option>
+              <option value="3600" selected>1 小时</option>
+              <option value="21600">6 小时</option>
+              <option value="86400">24 小时</option>
+            </select>
+          </label>
+          <p id="monError" class="chat-monitor-error hidden" role="alert"></p>
+          <div class="chat-monitor-actions">
+            <button id="monCreateSubmit" class="btn-primary chat-monitor-submit" type="submit">新建订阅</button>
+          </div>
+        </form>
+        <ul id="monList" class="chat-monitor-list"></ul>
+        <div id="monDetail" class="chat-monitor-detail hidden"></div>
+      </section>
+
       <!-- 我的画像（L4）：三块只读聚合不再单开 Tab，点击即在消息流里出一张 insights 卡。
            数据全部来自你自己的档案史（零 LLM），空数据显示「暂无数据」。 -->
       <section class="panel chat-insights-panel" id="chatInsights">
@@ -296,5 +337,11 @@
        window.ProfilesPanel.snapshot()；chat.js 只在 DOMContentLoaded 调一次
        window.BatchPanel?.init()，其余经 mylocalai:profile-changed 事件驱动。 -->
   <script src="static/batch.js"></script>
+  <!-- 领域监测面板（专业用户·领域监测）：同 batch.js 模式，显隐依赖
+       window.ProfilesPanel.snapshot()（active.role === "monitor"）；chat.js 只在
+       DOMContentLoaded 调一次 window.MonitorPanel?.init()，其余经
+       mylocalai:profile-changed 事件驱动。必须晚于 batch.js 加载（顺序锁见
+       tests/test_models_ui.py：shell → settings → cards → chat → profiles → batch）。 -->
+  <script src="static/monitor.js"></script>
 </body>
 </html>

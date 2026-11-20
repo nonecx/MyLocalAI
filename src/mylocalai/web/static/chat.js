@@ -12,7 +12,8 @@
      - 结构化只读入口：左栏「我的画像」三按钮、composer 上方快捷 chips 与
        「算热度」小面板——都走 POST /api/chat 的可选 action 字段，不新开 Tab；
      - 档案工作区（v6）：监听 profiles.js 派发的 mylocalai:profile-changed
-       重载左栏，并转发给 batch.js 的「材料批次」面板（role=analyst 才显示）。
+       重载左栏，并转发给 batch.js 的「材料批次」面板（role=analyst 才显示）
+       与 monitor.js 的「领域监测」面板（role=monitor 才显示）。
    ============================================================ */
 "use strict";
 
@@ -471,6 +472,8 @@
     loadDossiers();
     /* 材料批次面板跟着换边：可见性按新档案角色重判，列表按新工作区重载 */
     window.BatchPanel?.onProfileChanged();
+    /* 领域监测面板跟着换边：run-now 轮询与选择属于旧工作区，monitor.js 自行清理 */
+    window.MonitorPanel?.onProfileChanged();
   }
 
   /* ---------- 会话列表 ---------- */
@@ -840,6 +843,8 @@
     document.addEventListener(PROFILE_CHANGED_EVENT, onProfileChanged);
     /* 材料批次面板（专业用户·材料分析）：显隐由 batch.js 按档案角色自管 */
     window.BatchPanel?.init();
+    /* 领域监测面板（专业用户·领域监测）：显隐由 monitor.js 按档案角色自管 */
+    window.MonitorPanel?.init();
     renderProfileLine();
     loadSessions();
     loadDossiers();

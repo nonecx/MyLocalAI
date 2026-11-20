@@ -264,10 +264,15 @@ def default_providers() -> List[object]:
 
 def search_all(query: str, k: int = 6,
                providers: Optional[List[object]] = None,
-               *, authorized: Optional[bool] = None) -> Dict[str, object]:
+               *, authorized: Optional[bool] = None,
+               domains: Optional[List[str]] = None) -> Dict[str, object]:
     """多后端搜索 + 按 URL 去重合并。返回 {query, results, engines}，绝不抛异常。
 
     providers 缺省时用 default_providers()（环境变量可插拔专用 API）。
+    domains（可选，领域监测用）：为每个域名构造一次 `site:域名` 查询变体
+    （≤3 个，与订阅层 MAX_DOMAINS 同口径），结果合并去重；不传时只查原 query，
+    与加参数前逐位不变。搜索引擎对 site: 的支持是尽力而为：不支持时该变体
+    自然少结果，调用方按实到结果呈现，不谎报"已限定"。
     """
     if authorized is None:
         if providers is not None:
@@ -282,24 +287,64 @@ def search_all(query: str, k: int = 6,
     if not authorized:
         return {"query": query, "results": [], "engines": {}, "blocked": True,
                 "error": "external_processing_not_authorized"}
+    queries = [query]
+    for domain in [str(d).strip().lower() for d in (domains or []) if str(d).strip()][:3]:
+        variant = f"site:{domain} {query}"
+        if variant not in queries:
+            queries.append(variant)
     engines: Dict[str, Dict[str, object]] = {}
     merged: List[SearchResult] = []
     seen = set()
     for p in (providers if providers is not None else default_providers()):
-        try:
-            results, err = p.search(query, k)
-        except Exception as exc:  # noqa: BLE001  解析器 bug 不应炸掉整个检索
-            results, err = [], f"{type(exc).__name__}: {exc}"
-        engines[p.name] = {"ok": not err, "count": len(results), "error": err}
-        for r in results:
-            key = _dedup_url(r.url)
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append(r)
+        for variant in queries:
+            try:
+                results, err = p.search(variant, k)
+            except Exception as exc:  # noqa: BLE001  解析器 bug 不应炸掉整个检索
+                results, err = [], f"{type(exc).__name__}: {exc}"
+            key = getattr(p, "name", None) or type(p).__name__
+            slot = engines.setdefault(key, {"ok": False, "error": "", "count": 0})
+            if err:
+                slot["error"] = str(err)
+            else:
+                slot["ok"] = True
+            for r in results or []:
+                dedup_key = _dedup_url(r.url)
+                if dedup_key in seen:
+                    continue
+                seen.add(dedup_key)
+                merged.append(r)
+            slot["count"] = int(slot.get("count", 0)) + len(results or [])
+    if domains:
+        merged = [r for r in merged if _in_domains(r.url, domains)] or merged
+    # 截断口径：不传 domains 时与加参数前逐位一致（k 条）；传了 domains 时按
+    # 变体数放宽（每变体至多 k 条），总量有界。
+    limit = k if not domains else k * max(1, len(queries))
+    return _finalize(query, merged[:max(1, int(limit))], engines,
+                     domain_scoped=bool(domains))
+
+
+def _in_domains(url: str, domains: List[str]) -> bool:
+    """URL 的主机是否落在给定域名集合里（用于 site: 变体的事后过滤）。"""
+    host = normalize_host(str(url or ""))
+    if not host:
+        return False
+    wanted = {str(d).strip().lower() for d in domains if str(d).strip()}
+    return any(host == d or host.endswith("." + d) for d in wanted)
+
+
+def _finalize(query: str, merged: List[SearchResult],
+              engines: Dict[str, Dict[str, object]],
+              domain_scoped: bool = False) -> Dict[str, object]:
+    """排序 + 组装返回（原 search_all 尾段；domain_scoped 时如实标注）。
+
+    截断由调用方做（见 search_all 的 limit 口径），这里只排序不裁。
+    """
     # 排序不写死档名：按 registry 里 tiers 的声明顺序排（越靠前越权威），未声明的档排最后。
     merged.sort(key=lambda r: (tier_rank(r.domain_tier), r.rank))
-    return {"query": query, "results": merged[:k], "engines": engines}
+    out: Dict[str, object] = {"query": query, "results": merged, "engines": engines}
+    if domain_scoped:
+        out["domain_scope_applied"] = True
+    return out
 
 
 # ===========================================================================

@@ -1,0 +1,562 @@
+/* ============================================================
+   monitor.js —— 左栏「领域监测」面板（专业用户 · 领域监测）
+
+   定位：role=monitor 的档案工作区才显示（window.ProfilesPanel.snapshot()
+   .active.role === "monitor"；快照为空时隐藏）。订阅话题（关键词/域名/频率），
+   立即运行或等调度线程到期跑检，看每轮运行历史与变化卡。
+
+   接口契约（与 web/monitor_api.py 逐条对应；路径参数与后端同名 {sub_id}，
+   生成的 URL 形状逐字一致）：
+     - GET  /api/subscriptions        → {"subscriptions":[{id,topic,keywords[],
+        domains[],frequency_s,enabled,last_run_at,next_run_at,last_status,
+        paused_reason,created_at}, ...], "active_profile_id", "min_frequency_s",
+        "max_domains"}（当前档案工作区）
+     - POST /api/subscriptions        JSON {topic,keywords[],domains[],frequency_s}
+        → 200 {"subscription":{...}} / 400 {"detail":"..."}（主题空/过长、关键词>10、
+        域名>3、频率<300——detail 原文照抄显示，不替后端改写）
+     - PUT  /api/subscriptions/{id}   JSON {topic?,keywords?,domains?,frequency_s?,
+        enabled?} → 200 {"subscription":{...}}；404 跨工作区
+     - DELETE /api/subscriptions/{id} → 200 {"deleted":true,"id":N}；404 跨工作区
+     - POST /api/subscriptions/{id}/run-now → 202 {"started":true,"id":N}；
+        409 {"detail":"该订阅正在运行中，请稍候"}（正在跑）；404 跨工作区
+     - GET  /api/subscriptions/{id}   → {"subscription":{...}, "runs":[{id,
+        started_at,finished_at,status,results_count,new_count,summary{...},
+        error}], "card":{...}}（card 为最新一轮变化卡，无已完成轮次时 {}）
+     - GET  /api/subscriptions/{id}/runs → {"runs":[...]}
+
+   运行是**后台线程**：run-now 返回 202 后本文件以 2s 间隔轮询详情（最多约 30 次），
+   subscription.last_status 从 ""/running 变成 ok/error/blocked/partial 即完成，
+   随后刷新列表与详情；超上限不无限等，如实提示"耗时较长，请稍后查看"。
+
+   纪律（同 settings.js / profiles.js / batch.js）：
+     - 纯 vanilla JS、IIFE、"use strict"、无 ES module、无框架；
+     - 用户输入一律 createElement + textContent；本文件没有任何 HTML 注入点
+       （变化卡经 window.ChatCards.mountCard 挂载，innerHTML 只存在于
+       cards.js 的渲染层，与 batch.js 挂载 batch_summary 同一模式）；
+     - 外链不产生：监测结果 URL 是外部内容，变化卡里只做纯文本展示（cards.js
+       renderMonitorChange 同口径），本文件更不生成任何链接；
+     - 口径诚实：错误信息照抄后端 detail 原文；没有任何字段时不编造、不显示。
+   ============================================================ */
+"use strict";
+
+(function () {
+  /* file:// 双击打开时 shell.js 已给出启动引导，这里静默退出 */
+  if (location.protocol === "file:") return;
+
+  const $ = (sel) => document.querySelector(sel);
+
+  /* 后端接口清单（与 web/monitor_api.py 的路由一一对应；
+      {sub_id} 与后端路径参数同名，生成的 URL 形状逐字一致） */
+  const API = {
+    subscriptions: "/api/subscriptions",
+    detail: "/api/subscriptions/{sub_id}",
+    runs: "/api/subscriptions/{sub_id}/runs",
+    runNow: "/api/subscriptions/{sub_id}/run-now",
+  };
+
+  /* 运行频率 → 人类可读（选项值与 index.html 的 select 一致；未知值按秒数原样显示） */
+  const FREQ_LABEL = { 1800: "30 分钟", 3600: "1 小时", 21600: "6 小时", 86400: "24 小时" };
+
+  /* run-now 轮询：2s 一次、最多 30 次（约 60s）。后台线程跑多久不取决于前端，
+     超上限只如实提示，不假装完成、不无限等。 */
+  const RUN_POLL_INTERVAL_MS = 2000;
+  const RUN_POLL_MAX_TICKS = 30;
+
+  /* 完成态集合：last_status 变成这四个值之一即本轮收尾（契约口径） */
+  const DONE_STATUS = ["ok", "error", "blocked", "partial"];
+
+  /* 订阅 last_status → 徽章文案与配色（后端封闭枚举的客户端映射；未知值原样显示） */
+  const LAST_STATUS = {
+    "": { text: "未运行", cls: "gray" },
+    running: { text: "进行中", cls: "gray" },
+    ok: { text: "已完成", cls: "green" },
+    partial: { text: "部分完成", cls: "amber" },
+    blocked: { text: "已拦截", cls: "amber" },
+    error: { text: "失败", cls: "red" },
+  };
+
+  /* 单轮运行 status → 徽章文案与配色（subscriptions.py VALID_RUN_STATUS 同口径） */
+  const RUN_STATUS = {
+    running: { text: "进行中", cls: "gray" },
+    ok: { text: "完成", cls: "green" },
+    partial: { text: "部分完成", cls: "amber" },
+    blocked: { text: "已拦截", cls: "amber" },
+    error: { text: "失败", cls: "red" },
+  };
+
+  const state = {
+    visible: false,        // 面板当前是否可见（role=monitor）
+    subs: [],              // 当前档案工作区的订阅列表
+    selectedId: null,      // 详情里打开的订阅 id
+    runningIds: new Set(), // 本端正被 run-now 轮询盯着的订阅（禁重复触发）
+    pollTimers: {},        // sub_id → setTimeout 句柄（run-now 完成轮询）
+    profilesPoll: null,    // 等档案快照就绪的轮询句柄
+    creating: false,       // 新建表单提交中（防重复提交）
+  };
+
+  /* ---------- 小工具 ---------- */
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== null && text !== undefined) node.textContent = String(text);
+    return node;
+  }
+
+  function apiPath(tpl, id) {
+    return String(tpl).replace(/\{sub_id\}/g, encodeURIComponent(String(id)));
+  }
+
+  function when(s) {
+    return String(s || "").replace("T", " ") || "—";
+  }
+
+  function freqLabel(seconds) {
+    const n = Number(seconds);
+    if (!Number.isFinite(n) || n <= 0) return "—";
+    return FREQ_LABEL[n] || `${n} 秒`;
+  }
+
+  function statusMeta(map, status) {
+    return map[String(status || "")] || { text: String(status || "未知"), cls: "gray" };
+  }
+
+  /* 逗号分隔输入 → 去空白、去空项的字符串数组（中英文逗号都认；后端仍会再校验） */
+  function splitList(raw) {
+    return String(raw || "")
+      .split(/[,，]/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  function showError(msg) {
+    const box = $("#monError");
+    if (!box) return;
+    box.textContent = msg;
+    box.classList.remove("hidden");
+  }
+
+  function clearError() {
+    const box = $("#monError");
+    if (!box) return;
+    box.textContent = "";
+    box.classList.add("hidden");
+  }
+
+  function setCreating(creating) {
+    const btn = $("#monCreateSubmit");
+    if (btn) btn.disabled = creating;
+  }
+
+  /* ---------- 显隐规则（按档案角色） ---------- */
+  function snapshot() {
+    const panel = window.ProfilesPanel;
+    return (panel && typeof panel.snapshot === "function") ? panel.snapshot() : null;
+  }
+
+  function isMonitor() {
+    const snap = snapshot();
+    const active = (snap && snap.active) || null;
+    return Boolean(active) && active.role === "monitor";
+  }
+
+  function clearSelection() {
+    state.selectedId = null;
+    const detail = $("#monDetail");
+    if (detail) {
+      detail.textContent = "";
+      detail.classList.add("hidden");
+    }
+  }
+
+  function applyVisibility() {
+    const panel = $("#chatMonitorPanel");
+    if (!panel) return false;
+    const visible = isMonitor();
+    panel.classList.toggle("hidden", !visible);
+    if (visible && !state.visible) reload();   // 首次显示时才拉列表
+    state.visible = visible;
+    if (!visible) {
+      /* 藏起来时：轮询与选择都属于刚切走的档案工作区，如实清掉 */
+      stopAllRunPolls();
+      state.runningIds.clear();
+      clearSelection();
+      clearError();
+    }
+    return visible;
+  }
+
+  /* profiles.js 与本文件同在 DOMContentLoaded 初始化，而 loadProfiles 是异步的：
+      首屏快照可能还是空。轮询等它就绪再定显隐（空快照按规格隐藏；10s 等不到
+      就保持隐藏，不无限轮询）——与 batch.js 同一做法。 */
+  function startProfilesPoll() {
+    if (state.profilesPoll) return;
+    let ticks = 0;
+    state.profilesPoll = window.setInterval(() => {
+      ticks += 1;
+      applyVisibility();
+      const snap = snapshot();
+      if ((snap && snap.active) || ticks >= 40) {
+        window.clearInterval(state.profilesPoll);
+        state.profilesPoll = null;
+      }
+    }, 250);
+  }
+
+  /* ---------- 新建订阅 ---------- */
+  function bindCreateForm() {
+    const form = $("#monCreateForm");
+    if (form) form.addEventListener("submit", createSubscription);
+  }
+
+  async function createSubscription(event) {
+    if (event && typeof event.preventDefault === "function") event.preventDefault();
+    if (state.creating) return;              // 一次未回包不叠加请求
+    clearError();
+    /* 前端基本校验：话题非空（其余上限交给后端 400，detail 原文照抄） */
+    const topicBox = $("#monTopic");
+    const topic = String((topicBox && topicBox.value) || "").trim();
+    if (!topic) { showError("请先填写话题（要持续监测的主题）。"); return; }
+    const keywords = splitList(($("#monKeywords") || {}).value);
+    const domains = splitList(($("#monDomains") || {}).value);
+    const frequency = Number(($("#monFrequency") || {}).value) || 3600;
+
+    state.creating = true;
+    setCreating(true);
+    try {
+      const resp = await fetch(API.subscriptions, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ topic, keywords, domains, frequency_s: frequency }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+      /* 提交成功：话题/关键词/域名清空（频率选择保留），重载后直接打开新订阅 */
+      if (topicBox) topicBox.value = "";
+      if ($("#monKeywords")) $("#monKeywords").value = "";
+      if ($("#monDomains")) $("#monDomains").value = "";
+      await reload();
+      const newId = Number((data && data.subscription && data.subscription.id) || 0);
+      if (newId > 0) await loadDetail(newId);
+    } catch (err) {
+      /* 后端 400 的 detail 原文照抄（如"频率过低（最少 300 秒，保护搜索引擎）"） */
+      showError(String((err && err.message) || err));
+    } finally {
+      state.creating = false;
+      setCreating(false);
+    }
+  }
+
+  /* ---------- 订阅列表 ---------- */
+  async function reload() {
+    let data = {};
+    try {
+      const resp = await fetch(API.subscriptions);
+      if (!resp.ok) return;
+      data = await resp.json();
+    } catch (e) {
+      return;   // 列表加载失败不阻塞面板其余交互
+    }
+    state.subs = Array.isArray(data.subscriptions) ? data.subscriptions : [];
+    renderList();
+    /* 选择若已不在新列表里（被删 / 换工作区），清掉详情，避免留着旧数据 */
+    if (state.selectedId
+        && !state.subs.some((s) => Number(s.id) === state.selectedId)) {
+      clearSelection();
+    }
+  }
+
+  function renderList() {
+    const list = $("#monList");
+    if (!list) return;
+    list.textContent = "";
+    if (!state.subs.length) {
+      list.appendChild(el("li", "empty", "暂无订阅；填好话题后点「新建订阅」。"));
+      return;
+    }
+    state.subs.forEach((s) => list.appendChild(subRow(s)));
+  }
+
+  function subRow(sub) {
+    sub = sub || {};
+    const id = Number(sub.id) || 0;
+    const li = el("li", "chat-monitor-item");
+    if (state.selectedId === id) li.classList.add("active");
+    li.dataset.sid = String(id);
+
+    const head = el("div", "chat-monitor-item-head");
+    head.appendChild(el("span", "chat-monitor-item-title", sub.topic || `订阅 #${id}`));
+    const running = state.runningIds.has(id) || String(sub.last_status || "") === "running";
+    if (!sub.enabled) {
+      head.appendChild(el("span", "badge amber", "已暂停"));
+    } else {
+      const meta = statusMeta(LAST_STATUS, sub.last_status);
+      head.appendChild(el("span", `badge ${meta.cls}`, meta.text));
+    }
+    li.appendChild(head);
+
+    const bits = [`#${id}`, `频率 ${freqLabel(sub.frequency_s)}`];
+    const keywords = Array.isArray(sub.keywords) ? sub.keywords : [];
+    const domains = Array.isArray(sub.domains) ? sub.domains : [];
+    if (keywords.length) bits.push(`关键词：${keywords.join("、")}`);
+    if (domains.length) bits.push(`域名限定：${domains.join("、")}`);
+    if (sub.last_run_at) bits.push(`上次运行 ${when(sub.last_run_at)}`);
+    if (sub.enabled && sub.next_run_at) bits.push(`下次运行 ${when(sub.next_run_at)}`);
+    li.appendChild(el("div", "chat-monitor-item-meta muted", bits.join(" · ")));
+
+    const actions = el("div", "chat-monitor-item-actions");
+    const runBtn = el("button", "chat-monitor-btn", running ? "运行中…" : "立即运行");
+    runBtn.type = "button";
+    runBtn.disabled = running;
+    runBtn.addEventListener("click", (e) => { e.stopPropagation(); runNow(id); });
+    actions.appendChild(runBtn);
+    const toggleBtn = el("button", "chat-monitor-btn", sub.enabled ? "暂停" : "恢复");
+    toggleBtn.type = "button";
+    toggleBtn.addEventListener("click", (e) => { e.stopPropagation(); toggleEnabled(sub); });
+    actions.appendChild(toggleBtn);
+    const delBtn = el("button", "chat-monitor-btn chat-monitor-btn-danger", "删除");
+    delBtn.type = "button";
+    delBtn.addEventListener("click", (e) => { e.stopPropagation(); removeSub(id); });
+    actions.appendChild(delBtn);
+    li.appendChild(actions);
+
+    li.addEventListener("click", () => loadDetail(id));
+    return li;
+  }
+
+  /* ---------- 订阅详情（头部 + 变化卡 + 运行历史） ---------- */
+  async function loadDetail(id) {
+    if (!(Number(id) > 0)) return;
+    const detail = $("#monDetail");
+    if (!detail) return;
+    state.selectedId = Number(id);
+    renderList();   // 高亮当前选择
+    detail.textContent = "";
+    detail.classList.remove("hidden");
+    detail.appendChild(el("p", "muted", `正在加载订阅 #${Number(id)}…`));
+    try {
+      const resp = await fetch(apiPath(API.detail, id));
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      /* 运行历史优先取专用端点（limit=50，比详情内嵌的 20 条更全）；
+         取不到就回落详情内嵌的 runs——不因附属请求失败整块不显示 */
+      let runs = Array.isArray(data.runs) ? data.runs : [];
+      try {
+        const runsResp = await fetch(apiPath(API.runs, id));
+        if (runsResp.ok) {
+          const runsData = await runsResp.json();
+          if (Array.isArray(runsData.runs) && runsData.runs.length) runs = runsData.runs;
+        }
+      } catch (e) { /* 历史附属请求失败：回落详情内嵌 runs */ }
+      renderDetail((data && data.subscription) || {}, runs, (data && data.card) || {});
+    } catch (err) {
+      detail.textContent = "";
+      detail.appendChild(el("p", "chat-monitor-error",
+        `订阅详情加载失败：${(err && err.message) || err}`));
+    }
+  }
+
+  function renderDetail(sub, runs, card) {
+    const detail = $("#monDetail");
+    if (!detail) return;
+    detail.textContent = "";
+    detail.classList.remove("hidden");
+
+    /* 头部容器只做分组（无样式）；标题 / 徽章行 / 元信息行各自带类 */
+    const head = el("div");
+    head.appendChild(el("div", "chat-monitor-detail-title",
+      sub.topic || `订阅 #${Number(sub.id) || 0}`));
+    const badges = el("div", "chat-badges");
+    if (!sub.enabled) badges.appendChild(el("span", "badge amber", "已暂停"));
+    const smeta = statusMeta(LAST_STATUS, sub.last_status);
+    badges.appendChild(el("span", `badge ${smeta.cls}`, smeta.text));
+    head.appendChild(badges);
+    const bits = [`#${Number(sub.id) || 0}`, `频率 ${freqLabel(sub.frequency_s)}`];
+    const keywords = Array.isArray(sub.keywords) ? sub.keywords : [];
+    const domains = Array.isArray(sub.domains) ? sub.domains : [];
+    if (keywords.length) bits.push(`关键词：${keywords.join("、")}`);
+    if (domains.length) bits.push(`域名限定：${domains.join("、")}`);
+    if (sub.last_run_at) bits.push(`上次运行 ${when(sub.last_run_at)}`);
+    if (sub.enabled && sub.next_run_at) bits.push(`下次运行 ${when(sub.next_run_at)}`);
+    if (sub.created_at) bits.push(`创建于 ${when(sub.created_at)}`);
+    head.appendChild(el("div", "chat-monitor-detail-meta muted", bits.join(" · ")));
+    detail.appendChild(head);
+
+    /* 暂停原因（后端 blocked 时写明授权说明；没有就不显示） */
+    if (sub.paused_reason) {
+      detail.appendChild(el("p", "chat-monitor-notice", String(sub.paused_reason)));
+    }
+
+    /* 变化卡：最新一轮的 monitor_change 卡。无已完成轮次时后端给 {}，
+        如实显示"还没有已完成的运行轮次"，不挂空卡、不编造。 */
+    if (card && card.card_type && window.ChatCards
+        && typeof window.ChatCards.mountCard === "function") {
+      const slot = el("div", "chat-monitor-card-slot");
+      window.ChatCards.mountCard(slot, card);
+      detail.appendChild(slot);
+    } else {
+      detail.appendChild(el("p", "muted",
+        "还没有已完成的运行轮次（跑完一轮后这里出变化卡）。"));
+    }
+
+    if (runs.length) {
+      detail.appendChild(el("div", "chat-insight-rank-title",
+        `运行历史（最近 ${runs.length} 轮）`));
+      const ul = el("ul", "chat-monitor-runs");
+      runs.forEach((r) => ul.appendChild(runRow(r)));
+      detail.appendChild(ul);
+    }
+  }
+
+  function runRow(run) {
+    run = run || {};
+    const li = el("li", "chat-monitor-run");
+    const meta = statusMeta(RUN_STATUS, run.status);
+    li.appendChild(el("span", `badge ${meta.cls}`, meta.text));
+    const span = [`#${Number(run.id) || 0}`, when(run.started_at)];
+    if (run.finished_at) span.push(`→ ${when(run.finished_at)}`);
+    span.push(`检到 ${Number(run.results_count) || 0} 条 · 新增 ${Number(run.new_count) || 0} 条`);
+    li.appendChild(el("span", "chat-monitor-run-meta muted", span.join(" · ")));
+    if (run.error) {
+      li.appendChild(el("div", "chat-monitor-run-error", String(run.error)));
+    }
+    return li;
+  }
+
+  /* ---------- 立即运行（202 + 后台线程 → 轮询等收尾） ---------- */
+  async function runNow(id) {
+    if (!(Number(id) > 0)) return;
+    if (state.runningIds.has(Number(id))) return;   // 本端正盯着它，不重复触发
+    clearError();
+    state.runningIds.add(Number(id));
+    renderList();   // 按钮即时变「运行中…」并禁用
+    try {
+      const resp = await fetch(apiPath(API.runNow, id), { method: "POST" });
+      const data = await resp.json().catch(() => ({}));
+      if (resp.status === 409) {
+        /* 正在跑：后端 detail 原文照抄，不改写、不猜测 */
+        showError(String(data.detail || "该订阅正在运行中，请稍候"));
+        state.runningIds.delete(Number(id));
+        renderList();
+        return;
+      }
+      if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+      startRunPoll(Number(id));
+    } catch (err) {
+      showError(`立即运行失败：${(err && err.message) || err}`);
+      state.runningIds.delete(Number(id));
+      renderList();
+    }
+  }
+
+  /* 轮询详情等本轮收尾：last_status 变成 ok/error/blocked/partial 即完成。
+     用 setTimeout 链（不用 setInterval）：上一次 fetch 没回来不叠下一轮。 */
+  function startRunPoll(id) {
+    stopRunPoll(id);
+    let ticks = 0;
+    const tick = async () => {
+      ticks += 1;
+      let sub = null;
+      try {
+        const resp = await fetch(apiPath(API.detail, id));
+        if (resp.ok) {
+          const data = await resp.json();
+          sub = (data && data.subscription) || null;
+        }
+      } catch (e) { /* 网络抖动：下一 tick 再试，不谎报完成 */ }
+      if (state.pollTimers[id] === undefined) return;   // 等待期间已被取消
+      const status = String((sub && sub.last_status) || "");
+      if (sub && DONE_STATUS.indexOf(status) >= 0) {
+        finishRunPoll(id);
+        await reload();
+        if (state.selectedId === id) await loadDetail(id);
+        return;
+      }
+      if (ticks >= RUN_POLL_MAX_TICKS) {
+        /* 后台线程跑多久不取决于前端：超上限只如实提示，不假装完成 */
+        finishRunPoll(id);
+        showError("监测运行耗时较长（已等待约 60 秒）：请稍后重新打开该订阅查看结果。");
+        await reload();
+        return;
+      }
+      state.pollTimers[id] = window.setTimeout(tick, RUN_POLL_INTERVAL_MS);
+    };
+    state.pollTimers[id] = window.setTimeout(tick, RUN_POLL_INTERVAL_MS);
+  }
+
+  function finishRunPoll(id) {
+    stopRunPoll(id);
+    state.runningIds.delete(id);
+    renderList();
+  }
+
+  function stopRunPoll(id) {
+    const timer = state.pollTimers[id];
+    if (timer) {
+      window.clearTimeout(timer);
+      delete state.pollTimers[id];
+    }
+  }
+
+  function stopAllRunPolls() {
+    Object.keys(state.pollTimers).forEach((key) => stopRunPoll(Number(key)));
+  }
+
+  /* ---------- 暂停 / 恢复 / 删除 ---------- */
+  async function toggleEnabled(sub) {
+    const id = Number(sub && sub.id) || 0;
+    if (!(id > 0)) return;
+    clearError();
+    try {
+      const resp = await fetch(apiPath(API.detail, id), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: !sub.enabled }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+      await reload();
+      if (state.selectedId === id) await loadDetail(id);
+    } catch (err) {
+      showError(`操作失败：${(err && err.message) || err}`);
+    }
+  }
+
+  async function removeSub(id) {
+    if (!(Number(id) > 0)) return;
+    clearError();
+    try {
+      const resp = await fetch(apiPath(API.detail, id), { method: "DELETE" });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+      stopRunPoll(Number(id));
+      state.runningIds.delete(Number(id));
+      if (state.selectedId === Number(id)) clearSelection();
+      await reload();
+    } catch (err) {
+      showError(`删除失败：${(err && err.message) || err}`);
+    }
+  }
+
+  /* ---------- 对外（chat.js 只调 init / onProfileChanged） ---------- */
+  window.MonitorPanel = {
+    init,
+    onProfileChanged,
+    reload,
+  };
+
+  function init() {
+    bindCreateForm();
+    applyVisibility();
+    startProfilesPoll();
+  }
+
+  function onProfileChanged() {
+    /* 换工作区 = 换数据范围：run-now 轮询属于旧工作区的订阅，选择与详情清空 */
+    stopAllRunPolls();
+    state.runningIds.clear();
+    clearSelection();
+    clearError();
+    applyVisibility();
+    if (isMonitor()) reload();
+  }
+})();

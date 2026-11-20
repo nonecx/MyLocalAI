@@ -28,6 +28,7 @@ import math
 import os
 import threading
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -52,6 +53,22 @@ from mylocalai.web.privacy_api import router as privacy_router  # noqa: E402
 from mylocalai.web.profiles_api import router as profiles_router  # noqa: E402
 from mylocalai.web.batch_api import router as batch_router  # noqa: E402
 from mylocalai.web.materials_api import router as materials_router  # noqa: E402
+from mylocalai.web.monitor_api import router as monitor_router  # noqa: E402
+
+
+@asynccontextmanager
+async def _lifespan(_app: Any):
+    """应用生命周期：起领域监测调度 daemon 线程（阶段 3）。
+
+    调度只在**服务运行期间**有效（关服即停，产品口径如实告知用户）；多 worker
+    部署时只有主进程调度（启动告警复用 _warn_if_multiworker 的口径）。
+    """
+    from mylocalai.web import monitor_api
+    monitor_api.start_scheduler()
+    try:
+        yield
+    finally:
+        monitor_api.stop_scheduler()
 
 # 非 UTF-8 控制台（英文 Windows 的 cp1252 等）下，日志里的中文会抛 UnicodeEncodeError。
 force_utf8_stdio()
@@ -101,11 +118,13 @@ app = FastAPI(
     title="网络言论智能分析系统 API",
     description="情感 / 攻击性 / 逻辑三维分析 + 规则引擎裁判 + 报告生成（复用项目根目录分析链路）",
     version="1.0.0",
+    lifespan=_lifespan,
 )
 app.include_router(privacy_router)
 app.include_router(profiles_router)
 app.include_router(batch_router)
 app.include_router(materials_router)
+app.include_router(monitor_router)
 
 
 def _active_profile_id() -> Optional[int]:

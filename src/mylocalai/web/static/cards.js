@@ -1,7 +1,8 @@
 /* ============================================================
    cards.js —— 对话卡片渲染器（M2，工作指导 §4.3）
    三个渲染器：结论卡 / 言论土壤卡（classic 四档） / 热度 E 分卡；
-   另加我的画像卡（insights 只读聚合）与事实核查答案渲染。
+   另加我的画像卡（insights 只读聚合）、事实核查答案渲染、材料批次汇总卡
+   与领域监测变化卡（monitor_change 订阅跑检）。
    标记从原分析页卡片"复制 + 参数化"而来（原 app.js 已在单页化中删除，
    卡片渲染逻辑现由本文件独家承载）。
    由 chat.js 调用（chat.js 不直接拼卡片 HTML）。
@@ -692,6 +693,92 @@
       </div>`;
   }
 
+  /* ---------- 7. 领域监测变化卡（monitor_change：订阅跑检一轮的 URL 差集 + E 分变化） ----------
+      由后端 tools_monitor.change_card 产出（monitor_api 详情接口的 card 段）：
+      card = {card_type:"monitor_change", subscription_id, topic, run_id, status,
+      results_count, new_count, new_urls, removed_urls, e_score, prev_e_score,
+      e_delta, as_of, error}。
+      口径诚实铁律同全文件：监测结果 URL 是外部内容，只做纯文本展示（截断 80 字并
+      标注），不生成任何可点链接；E 分是确定性公式输出（代理/估计口径，照实注明）；
+      没有任何字段的块整块不显示，不编造、不补造。 */
+  const MONITOR_STATUS = {
+    ok: { text: "已完成", cls: "green" },
+    partial: { text: "部分完成", cls: "amber" },
+    blocked: { text: "已拦截", cls: "amber" },
+    error: { text: "失败", cls: "red" },
+    running: { text: "进行中", cls: "gray" },
+  };
+
+  /* URL 只做纯文本：截断 80 字并标注，不生成 <a>（监测结果是外部内容，保持只读） */
+  function monitorUrlText(url) {
+    const s = String(url || "").trim();
+    if (!s) return "";
+    const cut = s.length > 80;
+    return escapeHtml(cut ? s.slice(0, 80) : s) + (cut ? "…（已截断）" : "");
+  }
+
+  /* 一个 URL 小节：字段缺失（undefined/null）整块不显示；有空数组时如实说"没有" */
+  function monitorUrlSection(urls, title, emptyText) {
+    if (urls === undefined || urls === null) return "";
+    const list = Array.isArray(urls) ? urls.filter((u) => String(u || "").trim()) : [];
+    const head = `<div class="chat-monitor-urls-title">${escapeHtml(title)} ${list.length} 条 · 纯文本展示，不做可点链接</div>`;
+    if (!list.length) {
+      return head + `<p class="chat-insight-sub muted">${escapeHtml(emptyText)}</p>`;
+    }
+    return head
+      + `<ul class="chat-monitor-urls">${list.map((u) => `<li>${monitorUrlText(u)}</li>`).join("")}</ul>`;
+  }
+
+  /* 数值字段：null/undefined/空串/非有限数一律当"没有"，不拿 0 冒充 */
+  function monitorNum(v) {
+    if (v === null || v === undefined || v === "") return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function renderMonitorChange(c) {
+    c = c || {};
+    const smeta = MONITOR_STATUS[String(c.status || "")] || null;
+    const statusText = smeta ? smeta.text : escapeHtml(String(c.status || "未知"));
+    const statusCls = smeta ? smeta.cls : "gray";
+    const results = Number(c.results_count) || 0;
+    const fresh = Number(c.new_count) || 0;
+    const eScore = monitorNum(c.e_score);
+    const prevE = monitorNum(c.prev_e_score);
+    const eDelta = monitorNum(c.e_delta);
+    const hasE = eScore !== null || prevE !== null || eDelta !== null;
+    const runId = monitorNum(c.run_id);
+
+    /* 错误 / 授权说明：error 非空时如实显示（blocked 轮次它就是授权说明） */
+    const errorTxt = String(c.error || "").trim();
+    const errorTitle = String(c.status || "") === "blocked" ? "授权说明" : "错误";
+    const errorHtml = errorTxt
+      ? `<p class="chat-monitor-notice"><b>${errorTitle}：</b>${escapeHtml(errorTxt)}</p>`
+      : "";
+
+    return `
+      <div class="chat-card chat-card-monitor-change">
+        <div class="chat-card-title">📡 监测变化<span class="badge gray">订阅跑检</span></div>
+        <div class="chat-card-label">${escapeHtml(c.topic || "（无话题）")}</div>
+        <div class="chat-badges">
+          <span class="badge ${statusCls}">${statusText}</span>
+          ${runId !== null && runId > 0 ? `<span class="badge gray">第 ${runId} 轮</span>` : ""}
+        </div>
+        <p class="chat-insight-count">本轮检到 ${results} 条 · 新增 ${fresh} 条</p>
+        ${monitorUrlSection(c.new_urls, "新增 URL", "本轮没有新增 URL。")}
+        ${monitorUrlSection(c.removed_urls, "消失 URL", "本轮没有消失的 URL。")}
+        ${hasE ? `
+        <div class="chat-dims">
+          ${eScore !== null ? `<div class="dim-row"><span class="k">本轮关注度 E</span><span class="v">${eScore.toFixed(2)}</span></div>` : ""}
+          ${prevE !== null ? `<div class="dim-row"><span class="k">上轮关注度 E</span><span class="v">${prevE.toFixed(2)}</span></div>` : ""}
+          ${eDelta !== null ? `<div class="dim-row"><span class="k">E 分变化</span><span class="v">${eDelta > 0 ? "+" : ""}${eDelta.toFixed(2)}</span></div>` : ""}
+        </div>
+        <p class="chat-insight-note muted">关注度 E 为确定性公式输出，代理估计值：只述首末两点之差，不预测趋势。</p>` : ""}
+        ${errorHtml}
+        ${asOfLine(c.as_of)}
+      </div>`;
+  }
+
   /* ---------- 分发：优先 claim_answer，其次保留既有业务卡片兼容 ---------- */
   function renderCard(payload) {
     if (!payload || typeof payload !== "object") return "";
@@ -702,6 +789,7 @@
     if (type === "insights") return renderInsights(payload);
     if (type === "evidence") return renderEvidence(payload);
     if (type === "batch_summary") return renderBatchSummary(payload);
+    if (type === "monitor_change") return renderMonitorChange(payload);
     if (type === "conclusion") return renderConclusion(payload);
     if (type === "speech" || type === "classic") return renderSpeech(payload);
     if (type === "heat" || type === "attention") return renderHeat(payload);
@@ -731,6 +819,7 @@
   /* 供 chat.js 调用的唯一入口（不污染全局命名空间） */
   window.ChatCards = {
     renderCard, renderClaimAnswer, renderConclusion, renderSpeech, renderHeat,
-    renderInsights, renderEvidence, renderBatchSummary, mountCard, escapeHtml,
+    renderInsights, renderEvidence, renderBatchSummary, renderMonitorChange,
+    mountCard, escapeHtml,
   };
 })();

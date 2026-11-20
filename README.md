@@ -45,10 +45,11 @@
 │   │   ├── attn_rules.json / deep_read_rules.json / society_issues.json / prompts.json
 │   │   └── README.md           关注度与深读的完整说明（公式、触发、护栏、隔离）
 │   ├── dossier/                档案库（SQLite 单文件 + WAL）
-│   │   ├── store.py            连接工厂、schema_version 顺序迁移（v4 指纹表+话术标记表、v6 Profile 工作区、v7 材料批次）、档案域七表 + 会话域三表
+│   │   ├── store.py            连接工厂、schema_version 顺序迁移（v4 指纹表+话术标记表、v6 Profile 工作区、v7 材料批次、v8 监测订阅）、档案域七表 + 会话域三表
 │   │   ├── profiles.py         Profile 工作区（多档案数据分家 + 角色，v6）
 │   │   ├── batches.py          材料批次存储（v7）
 │   │   ├── batch_summary.py    批次汇总纯函数（零 LLM，永不抛）
+│   │   ├── subscriptions.py    监测订阅存储（v8）
 │   │   ├── service.py          建档编排：结论卡片化落库、证据批次、recheck 版本化、六章节聚合与导出、初扫 markers 沉淀
 │   │   └── insights.py         参谋三聚合纯函数：话术模式库 / 信源画像 / 周报（零 LLM，永不抛）
 │   ├── assistant/              智能助手核心（对话 → 路由 → 工具 → 叙述 → 落库）
@@ -57,6 +58,7 @@
 │   │   ├── registry.py         工具注册表（schema 校验、权限分级、成本/延迟元数据）
 │   │   ├── tools_verify.py / tools_heat.py / tools_memory.py / tools_chapters.py
 │   │   ├── tools_batch.py      材料批次编排（阶段 2：同源分组 + 逐条核查 + 双预算）
+│   │   └── tools_monitor.py    领域监测编排（阶段 3：授权闸 + 检索 + 变化摘要）
 │   │   ├── fingerprint.py      话术指纹纯函数（归一化/shingle/Jaccard——谣言库秒回的地基）
 │   │   ├── reminders.py        被动提醒纯函数（档案年龄/热度变化 → 一行提示）
 │   │   ├── context.py          上下文窗口构建器（12k 字符预算、裁剪与摘要）
@@ -66,13 +68,14 @@
 │   │   ├── prompts.json        人设与固定话术——改这里而非改代码
 │   │   └── assistant_rules.json  路由模型/上限/预算/指纹阈值/信源画像阈值/拒绝词表——改这里而非改代码
 │   ├── web/                    FastAPI 网站 + static/（src/mylocalai/web/app.py）
-│   │   ├── app.py              REST API 全貌（分析/关注度/对话/会话/档案/画像/Profile/批次）
+│   │   ├── app.py              REST API 全貌（分析/关注度/对话/会话/档案/画像/Profile/批次/监测）+ lifespan 调度
 │   │   ├── profiles_api.py     Profile 工作区 CRUD + 激活（v6）
 │   │   ├── batch_api.py        材料批次 API + SSE 进度（v7）
 │   │   ├── materials_api.py    上传文件内存解析（txt/md/csv/json，不落盘）
+│   │   ├── monitor_api.py      监测订阅 API + 调度线程（v8）
 │   │   └── static/             单一对话页的全部界面：index.html + shell.js（file:// 引导/服务状态）
 │   │                           + chat.js/cards.js（会话、档案库、事件流与全部卡片渲染）+ chat.css
-│   │                           + profiles.js（档案切换器）+ batch.js（材料批次面板）
+│   │                           + profiles.js（档案切换器）+ batch.js（材料批次面板）+ monitor.js（领域监测面板）
 │   ├── util/                   text_safety（代理项规整）/ console_io（stdio 规整）
 │   └── cli.py                  命令行入口（python -m mylocalai.cli）
 ├── my_website/                 启动器（start.bat / start.sh）与说明，实际代码在 src/mylocalai/web/
@@ -321,7 +324,7 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 1261 个用例（unittest discover 全量，2026-11-20 角色扩展阶段 2 后实测；
+离线套件共 1275 个用例（unittest discover 全量，2026-11-20 角色扩展阶段 3 后实测；
 **M4 起由 `tests.test_readme_counts` 自动校验此数字与 mock 闸门条数，改动后须同步回写**）：
 M1-M3 的全部回归（详见 git 历史），加上 M4 新增模块：
 **成本真实计数**（llm_client 进程级计数器：真实上游调用数 + usage tokens，缓存命中/
@@ -342,7 +345,11 @@ source_profile 注入：空画像逐位不变守卫、抬分端到端、装配�
 加上角色扩展阶段 2 新增模块：**材料批次**（v7 batches/batch_items 存储、同源分组
 （assistant 层指纹，保守不并组）、逐条 RumorAgent 核查 + 自动建档、双预算与取消的
 诚实降级、汇总纯函数与 batch_summary 卡、/api/batch CRUD + SSE 进度 + 并发信号量、
-上传内存解析四格式、前端材料批次面板与前后端自洽）。
+上传内存解析四格式、前端材料批次面板与前后端自洽）；
+加上角色扩展阶段 3 新增模块：**领域监测**（v8 subscriptions/subscription_runs、
+search_all site: 领域变体（不传逐位不变）、授权闸 blocked 零外发、监测档案证据
+批次 + 关注度快照现算、变化摘要纯函数（URL 差集 + E 首末差）、/api/subscriptions
+CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）。
 另有 `tests/run_module_tests.py`（12 条内置用例全模块跑一遍并落盘）、
 `tests/smoke_api.py`（配置自检 + 连通性）。
 
@@ -511,6 +518,25 @@ DOSSIER_DB_PATH 可覆盖）。测试：`tests.test_mcp_assistant`（同核对�
   逐条结论与档案链接 / 降级清单；
 - **schema v7**：`batches` + `batch_items`（group_id 同源分组、status 六态）；
 - 测试：`tests.test_batch`（存储 / 分组 / 汇总 / 编排八场景 / Web API / 上传解析）。
+
+### 专业用户 B · 领域监测订阅（阶段 3）
+
+`monitor` 档案工作区左栏「领域监测」面板：订阅话题（可选关键词与域名限定，
+频率下限 300 秒），到点由**服务内调度线程**自动跑检，也可手动"立即运行"。每轮
+受控检索（`site:域名` 变体 ≤3 个，引擎不支持时如实标注）、证据落订阅专属监测
+档案、关注度快照用本次检索结果现算（零额外联网）；变化摘要只述事实（URL 差集 +
+E 分首末差，不外推）。
+
+- **接口**：`GET/POST /api/subscriptions`、`PUT/DELETE /api/subscriptions/{id}`、
+  `POST /api/subscriptions/{id}/run-now`（202 + 后台，409 防重入）、
+  `GET /api/subscriptions/{id}`（详情 + 运行历史 + 最新变化卡）、`GET .../runs`；
+- **授权闸**：每轮运行前查 public-search 外发授权，未过 → `blocked`、订阅暂停并
+  写明原因，**零外发**（fail-closed）；
+- **调度**：web lifespan 起 daemon 线程（tick 60s、串行、单 worker 假设 + 启动
+  告警）；关服即停，产品口径如实告知；
+- **schema v8**：`subscriptions` + `subscription_runs`；
+- 测试：`tests.test_monitor`（存储 / due / 变化摘要 / 编排含 blocked 零外发 /
+  失败不卡死 / API / 调度 tick）。
 
 ## 参谋与洞察（2026-10-31，L4）
 
