@@ -389,6 +389,23 @@ def _fp_jaccard(a: Any, b: Any) -> float:
     return len(sa & sb) / union
 
 
+def title_similarity(a: Any, b: Any) -> float:
+    """两条标题的指纹相似度（0-1）。**纯函数、永不抛**（坏输入按 0.0）。
+
+    供 platform 候选去重使用（同一事件多家转载的标题近似判定）；与
+    assistant.fingerprint 的 normalize/shingles/jaccard 逐字节同口径，一致性由
+    tests/test_fingerprint.py 的对拍用例锁定——改动必须两处同步。
+    """
+    try:
+        na = _fp_normalize(a)
+        nb = _fp_normalize(b)
+        if not na or not nb:
+            return 0.0
+        return _fp_jaccard(_fp_shingle_hashes(na), _fp_shingle_hashes(nb))
+    except Exception:  # noqa: BLE001  相似度是增益层，任何意外按"不相似"
+        return 0.0
+
+
 def migrate(conn: sqlite3.Connection) -> int:
     """把库迁到 SCHEMA_VERSION；返回应用了的迁移数。幂等，可重复调用。"""
     conn.execute("""CREATE TABLE IF NOT EXISTS schema_migrations (
