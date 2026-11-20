@@ -28,3 +28,4 @@ nul
 
 # 档案库数据文件（M1-3）
 data/
+.vscode/
