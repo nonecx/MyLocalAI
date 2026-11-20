@@ -555,7 +555,11 @@ from mylocalai.assistant.events import (  # noqa: E402
     format_sse,
     make_event,
 )
-from mylocalai.assistant.registry import MAX_TEXT_LENGTH as _ASSISTANT_MAX_TEXT_LENGTH  # noqa: E402
+from mylocalai.assistant.registry import (  # noqa: E402
+    MAX_TEXT_LENGTH as _ASSISTANT_MAX_TEXT_LENGTH,
+    ToolNotAllowed as _AssistantToolNotAllowed,
+    ValidationError as _AssistantValidationError,
+)
 from mylocalai.assistant.reminders import aggregate_reminder_lines  # noqa: E402
 
 #: chat 请求轮里 loop 正常收尾的事件名（events.py 协议：异常出口是 error）。
@@ -615,9 +619,15 @@ def get_dossier_service():
 # ---- 对话（/api/chat，SSE） ----
 
 class ChatRequest(BaseModel):
-    """POST /api/chat 的请求体。session_id 缺省时自动新建会话（meta 事件回传 id）。"""
+    """POST /api/chat 的请求体。session_id 缺省时自动新建会话（meta 事件回传 id）。
+
+    action（可选，x/y/z 精确输入通道）：{"name": 工具名, "args": {...}}，供前端按钮
+    直接指定只读工具、跳过路由模型。类型刻意写成 Any 而非 Dict：形状错误要按本项目
+    既有的 400 语义（{"detail": ...}）返回，而不是 pydantic 的 422。
+    """
     session_id: Optional[int] = None
     message: str
+    action: Any = None
 
 
 def _validate_chat_message(message: str) -> str:
@@ -636,6 +646,24 @@ def _validate_chat_message(message: str) -> str:
         raise HTTPException(status_code=400,
                             detail=f"文本过长（最多 {_ASSISTANT_MAX_TEXT_LENGTH} 字）")
     return text
+
+
+def _normalize_chat_action(action: Any) -> Optional[Dict[str, Any]]:
+    """校验并规整 POST /api/chat 的可选 action 字段（形状层，不查注册表）。
+
+    形状非法 → 400（与 message 校验同一 400 语义）；语义层（未注册 / 不在 allowlist /
+    写权限 / 参数越界）由 AssistantLoop.resolve_action 在拿到 loop 后再校验，同样 400。
+    形状先于"解析/新建会话"校验：坏请求不该在会话列表里留下一个空会话。
+    """
+    if action is None:
+        return None
+    # 惰性 import（先例：build_assistant_loop）：chat 模块导入期不装配助手核心
+    from mylocalai.assistant.loop import action_payload
+    try:
+        name, args = action_payload(action)
+    except _AssistantValidationError as exc:
+        raise HTTPException(status_code=400, detail=f"action 非法：{exc}")
+    return {"name": name, "args": args}
 
 
 async def drain_event_stream(events: EventStream, request: Any, worker_done,
@@ -684,12 +712,19 @@ def _unavailable_stream(session_id: int):
 async def chat(req: ChatRequest, request: Request) -> StreamingResponse:
     """对话端点：SSE 流式返回助手事件（事件名封闭枚举见 mylocalai.assistant.events）。
 
-    流程：校验消息 → 解析/新建会话 → build_assistant_loop() 取助手核心 →
-    工作线程跑 loop.handle(session_id, message, events, cancel_check)，主协程
+    流程：校验消息与 action 形状 → 解析/新建会话 → build_assistant_loop() 取助手核心
+    → action 语义校验（未注册/写工具/坏参数 → 400，发生在 SSE 开始之前） →
+    工作线程跑 loop.handle(session_id, message, events, cancel_check[, action])，主协程
     drain_event_stream 轮询 events.snapshot() 吐帧。loop 抛出协议外异常时由
     web 兜底发 error 收尾，保证流必然终止。
+
+    action（可选）是 x/y/z 精确输入通道：合法时 loop 跳过路由模型直接执行该只读工具，
+    事件协议与顺序一个都不变（meta → status → tool_start → card → narrative → tool_end
+    → done）。非法 action 用 400 {"detail": ...} 拒绝——HTTP 层拒绝比"流里塞 error"
+    更像一次没发生的请求：前端不会误以为回合已经开始。
     """
     message = _validate_chat_message(req.message)
+    action = _normalize_chat_action(req.action)
     store = get_session_store()
     if req.session_id is not None:
         if isinstance(req.session_id, bool) or not isinstance(req.session_id, int) \
@@ -706,12 +741,30 @@ async def chat(req: ChatRequest, request: Request) -> StreamingResponse:
         return StreamingResponse(_unavailable_stream(session_id),
                                  media_type="text/event-stream", headers=_SSE_HEADERS)
 
+    if action is not None:
+        # SSE 开始之前的语义校验（注册表/allowlist/只读/参数）：抛错即 400。
+        # getattr 兜底：只实现 handle 的注入式核心（测试 stub / 旧装配）不该因本通道
+        # 缺失而 500，明确 400 告诉调用方"该核心不支持 action"。
+        resolver = getattr(loop, "resolve_action", None)
+        if resolver is None:
+            raise HTTPException(status_code=400,
+                                detail="action 非法：当前助手核心不支持结构化 action")
+        try:
+            resolver(action)
+        except (_AssistantValidationError, _AssistantToolNotAllowed) as exc:
+            raise HTTPException(status_code=400, detail=f"action 非法：{exc}")
+
     events = EventStream()
     worker_done = threading.Event()
 
     def _run() -> None:
         try:
-            loop.handle(session_id, message, events, lambda: events.cancelled)
+            if action is None:
+                # 无 action 时保持原调用形状（既有 stub loop 只认这四个位置参数）
+                loop.handle(session_id, message, events, lambda: events.cancelled)
+            else:
+                loop.handle(session_id, message, events, lambda: events.cancelled,
+                            action=action)
         except Exception as exc:  # noqa: BLE001  loop 内部兜底之外的最外层防线
             try:
                 events.emit("error", code="internal", recoverable=False,

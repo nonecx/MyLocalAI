@@ -1,46 +1,59 @@
 /* ============================================================
-   chat.css —— 对话 Tab 样式（M2，工作指导 §4.3）
+   chat.css —— 对话页样式（M2 起步，单页化后合并工具模式 / 参谋的视觉资产）
    与 style.css 共存：只新增对话相关类，不改 style.css；
    复用其设计令牌（--primary/--panel/--border/...）与通用组件
    （.panel/.badge/.kw/.dim-row/.btn-*/.error-box/.hidden/.muted/.score-*）。
    ============================================================ */
 
-/* ---------- 首页双 Tab 导航 ---------- */
-.top-tabs {
+/* ---------- 顶栏右侧：服务状态 chip + 关于按钮 ---------- */
+.header-actions {
   display: flex;
-  gap: 2px;
-  padding: 8px 22px 0;
-  max-width: 1200px;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.about-open-btn { font-size: 13px; padding: 6px 14px; }
+
+/* 关于弹层：遮罩 + 居中卡片；点遮罩关闭由 shell.js 处理，Esc 同 */
+.about-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(16, 24, 40, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.about-dialog-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 12px 32px rgba(16, 24, 40, 0.18);
+  padding: 20px 24px;
+  max-width: 620px;
   width: 100%;
-  margin: 0 auto;
-  border-bottom: 1px solid var(--border);
+  max-height: 82vh;
+  overflow-y: auto;
 }
 
-.top-tab {
-  border: none;
-  border-bottom: 2px solid transparent;
-  background: transparent;
+.about-dialog-card p {
+  font-size: 13px;
   color: var(--muted);
-  font-size: 14px;
-  font-weight: 600;
-  padding: 9px 14px 10px;
-  border-radius: 6px 6px 0 0;
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  line-height: 1.8;
+  margin-bottom: 10px;
 }
 
-.top-tab:hover { color: var(--text); background: rgba(28, 33, 40, 0.04); }
+.about-dialog-card ul { padding-left: 18px; }
+.about-dialog-card li { font-size: 13px; color: var(--muted); line-height: 1.9; }
+.about-dialog-card a { color: var(--primary); text-decoration: none; }
+.about-dialog-card a:hover { text-decoration: underline; }
 
-.top-tab.active {
-  background: transparent;
-  color: var(--primary-dark);
-  border-bottom-color: var(--primary);
-  box-shadow: none;
-}
+.about-close-btn { font-size: 13px; padding: 5px 14px; }
 
 /* ---------- 对话布局 ---------- */
-.chat-tab { flex: 1; display: flex; }
-
 .chat-layout {
   display: grid;
   grid-template-columns: 300px minmax(0, 1fr);
@@ -50,7 +63,9 @@
   width: 100%;
   margin: 0 auto;
   align-items: stretch;
-  height: calc(100vh - 172px);
+  /* 只有 header + footer，不再有 Tab 导航条，故比旧值少减一档 */
+  flex: 1;
+  height: calc(100vh - 148px);
   min-height: 520px;
 }
 
@@ -69,6 +84,7 @@
   display: flex;
   flex-direction: column;
 }
+.chat-side > .chat-insights-panel { flex: 0 0 auto; }
 
 .chat-new-btn { font-size: 13px; padding: 4px 12px; }
 
@@ -143,6 +159,36 @@
 .chat-dossier-export:hover { text-decoration: underline; }
 
 .chat-dossier-hint { font-size: 12px; margin-top: 10px; }
+
+/* ---------- 左栏「我的画像」入口（单页化：不再单开参谋 Tab） ---------- */
+.chat-insights-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.chat-insights-btn {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 9px;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.chat-insights-btn:hover {
+  border-color: var(--primary);
+  color: var(--primary-dark);
+  background: var(--primary-soft);
+}
+
+.chat-insights-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.chat-insights-hint { font-size: 11.5px; margin-top: 9px; line-height: 1.7; }
 
 /* ---------- 档案库视图：详情六章节区块（M3） ---------- */
 .chat-dossier-view {
@@ -324,6 +370,91 @@
   background: var(--primary-soft);
 }
 
+/* ---------- 快捷 chips + 算热度小面板（对话单页的只读入口） ---------- */
+.chat-quick-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px 0;
+}
+
+.chat-quick-label {
+  font-size: 12px;
+  color: var(--muted);
+  margin-right: 2px;
+}
+
+.chat-quick-chip {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.chat-quick-chip:hover,
+.chat-quick-chip.active {
+  border-color: var(--primary);
+  color: var(--primary-dark);
+  background: var(--primary-soft);
+}
+
+.chat-quick-chip:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.chat-quick-panel {
+  margin: 8px 16px 0;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  padding: 10px 12px;
+}
+
+.chat-quick-panel-head {
+  font-size: 12.5px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.chat-heat-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.chat-heat-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.chat-heat-fields input {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 9px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--panel);
+}
+
+.chat-quick-panel-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.chat-quick-submit { padding: 7px 14px; font-size: 13px; }
+.chat-quick-note { font-size: 11.5px; line-height: 1.6; margin: 0; }
+
 .msg { display: flex; }
 .msg-user { justify-content: flex-end; }
 .msg-assistant { justify-content: flex-start; }
@@ -408,6 +539,14 @@
   padding: 12px 14px;
   background: var(--panel);
 }
+
+/* 卡片类型标记类（cards.js 的 class="chat-card chat-card-xxx"）：显式给一份基础
+   排版，避免"JS 引用了 class 却没有对应样式"的悬空引用；具体样式在各卡的细分规则里。 */
+.chat-card-conclusion,
+.chat-card-speech,
+.chat-card-heat,
+.chat-card-insights,
+.chat-card-evresearch { font-size: 13px; line-height: 1.75; }
 
 .chat-card-claim-answer { font-size: 13px; line-height: 1.55; }
 .chat-card-claim-answer > p { margin: 6px 0; }
@@ -515,56 +654,33 @@
   .chat-dossier-list { max-height: 240px; }
 }
 
-/* ---------- 参谋 Tab（L4）：话术模式库 / 信源画像 / 本周简报 ----------
-   命名前缀 insight-，只新增不改既有类；复用 style.css 的 .panel/.badge/.muted。 */
-.insight-panel {
-  max-width: 1200px;
-  width: 100%;
-  margin: 0 auto 22px;
-}
+/* ============================================================
+   我的画像卡（insights）：话术模式库 / 信源画像 / 本周简报
+   由原参谋页的 insight-* 样式迁移并改 chat- 前缀——渲染位置从独立面板
+   变成消息流里的卡片，因此只保留块内排版，去掉栅格与面板外框。
+   ============================================================ */
+.chat-card-insights { font-size: 12.5px; line-height: 1.8; }
 
-.insight-intro { margin: 0 0 14px; }
-
-.insight-cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-  gap: 14px;
-}
-
-.insight-card {
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 12px 14px;
-  background: #fafbfc;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.insight-card-title { font-size: 13.5px; font-weight: 700; margin-bottom: 8px; }
-.insight-card-body { font-size: 12.5px; line-height: 1.8; flex: 1 1 auto; }
-
-.insight-empty {
+.chat-insight-empty {
   color: var(--muted);
-  font-size: 12.5px;
-  margin: 0;
+  margin: 6px 0 0;
   border: 1px dashed var(--border);
   border-radius: 8px;
-  padding: 18px 12px;
+  padding: 14px 12px;
   text-align: center;
 }
 
-.insight-count { font-size: 13px; margin: 0 0 6px; }
-.insight-sub { font-size: 12px; margin: 0 0 8px; }
+.chat-insight-count { font-size: 13px; margin: 0 0 6px; }
+.chat-insight-sub { font-size: 12px; margin: 0 0 8px; }
 
-.insight-rank-title {
+.chat-insight-rank-title {
   font-size: 12px;
   font-weight: 700;
   color: var(--muted);
   margin: 10px 0 4px;
 }
 
-.insight-rank {
+.chat-insight-rank {
   list-style: none;
   margin: 0;
   padding: 0;
@@ -573,7 +689,7 @@
   gap: 4px;
 }
 
-.insight-rank li {
+.chat-insight-rank li {
   display: flex;
   justify-content: space-between;
   gap: 10px;
@@ -581,11 +697,11 @@
   padding: 3px 0;
   font-size: 12.5px;
 }
-.insight-rank li:last-child { border-bottom: none; }
-.insight-rank-label { font-weight: 600; }
-.insight-rank-num { color: var(--muted); font-size: 12px; text-align: right; }
+.chat-insight-rank li:last-child { border-bottom: none; }
+.chat-insight-rank-label { font-weight: 600; }
+.chat-insight-rank-num { color: var(--muted); font-size: 12px; text-align: right; }
 
-.insight-facts {
+.chat-insight-facts {
   list-style: none;
   margin: 0;
   padding: 0;
@@ -595,20 +711,72 @@
   font-size: 12.5px;
 }
 
-.insight-table {
+.chat-insight-table {
   width: 100%;
   border-collapse: collapse;
   font-size: 12px;
 }
 
-.insight-table th,
-.insight-table td {
+.chat-insight-table th,
+.chat-insight-table td {
   border-bottom: 1px solid var(--border);
   padding: 4px 6px;
   text-align: left;
   word-break: break-all;
 }
 
-.insight-table th { color: var(--muted); font-weight: 600; }
+.chat-insight-table th { color: var(--muted); font-weight: 600; }
 
-.insight-note { font-size: 11.5px; margin: 8px 0 0; }
+.chat-insight-note { font-size: 11.5px; margin: 8px 0 0; }
+
+/* ---------- 结论卡内证据本折叠 / 言论土壤卡内报告折叠 ----------
+   两者都复用 .chat-evidence-fold/.chat-ev-list 的折叠排版，这里只补
+   链接与正文的细节（证据链接可点、报告正文等宽换行不撑破卡片）。 */
+.chat-card-evidence { margin-top: 10px; }
+.chat-card-evidence .chat-ev-list a { color: var(--primary); text-decoration: none; }
+.chat-card-evidence .chat-ev-list a:hover { text-decoration: underline; }
+
+.chat-card-report { margin-top: 10px; }
+
+/* ---------- 证据研究卡（collect_evidence：只读取证三技能） ----------
+   与结论卡内的 .chat-card-evidence（证据本折叠）是两回事，类名刻意分开。
+   排版口径：主张逐条分组、引文逐字 blockquote、信源分已核验/未核验两级。 */
+.chat-card-evresearch { font-size: 12.5px; line-height: 1.8; }
+.chat-ev-claims { list-style: none; margin: 8px 0 0; padding: 0; }
+.chat-ev-claim { margin: 10px 0 0; padding-top: 8px; border-top: 1px dashed var(--border); }
+.chat-ev-claim:first-child { border-top: none; padding-top: 0; }
+.chat-ev-claim > b { color: var(--primary-dark); margin-right: 6px; }
+.chat-ev-claim > span { font-weight: 600; }
+.chat-ev-quote {
+  margin: 5px 0;
+  padding: 5px 10px;
+  border-left: 3px solid var(--primary);
+  background: var(--primary-soft);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.8;
+  word-break: break-word;
+}
+.chat-ev-src-title { font-weight: 600; margin-top: 10px; }
+
+.chat-report-text {
+  margin: 6px 0 0;
+  padding: 10px 12px;
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.9;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+/* ---------- 窄屏补充：快捷 chips 与算热度面板铺满 ---------- */
+@media (max-width: 900px) {
+  .chat-quick-row { padding: 8px 12px 0; }
+  .chat-quick-panel { margin: 8px 12px 0; }
+  .chat-heat-fields { grid-template-columns: 1fr; }
+}

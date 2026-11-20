@@ -36,6 +36,12 @@ from mylocalai.util import console_io
 from mylocalai.llm import llm_cache
 from mylocalai.llm import llm_client
 
+#: 预算比较的浮点容差（秒）。`remaining_seconds()` = (monotonic()+预算) - monotonic()，
+#: 粗粒度单调时钟 + 大绝对值会让 0.3 变成 0.3000000000029104（实测）。该误差比
+#: Windows 时钟粒度（约 15.6ms）小 10 个数量级，用 1e-6 容差只吃掉浮点噪声，
+#: 不放宽"尝试超时不得超过剩余预算"的契约强度。
+_BUDGET_FLOAT_TOL = 1e-6
+
 
 def _write_json(data, name="case.json"):
     path = ROOT / ".tmp" / "verify" / "p0_tests" / name
@@ -144,13 +150,16 @@ class TestCacheAndBudget(unittest.TestCase):
     def test_attempt_timeout_never_exceeds_the_remaining_budget(self):
         """P0-4：单次尝试超时不能突破剩余预算（原下限写死 1.0s）。
 
-        断言带浮点容差：剩余预算由 `at - time.monotonic()` 相减得出，
-        monotonic 基数越大（机器开机越久），0.3s 的表示误差可达 1e-12 量级，
-        严格 `<= 0.3` 会在长开机机器上误报。容差不放松语义（1e-9 秒）。
+        容差说明：remaining_seconds() 是 `(monotonic()+预算) - monotonic()` 两次大数
+        相减，误差随开机时长增长——monotonic 基数越大（机器开机越久），0.3s 的表示
+        误差越大；Windows 的 monotonic 还是粗粒度时钟（约 15.6ms 一跳）。实测 0.3
+        会被抬成 0.3000000000029104：这个误差比时钟粒度小十个数量级，不代表预算被
+        突破，故比较时给 _BUDGET_FLOAT_TOL（1e-6）容差——只吃浮点噪声，不放松
+        "不得超预算"的契约，断言的实际强度不变。
         """
         with llm_cache.deadline_scope(0.3):
             timeout = llm_cache.attempt_timeout(30.0)
-        self.assertLessEqual(timeout, 0.3 + 1e-9)
+        self.assertLessEqual(timeout, 0.3 + _BUDGET_FLOAT_TOL)
         self.assertGreater(timeout, 0.0)
 
     def test_attempt_timeout_floor_is_configurable(self):
@@ -167,7 +176,7 @@ class TestCacheAndBudget(unittest.TestCase):
         """P0-4：预算已用尽时等待者不再空等 30s。"""
         self.assertEqual(llm_cache._wait_budget(), 120.0, "未设预算时的兜底")
         with llm_cache.deadline_scope(0.05):
-            self.assertLessEqual(llm_cache._wait_budget(), 0.05 + 1e-9)
+            self.assertLessEqual(llm_cache._wait_budget(), 0.05 + _BUDGET_FLOAT_TOL)
             self.assertGreaterEqual(llm_cache._wait_budget(), 0.0)
 
 

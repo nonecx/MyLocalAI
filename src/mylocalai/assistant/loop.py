@@ -39,13 +39,15 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from mylocalai.llm import llm_cache
 from mylocalai.assistant import router as router_mod
-from mylocalai.assistant import tools_chapters, tools_heat, tools_memory, tools_verify
+from mylocalai.assistant import (tools_chapters, tools_evidence, tools_heat, tools_insights,
+                                 tools_memory, tools_verify)
 from mylocalai.assistant.context import build_context
 from mylocalai.assistant.events import EventStream
 from mylocalai.assistant.fingerprint import DEFAULT_SHINGLE_SIZE
-from mylocalai.assistant.registry import MAX_TEXT_LENGTH, ToolRegistry
+from mylocalai.assistant.registry import (MAX_TEXT_LENGTH, ToolNotAllowed, ToolRegistry,
+                                          ValidationError)
 
-__all__ = ["AssistantLoop"]
+__all__ = ["AssistantLoop", "action_payload"]
 
 #: 分句假流式（§5.5）：按中英文句读切 delta，llm_client 零改动。
 _SENTENCE_RE = re.compile(r"[^。！？!?…\n]*[。！？!?…\n]+|[^。！？!?…\n]+$")
@@ -66,6 +68,10 @@ _CARD_TYPE = {
     "verify_claim": "conclusion", "recheck_dossier": "conclusion", "get_dossier": "conclusion",
     "analyze_speech": "speech",
     "check_heat": "heat", "compute_heat": "heat",
+    # L4 参谋：一张卡三种子视图（kind=patterns/sources/weekly 由卡片字段自带）
+    "insights": "insights",
+    # 取证三技能流水线（collect_evidence）：evidence 卡，前端 cards.js renderEvidence
+    "collect_evidence": "evidence",
 }
 
 _ARGS_PREVIEW_WIDTH = 60
@@ -425,6 +431,54 @@ def _real_service(name: str, rules: Dict[str, Any],
                                 **ev_arg, **sig_arg, **hist_arg)
         return _deep_read
 
+    if name == "evidence_skills":
+        def _evidence_skills():
+            from mylocalai.assistant.skills import EvidenceSkills
+            from mylocalai.assistant.skills.pipeline import load_rules
+            from mylocalai.assistant.skills.transport import default_transport
+            from mylocalai.core.privacy import load_preferences
+            from mylocalai.llm import llm_client
+
+            cfg = (rules or {}).get("skills_model") or {}
+
+            def _llm(system, user):
+                return llm_client.chat_json(system, user,
+                    temperature=float(cfg.get("temperature", 0)),
+                    max_tokens=int(cfg.get("max_tokens", 800)),
+                    namespace=str(cfg.get("cache_namespace", "assistant_skills")))
+
+            def _search(query, k=6):
+                # 外发授权门（总览 §5.4）：consent 未开 = 如实降级记 search_unavailable，
+                # 不当"搜过了没找到"；engines 全败同理（网络故障不是空结果）。
+                if not load_preferences().external_allowed("public-search"):
+                    return {"results": [], "degraded": True,
+                            "error": "consent_denied: 外部检索未授权"}
+                from mylocalai.retrieval.search import search_all
+                raw = search_all(str(query), k=k)
+                engines = raw.get("engines") or {}
+                error = str(raw.get("error") or "")
+                degraded = (bool(raw.get("blocked")) or bool(error)
+                            or not any((e or {}).get("ok") for e in engines.values()))
+                if degraded and not error:
+                    error = "检索后端均不可用"
+                # search_all 给的是 SearchResult 对象，pipeline 的 search_fn 契约要 dict
+                # （url/title/snippet）——不过这一层，全部结果会被当成坏形状静默丢弃。
+                rows = [r.to_dict() if hasattr(r, "to_dict") else r
+                        for r in (raw.get("results") or [])]
+                return {"results": rows, "degraded": degraded,
+                        "error": error, "engines": engines}
+            transport = default_transport()
+
+            def _fetch(url, *, allowed_domains=None, cancel_check=None, deadline=None):
+                if not load_preferences().external_allowed("public-web"):
+                    return {"status": "error", "category": "consent_denied",
+                            "detail": "外部取页未授权", "url": url, "final_url": ""}
+                return transport.fetch(url, allowed_domains=allowed_domains,
+                                       cancel_check=cancel_check, deadline=deadline)
+            return EvidenceSkills(rules=load_rules(), search_fn=_search,
+                                  fetch_fn=_fetch, llm_fn=_llm)
+        return _evidence_skills
+
     if name == "route_llm":
         cfg = (rules or {}).get("route_model") or {}
 
@@ -472,6 +526,26 @@ def _pkg_json(name: str) -> Dict[str, Any]:
         return {}
 
 
+def action_payload(action: Any) -> Tuple[str, Dict[str, Any]]:
+    """结构化 action 的载荷形状校验：返回 (name, args)；形状非法抛 ValidationError。
+
+    只校验形状（name 非空字符串 + args 是对象，缺省 {}），不查注册表——web 层在
+    拿到 loop 之前先用它把明显坏掉的请求挡成 400（形状检查不需要任何装配成本）。
+    多余的键一律忽略（与 registry.validate"只保留声明参数"同一口径）。
+    """
+    if not isinstance(action, dict):
+        raise ValidationError("action 必须是 {name, args} 对象")
+    name = action.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise ValidationError("action.name 必须是非空字符串")
+    args = action.get("args")
+    if args is None:
+        args = {}
+    if not isinstance(args, dict):
+        raise ValidationError("action.args 必须是对象")
+    return name.strip(), dict(args)
+
+
 class AssistantLoop:
     """一回合对话的编排器：路由 → 工具 → 叙述 → 落库，全部依赖可注入。"""
 
@@ -512,6 +586,13 @@ class AssistantLoop:
             # M3 章节类工具（read_opinions/deep_read，§5.2 M3-3/M3-5）进缺省注册表——
             # 路由枚举（router.TOOL_ACTIONS）与 allowlist 已同步补两项。
             tools_chapters.register_all(reg, None)
+            # L4 参谋工具（insights）：只读零 LLM 的画像/周报视图，路由枚举与
+            # allowlist 同步补 "insights"。
+            tools_insights.register_all(reg, None)
+            # 取证三技能流水线（collect_evidence）：只读取证工具——把原文拆成主张、
+            # 逐个去已核验信源找可定位引文，不建档、不出真假分（铁律：不扩权）。
+            # 路由枚举与 allowlist 同步补 "collect_evidence"。
+            tools_evidence.register_all(reg, None)
             self._registry = reg
         return self._registry
 
@@ -539,16 +620,24 @@ class AssistantLoop:
 
     def handle(self, session_id: int, user_text: str,
                events: Optional[EventStream] = None,
-               cancel_check: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
+               cancel_check: Optional[Callable[[], bool]] = None,
+               action: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """处理一回合对话。永不抛异常：任何未捕获异常都折成 error 事件收尾。
 
         轮预算（§8）：进入即以 deadline_scope_at 设定本回合总时限（环境变量
         CHAT_TURN_DEADLINE_S 优先，缺省 rules["turn_deadline_s"]=180；<=0 不限），
         下游 RumorAgent/classic/LLM 链路经 llm_cache.deadline_at() 自动继承
         （与 JUDGE_DEADLINE_S 同一机制：嵌套 scope 取更紧者）。
+
+        action（可选，x/y/z 精确输入通道）：{"name": str, "args": dict}。合法时跳过
+        路由 LLM，直接走既有"工具→卡片→叙述→落库"流水线。**非法立即抛给调用方**
+        （ValidationError/ToolNotAllowed；web 层转 400）——不走"永不抛"的降级路径：
+        本通道的调用方是可信前端，把非法输入折成 error 事件会让前端不知道请求没生效。
         """
         if events is None:
             events = EventStream()
+        # 校验放在 try 之前：非法 action 必须抛给调用方，不得被外层兜底折成 error 事件
+        action_plan = self.resolve_action(action) if action is not None else None
         result: Dict[str, Any] = {"session_id": session_id, "reply": "", "action": "",
                                   "card": None, "tool_run_id": None, "dossier_id": None,
                                   "degraded": False, "cost": {"requests": 0, "tokens": 0}}
@@ -556,7 +645,8 @@ class AssistantLoop:
         at = time.monotonic() + budget if budget is not None else None
         try:
             with llm_cache.deadline_scope_at(at):
-                self._turn(int(session_id), str(user_text or ""), events, cancel_check, result)
+                self._turn(int(session_id), str(user_text or ""), events, cancel_check, result,
+                           action_plan=action_plan)
         except Exception as exc:  # noqa: BLE001  最外层防线：会话不崩
             try:
                 events.emit("error", code="internal", recoverable=False,
@@ -619,6 +709,35 @@ class AssistantLoop:
             return {"kind": "meta", "action": res["action"],
                     "reply": res.get("reply", ""), "error": res.get("error", "")}
         return {"kind": "tools", "steps": [{"action": res["action"], "args": res.get("args", {})}]}
+
+    def resolve_action(self, action: Any) -> Dict[str, Any]:
+        """把结构化 action 校验成执行计划（合法即"跳过路由 LLM"的精确输入通道）。
+
+        与 router.route 的降级哲学刻意相反：调用方是本地可信前端（web 的 POST
+        /api/chat 会在 SSE 开始前调用本方法），非法必须**抛给调用方**（web 转 400），
+        不能折成 clarify、更不能猜一个工具——精确输入通道的价值就是"要么照办、
+        要么明确报错"。
+
+        放行条件（三道闸全过，顺序与路由防护链一致）：
+          ① 已注册（ToolNotAllowed）；
+          ② 在 rules["tool_allowlist"]（ToolNotAllowed）；
+          ③ permission == "read"（ToolNotAllowed）——写工具（verify_claim /
+             analyze_speech / check_heat / recheck_dossier / read_opinions / deep_read）
+             一律拒绝：写档案必须经"自然语言 → 路由 → 拒绝词表"的正常对话路径，
+             action 通道不提供绕过（测试锁定这一条）。
+        参数最后过 registry.validate 规整（只保留声明过的键，越界抛 ValidationError）。
+        """
+        name, args = action_payload(action)
+        allowlist = [str(a) for a in (self.rules.get("tool_allowlist") or [])]
+        spec = self.registry.get(name)
+        if spec is None:
+            raise ToolNotAllowed(f"未注册的工具: {name}")
+        if name not in allowlist:
+            raise ToolNotAllowed(f"工具不在允许清单: {name}")
+        if str(spec.get("permission")) != "read":
+            raise ToolNotAllowed(f"结构化 action 只允许只读工具，拒绝写工具: {name}")
+        clean = self.registry.validate(name, args)
+        return {"kind": "tools", "steps": [{"action": name, "args": clean}]}
 
     # ---- 路由上下文（§5.4 ②：活跃档案卡 + 最近对话摘要） ----
 
@@ -821,7 +940,9 @@ class AssistantLoop:
             pass
 
     def _turn(self, session_id: int, user_text: str, events: EventStream,
-              cancel_check: Optional[Callable[[], bool]], result: Dict[str, Any]) -> None:
+              cancel_check: Optional[Callable[[], bool]], result: Dict[str, Any],
+              action_plan: Optional[Dict[str, Any]] = None) -> None:
+        """单回合实现。action_plan 非 None 时跳过路由，直接执行调用方指定的工具计划。"""
         rules, prompts = self.rules, self.prompts
         sessions, dossiers, services = self.sessions, self.dossiers, self.services
         cost = result["cost"]
@@ -851,46 +972,57 @@ class AssistantLoop:
         #     最后一条 system_note）。拒绝预检命中时不旁过（安全闸最优先）。
         plan: Optional[Dict[str, Any]] = None
         skip_fp = False
-        pending = self._pending_fingerprint(session_id)   # 只读探测，拒绝预检仍最优先
-        if refusal is None:
-            if pending is not None:
-                intent = self._fingerprint_intent(user_text)
-                did = int(pending.get("dossier_id") or 0)
-                if intent == "reuse" and did > 0:
-                    plan = {"kind": "tools",
-                            "steps": [{"action": "get_dossier", "args": {"id": did}}]}
-                elif intent == "recheck" and did > 0:
-                    text = self._dossier_text(did)
-                    if text:
+        pending: Optional[Dict[str, Any]] = None
+        if action_plan is not None:
+            # ②''' 结构化 action（x/y/z 精确输入：调用方已给定工具与参数）→ 跳过拒绝
+            #      预检、指纹待决与路由 LLM 三步，直接进既有"工具→卡片→叙述→落库"
+            #      流水线。可以跳过拒绝预检的理由：那道闸拦的是经"自然语言 → 路由模型"
+            #      通道混进来的越权/篡改指令，而本通道由 resolve_action 结构性地只放行
+            #      只读工具（写工具/未注册工具直接抛错）；user_text 只是前端附上的人类
+            #      可读说明，不该再被当成用户意图解析一遍。
+            plan = action_plan
+        else:
+            pending = self._pending_fingerprint(session_id)   # 只读探测，拒绝预检仍最优先
+            if refusal is None:
+                if pending is not None:
+                    intent = self._fingerprint_intent(user_text)
+                    did = int(pending.get("dossier_id") or 0)
+                    if intent == "reuse" and did > 0:
                         plan = {"kind": "tools",
-                                "steps": [{"action": "verify_claim", "args": {"text": text}}]}
-                        skip_fp = True   # 用户已表态重查：本回合跳过指纹检查（防死循环）
-                if plan is not None:
-                    sessions.add_message(session_id, "system_note",
-                                         f"{_FP_RESOLVED_PREFIX} dossier_id={did}"
-                                         f" action={intent}", kind="text")
+                                "steps": [{"action": "get_dossier", "args": {"id": did}}]}
+                    elif intent == "recheck" and did > 0:
+                        text = self._dossier_text(did)
+                        if text:
+                            plan = {"kind": "tools",
+                                    "steps": [{"action": "verify_claim",
+                                               "args": {"text": text}}]}
+                            skip_fp = True   # 用户已表态重查：本回合跳过指纹检查（防死循环）
+                    if plan is not None:
+                        sessions.add_message(session_id, "system_note",
+                                             f"{_FP_RESOLVED_PREFIX} dossier_id={did}"
+                                             f" action={intent}", kind="text")
 
-        if refusal is not None:
-            # 预检是纯词表子串匹配（零 LLM 成本）；拒绝不进路由模型
-            plan = {"kind": "refusal", "reply": refusal["reply"], "error": ""}
-        elif plan is None:
-            # M4 真实计数：路由段成本 = 计数器 delta；快照不可用退粗口径（+1 次咨询尝试）
-            route_base = _usage_now()
-            history_hint, last_dossier_id = self._route_context(session_id, history)
-            plan = self._route_plan(user_text, history_hint=history_hint,
-                                    id_fallback=last_dossier_id)
-            _add_usage_delta(cost, route_base, fallback_requests=1)
+            if refusal is not None:
+                # 预检是纯词表子串匹配（零 LLM 成本）；拒绝不进路由模型
+                plan = {"kind": "refusal", "reply": refusal["reply"], "error": ""}
+            elif plan is None:
+                # M4 真实计数：路由段成本 = 计数器 delta；快照不可用退粗口径（+1 次咨询尝试）
+                route_base = _usage_now()
+                history_hint, last_dossier_id = self._route_context(session_id, history)
+                plan = self._route_plan(user_text, history_hint=history_hint,
+                                        id_fallback=last_dossier_id)
+                _add_usage_delta(cost, route_base, fallback_requests=1)
 
-        if pending is not None and plan.get("kind") != "tools":
-            # 复核修复（M3 P2-2）：待决只对**紧随的下一轮**生效。本回合没有被消费
-            # （没表态/表态但档案已删/拒绝预检命中）→ 立即落 [指纹已决] 关闭劫持窗口——
-            # 否则此后任意含"重查/秒回"字样的消息都会被陈年待决旁过、当前请求被静默
-            # 丢弃。问句与档案卡仍在对话上下文里，用户之后换种说法总能经正常路由
-            # 拿到同样结果。
-            sessions.add_message(session_id, "system_note",
-                                 f"{_FP_RESOLVED_PREFIX} dossier_id="
-                                 f"{int(pending.get('dossier_id') or 0)}"
-                                 f" action=expired", kind="text")
+            if pending is not None and plan.get("kind") != "tools":
+                # 复核修复（M3 P2-2）：待决只对**紧随的下一轮**生效。本回合没有被消费
+                # （没表态/表态但档案已删/拒绝预检命中）→ 立即落 [指纹已决] 关闭劫持窗口——
+                # 否则此后任意含"重查/秒回"字样的消息都会被陈年待决旁过、当前请求被静默
+                # 丢弃。问句与档案卡仍在对话上下文里，用户之后换种说法总能经正常路由
+                # 拿到同样结果。
+                sessions.add_message(session_id, "system_note",
+                                     f"{_FP_RESOLVED_PREFIX} dossier_id="
+                                     f"{int(pending.get('dossier_id') or 0)}"
+                                     f" action=expired", kind="text")
 
         if plan["kind"] == "refusal":
             events.emit("meta", session_id=session_id, run_id=None)

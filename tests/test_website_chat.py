@@ -389,8 +389,9 @@ class TestChatFrontendConsistency(unittest.TestCase):
         self.assertEqual(missing, [], f"chat.css 缺少定义：{missing}")
 
     def test_cards_renderers_and_honesty_markers(self):
-        """cards.js 三个渲染器齐全，且 as_of / 降级 / 代理 / verdict_basis 口径都在。"""
-        for fn in ("renderConclusion", "renderSpeech", "renderHeat", "renderCard"):
+        """cards.js 四个渲染器齐全（含单页化的 renderInsights），as_of / 降级 / 代理 / verdict_basis 口径都在。"""
+        for fn in ("renderConclusion", "renderSpeech", "renderHeat", "renderInsights",
+                   "renderCard"):
             self.assertIn(f"function {fn}", self.cards_js, f"cards.js 缺少 {fn}")
         self.assertIn("window.ChatCards", self.cards_js)
         for marker in ("as_of", "降级", "代理", "verdict_basis", "置信度",
@@ -414,28 +415,40 @@ class TestChatFrontendConsistency(unittest.TestCase):
         self.assertIn("本轮没有足够的已核验材料形成完整判断", self.cards_js)
 
     def test_index_references_chat_assets_exist(self):
-        """index.html 引用的 chat.js / cards.js / chat.css 文件都存在，双 Tab 就位。"""
-        for ref in ("static/chat.js", "static/cards.js", "static/chat.css"):
+        """单页对话结构：index.html 引用 shell.js/cards.js/chat.js/chat.css 且文件都在。"""
+        for ref in ("static/shell.js", "static/cards.js", "static/chat.js", "static/chat.css"):
             self.assertIn(ref, self.html, f"index.html 未引用 {ref}")
             self.assertTrue((STATIC / Path(ref).name).exists(), f"文件不存在：{ref}")
-        # 对话为默认 Tab：chat 按钮带 active，chatTab 容器不带 hidden；工具模式带 hidden
-        self.assertIn('data-tab="chat"', self.html)
-        self.assertLess(self.html.index('class="top-tab active" data-tab="chat"'),
-                        self.html.index('data-tab="tools"'))
-        self.assertRegex(self.html, r'id="chatTab" class="chat-tab">')
-        self.assertIn('class="layout hidden" id="toolsTab"', self.html)
-        # 左栏：会话列表 + 档案库入口
+        # 单页化：Tab 切换容器与旧前端脚本全部下线（旧三 Tab 结构不再存在）
+        self.assertNotIn("data-tab=", self.html, "index.html 仍有旧 Tab 切换按钮")
+        for old in ('id="toolsTab"', 'id="chatTab"', "static/app.js", "static/insights.js"):
+            self.assertNotIn(old, self.html, f"index.html 仍残留旧前端标记：{old}")
+        # 主结构：单页对话布局 → 左栏（会话/档案库/我的画像）+ 主列（消息流 + composer）
+        self.assertIn('<main class="chat-layout">', self.html)
         for marker in ('id="chatSessionList"', 'id="chatNewSession"',
-                       'id="chatDossierList"', 'id="chatDossierCount"'):
-            self.assertIn(marker, self.html, f"页面缺少对话左栏组成：{marker}")
+                       'id="chatDossierList"', 'id="chatDossierCount"',
+                       'id="chatInsights"', 'id="chatMessages"',
+                       'id="chatError"', 'id="chatInput"', 'id="chatSendBtn"'):
+            self.assertIn(marker, self.html, f"页面缺少单页对话组成：{marker}")
+        # 「关于系统」面板迁到 header 弹层，不再占右栏
+        for marker in ('id="aboutBtn"', 'id="aboutDialog"', 'id="aboutCloseBtn"'):
+            self.assertIn(marker, self.html, f"页面缺少关于弹层组成：{marker}")
 
     def test_chatjs_element_ids_exist_in_html(self):
-        """chat.js $("#chatXxx") / $("#topTabs") 引用的每个 id 在 index.html 里都有。"""
-        used = set(re.findall(r'\$\("#([A-Za-z][\w]*)"\)', self.chat_js))
-        used |= set(re.findall(r'querySelector\("#([A-Za-z][\w]*)"\)', self.chat_js))
+        """chat.js 的 $("#id") / querySelector[All]("#id") 引用的每个 id 在 index.html 里都有。"""
+        used = set(re.findall(r'\$\("#([A-Za-z][\w]*)', self.chat_js))
+        used |= set(re.findall(r'querySelector(?:All)?\("#([A-Za-z][\w]*)', self.chat_js))
         self.assertTrue(used, "chat.js 里没引用任何元素 id")
         missing = sorted(i for i in used if f'id="{i}"' not in self.html)
         self.assertEqual(missing, [], f"chat.js 引用了 HTML 里不存在的元素 id: {missing}")
+        # 核心接线点逐个点名：漏一个页面就是半残（这些 id 全由 chat.js 读写）
+        for core in ("chatMessages", "chatError", "chatInput", "chatSendBtn",
+                     "chatCancelBtn", "chatCharCount", "chatNewSession",
+                     "chatSessionList", "chatDossierList", "chatDossierCount",
+                     "chatInsights", "chatHeatChip", "chatHeatPanel",
+                     "chatHeatX", "chatHeatY", "chatHeatZ",
+                     "chatHeatCalc", "chatHeatReset"):
+            self.assertIn(core, used, f"chat.js 未接线 {core}（或接线方式换了，测试需同步）")
 
     def test_build_assistant_loop_contract(self):
         """解耦点自检：不注入时返回 None（loop 未落地）或带 handle 的对象，绝不抛。"""
@@ -443,17 +456,28 @@ class TestChatFrontendConsistency(unittest.TestCase):
         loop = build_assistant_loop()
         self.assertTrue(loop is None or callable(getattr(loop, "handle", None)))
 
-    def test_old_frontend_contract_untouched(self):
-        """旧前端契约不动：app.js 与其 API 清单、style.css 引用原样保留。"""
-        app_js = _read(STATIC / "app.js")
-        for path in ("/api/analyze", "/api/history", "/api/health"):
-            self.assertIn(f'"{path}"', app_js)
-        self.assertIn('href="static/style.css"', self.html)
-        self.assertIn('<script src="static/app.js"></script>', self.html)
-        # 工具模式 Tab 里的旧内容原样在位
+    def test_old_frontend_contract_moved_to_shell_js(self):
+        """旧 app.js 的页面外壳职责迁到 shell.js：健康检查 + 关于弹层；旧文件/旧 DOM 已删除。"""
+        shell_js = _read(STATIC / "shell.js")
+        # 1) 服务状态 chip 的健康检查（原 app.js API.health 的等价职责）
+        self.assertIn('health: "/api/health"', shell_js)
+        self.assertIn('$("#apiStatus")', shell_js)
+        self.assertIn('id="apiStatus"', self.html)
+        # 2) 关于弹层（原「关于系统」右栏面板 → header 弹层）
+        self.assertIn('$("#aboutDialog")', shell_js)
+        self.assertIn('$("#aboutBtn")', shell_js)
+        for marker in ('id="aboutBtn"', 'id="aboutDialog"', 'id="aboutCloseBtn"'):
+            self.assertIn(marker, self.html, f"页面缺少关于弹层组成：{marker}")
+        # 3) 样式表引用原样保留（style.css + chat.css 都还在）
+        for href in ('href="static/style.css"', 'href="static/chat.css"'):
+            self.assertIn(href, self.html)
+        # 4) 旧前端文件必须真的删除（不能留一份没被引用的死代码）
+        for name in ("app.js", "insights.js"):
+            self.assertFalse((STATIC / name).exists(), f"应当删除的旧前端文件仍在：{name}")
+        # 5) 旧工具模式 Tab 的 DOM（关注度独立面板 / 分析页）不再残留
         for marker in ('id="attentionPanel"', 'id="attnTabs"', 'id="inputText"',
-                       'id="analyzeBtn"', 'id="historyList"'):
-            self.assertIn(marker, self.html)
+                       'id="analyzeBtn"', 'id="historyList"', 'static/app.js'):
+            self.assertNotIn(marker, self.html, f"index.html 仍残留旧前端标记：{marker}")
 
 
 if __name__ == "__main__":

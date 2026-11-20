@@ -29,6 +29,11 @@ _FALLBACK_COMPONENT_TOTAL = 6
 
 _EVIDENCE_PREVIEW = 5   # digest/卡片展开里证据本最多带前 5 条（§2.2 三层信息架构）
 
+#: 言论分析卡里 classic 完整报告的展示上限：超过即截断并标 report_truncated=True。
+#: 与 registry.MAX_TEXT_LENGTH 数值相同但语义不同（那是输入上限、这是输出展示上限），
+#: 故单独定义——将来任一侧调整时不至于互相牵动。
+_REPORT_MAX_CHARS = 8000
+
 
 def query_param(value: Any) -> str:
     """search_web 的必填检索词（与 topic 同一长度上限口径：≤200 字）。"""
@@ -220,6 +225,12 @@ def _verify_claim(ctx: Any, text: str, deep: bool = False) -> Dict[str, Any]:
     dossier_id = _start_dossier(ctx, str(text), claim_excerpt=claim_excerpt)
     rec = _record(ctx, dossier_id, result, kind="verify", duration_s=duration, requests=requests)
     card = rec.get("card")
+    if isinstance(card, dict):
+        # 卡片展开层（前端折叠展示用）：证据本前 5 条紧凑视图 + 总条数。只增展示字段，
+        # 不改 core/card.py 纯函数的打分语义（卡片打分字段仍全是确定性派生）。
+        card = dict(card)
+        card["evidence_preview"] = _evidence_preview(result)
+        card["evidence_total"] = _evidence_count(result)
     store_failed = bool(rec.get("degraded"))
     not_saved = dossier_id is None
     claim_answer = _legacy_claim_answer(str(text), result)
@@ -287,6 +298,13 @@ def _analyze_speech(ctx: Any, text: str) -> Dict[str, Any]:
             "as_of": str((rec.get("card") or {}).get("as_of", "")),
             "degraded": degraded}
     card.update(dims)
+    # classic 完整报告（前端折叠展开层）：报告是整段文本，超过展示上限就截断并如实
+    # 标注 report_truncated=True——截断要看得见，不能让前端以为这就是全文。
+    report = str(result.get("report") or "")
+    if len(report) > _REPORT_MAX_CHARS:
+        report = report[:_REPORT_MAX_CHARS]
+        card["report_truncated"] = True
+    card["report"] = report
 
     lines = ["[言论土壤]", f"- 四档结论：{result.get('conclusion', '')}（core/tiering 确定性分层）"]
     e = dims.get("emotion") or {}

@@ -1,0 +1,478 @@
+/* ============================================================
+   settings.css —— 设置弹层（模型管理）样式
+   与 style.css / chat.css 共存：不改它们，只新增 settings-* 类；
+   设计令牌全部复用 style.css 的 :root 变量（--primary/--panel/--border/
+   --muted/--danger/--good/--warn/--shadow…），保持浅色工具风，
+   不另起一套配色。布局：遮罩 + 居中大卡片 = 头部 + [左栏导航 | 内容区]。
+   ============================================================ */
+
+/* ---------- 顶栏入口按钮（与「关于」同级，尺寸对齐 .about-open-btn） ---------- */
+.settings-open-btn { font-size: 13px; padding: 6px 14px; }
+
+/* ---------- 遮罩 + 卡片 ---------- */
+.settings-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 60;                     /* 高于 .about-dialog(50)：设置弹层是更重的上下文 */
+  background: rgba(16, 24, 40, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 22px;
+}
+
+.settings-dialog-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 12px 32px rgba(16, 24, 40, 0.18);
+  width: min(1080px, 100%);
+  height: min(86vh, 900px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.settings-head h2 { font-size: 16px; }
+.settings-head p { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.settings-close-btn { font-size: 13px; padding: 5px 14px; }
+
+/* ---------- 主体：左栏导航 + 右栏内容 ---------- */
+.settings-body {
+  display: grid;
+  grid-template-columns: 152px minmax(0, 1fr);
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.settings-nav {
+  border-right: 1px solid var(--border);
+  background: #fafbfc;
+  padding: 12px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.settings-nav-title {
+  font-size: 11.5px;
+  color: var(--muted);
+  padding: 2px 8px 6px;
+  letter-spacing: 0.4px;
+}
+
+.settings-nav-item {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.settings-nav-item:hover { background: var(--primary-soft); color: var(--primary-dark); }
+.settings-nav-item.active {
+  background: var(--panel);
+  border-color: var(--primary-border);
+  color: var(--primary-dark);
+  font-weight: 600;
+  box-shadow: var(--shadow);
+}
+
+.settings-main {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  padding: 12px 16px 16px;
+}
+
+/* ---------- 状态区（成功 / 告警 / 错误，错误里带后端 detail 原文） ---------- */
+.settings-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--muted);
+  border-radius: 9px;
+  padding: 8px 12px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  margin-bottom: 10px;
+  flex: 0 0 auto;
+  /* 长 detail 不撑破弹层：允许换行，纵向限高后可滚动 */
+  word-break: break-word;
+  max-height: 110px;
+  overflow-y: auto;
+}
+.settings-status-icon { font-weight: 700; flex: 0 0 auto; }
+.settings-status-text { flex: 1 1 auto; }
+.settings-status.ok { background: #ecf9f0; border-color: #cdeed8; color: var(--good); }
+.settings-status.warn { background: #fff7ed; border-color: #fed7aa; color: var(--warn); }
+.settings-status.error { background: #fdeeec; border-color: #f6cdc7; color: var(--danger); }
+.settings-status.busy { background: var(--primary-soft); border-color: var(--primary-border); color: var(--primary-dark); }
+
+/* ---------- 内容容器 ---------- */
+.settings-pane {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 载入期 / 空列表提示 */
+.settings-empty {
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.8;
+  border: 1px dashed var(--border);
+  border-radius: 9px;
+  padding: 14px 12px;
+  text-align: center;
+}
+
+/* 配置读取告警（data/models.json 坏掉时后端 fail-soft 的告警原样展示） */
+.settings-notice {
+  border: 1px solid #fed7aa;
+  background: #fff7ed;
+  color: var(--warn);
+  border-radius: 9px;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.7;
+  margin-bottom: 10px;
+  flex: 0 0 auto;
+}
+.settings-notice ul { margin: 4px 0 0; padding-left: 18px; }
+
+/* ---------- 模型面板：提供方列表 | 详情 ---------- */
+.settings-models {
+  display: grid;
+  grid-template-columns: 244px minmax(0, 1fr);
+  gap: 14px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.settings-provider-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+  padding-right: 12px;
+}
+
+.settings-col-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.settings-col-head h3 { font-size: 13px; color: var(--muted); font-weight: 600; }
+
+.settings-provider-list {
+  list-style: none;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-right: 2px;
+}
+
+.settings-provider-row { list-style: none; }
+
+.settings-provider-btn {
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  border-radius: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  transition: border-color 0.15s, background 0.15s;
+}
+.settings-provider-btn:hover { border-color: var(--primary); background: var(--primary-soft); }
+.settings-provider-btn.active {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  box-shadow: inset 3px 0 0 var(--primary);
+}
+
+.settings-provider-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings-provider-id { font-size: 11.5px; color: var(--muted); word-break: break-all; }
+
+.settings-badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+.settings-badges .badge { font-size: 10.5px; padding: 1px 7px; font-weight: 600; }
+
+/* ---------- 右栏详情（可滚动） ---------- */
+.settings-detail-col {
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-right: 4px;
+}
+
+.settings-section {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: var(--panel);
+}
+
+.settings-section-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.settings-section-head h3 { font-size: 14px; }
+.settings-section-tools { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
+
+.settings-catalog-state {
+  font-size: 11.5px;
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 9px;
+  word-break: break-all;
+}
+
+/* ---------- 表单 ---------- */
+.settings-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px 12px;
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  min-width: 0;
+}
+.settings-field-label { font-size: 12px; color: var(--muted); font-weight: 600; }
+.settings-field-hint { font-size: 11px; color: #9ca3af; line-height: 1.6; word-break: break-word; }
+
+.settings-input {
+  border: 1px solid #dfe3ea;
+  border-radius: 8px;
+  padding: 7px 9px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--text);
+  background: var(--panel);
+  min-width: 0;
+  width: 100%;
+}
+.settings-input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(53, 97, 143, 0.12); }
+.settings-input-sm { padding: 5px 8px; font-size: 12.5px; }
+.settings-input-readonly { background: #f3f4f8; color: var(--muted); cursor: not-allowed; }
+.settings-input-invalid { border-color: var(--danger); background: #fdeeec; }
+
+.settings-checkbox { width: 14px; height: 14px; accent-color: var(--primary); cursor: pointer; flex: 0 0 auto; }
+
+.settings-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text);
+  cursor: pointer;
+}
+.settings-check-strong { font-weight: 600; }
+
+.settings-check-group { display: flex; gap: 14px; flex-wrap: wrap; }
+
+.settings-readonly {
+  font-size: 12.5px;
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 9px;
+  word-break: break-all;
+}
+
+/* ---------- 按钮修饰 ---------- */
+.settings-btn-sm { font-size: 12.5px; padding: 7px 14px; }
+.settings-mini-btn { font-size: 11.5px; padding: 4px 10px; border-radius: 8px; }
+
+.settings-danger-btn { color: var(--danger); border-color: #f6cdc7; }
+.settings-danger-btn:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); background: #fdeeec; }
+.settings-danger-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.settings-icon-btn {
+  font-size: 12px;
+  padding: 5px 9px;
+  line-height: 1.2;
+  color: var(--muted);
+  border-color: var(--border);
+}
+.settings-icon-btn:hover { color: var(--danger); border-color: #f6cdc7; background: #fdeeec; }
+
+.settings-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 10px;
+}
+
+/* ---------- 模型目录卡片 ---------- */
+.settings-model-list { display: flex; flex-direction: column; gap: 10px; }
+
+.settings-model-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #fcfcfd;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.settings-model-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px 10px;
+  align-items: end;
+}
+.settings-model-row-main {
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1.3fr) auto auto;
+  align-items: end;
+}
+.settings-model-row-tight {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+}
+
+/* ---------- 推理等级块 ---------- */
+.settings-model-reasoning {
+  border-top: 1px dashed var(--border);
+  padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-tier-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 8px 10px;
+}
+
+.settings-tier-row {
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+.settings-tier-row-off .settings-field-label,
+.settings-tier-row-off .settings-input { opacity: 0.62; }
+
+/* ---------- 获取可用模型结果（勾选清单） ---------- */
+.settings-discover { border-color: var(--primary-border); background: #fbfcfe; }
+
+.settings-discover-list {
+  list-style: none;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 8px;
+}
+.settings-discover-item { border-bottom: 1px dashed var(--border); padding: 4px 0; }
+.settings-discover-item:last-child { border-bottom: none; }
+.settings-discover-id { font-size: 12.5px; word-break: break-all; }
+.settings-discover-owner { font-size: 11px; color: var(--muted); margin-left: auto; }
+
+/* ---------- 竖向提示文案 ---------- */
+.settings-hint { font-size: 11.5px; color: var(--muted); line-height: 1.7; margin-top: 6px; }
+.settings-hint-warn { color: var(--warn); }
+
+.settings-link { color: var(--primary); font-size: 13px; text-decoration: none; }
+.settings-link:hover { text-decoration: underline; }
+
+.settings-privacy { display: flex; flex-direction: column; gap: 12px; }
+.settings-privacy p { font-size: 12.5px; line-height: 1.8; }
+
+/* ---------- 请求进行中：整层降噪 + 禁用误点 ---------- */
+.settings-dialog.settings-busy .settings-body { cursor: progress; }
+.settings-dialog.settings-busy .settings-detail-col,
+.settings-dialog.settings-busy .settings-provider-list { pointer-events: none; opacity: 0.72; }
+
+/* ---------- 键盘可达：统一焦点环（不用 :focus-visible 的浏览器也能看到） ---------- */
+.settings-dialog :focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+/* ---------- 窄屏：单列堆叠，弹层占满 ---------- */
+@media (max-width: 900px) {
+  .settings-dialog { padding: 8px; }
+  .settings-dialog-card { height: 92vh; }
+  .settings-body { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+  .settings-nav {
+    flex-direction: row;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    padding: 8px 10px;
+    overflow-x: auto;
+  }
+  .settings-nav-title { display: none; }
+  .settings-nav-item { white-space: nowrap; }
+  .settings-models { grid-template-columns: 1fr; }
+  .settings-provider-col {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    padding-right: 0;
+    padding-bottom: 8px;
+    max-height: 180px;
+  }
+  .settings-model-row-main { grid-template-columns: 1fr 1fr; }
+  .settings-tier-row { grid-template-columns: 1fr 1fr auto; }
+}
