@@ -266,6 +266,28 @@ class TestDegradeAndCancel(_RunnerTestBase):
         self.assertEqual(summary["status"], "cancelled")
         self.assertEqual(summary["counters"]["candidates"], 2)   # 已完成的保留
 
+    def test_watch_query_deleted_mid_scan_is_degraded_not_dedup(self):
+        """巡检中途删掉监控词：其余候选诚实跳过并记 degraded，
+        不许把外键冲突伪装成 deduped（冒烟测试抓到的真实 race）。"""
+        cands = [_cand(f"热门 {i}", f"https://news.example.com/{i}",
+                       snippet="阅读量 1200万") for i in range(3)]
+        provider = StubProvider(cands)
+        runner = self._runner(providers=[provider])
+        # 在 discover 返回前删掉监控词：模拟"巡检中途用户删词"的竞态
+        original_discover = provider.discover
+
+        def discover_then_delete(query, k):
+            for row in runner.store.list_watch_queries():
+                runner.store.delete_watch_query(row["id"])
+            return original_discover(query, k)
+
+        provider.discover = discover_then_delete
+        summary = runner.scan(queries=["热门"])
+        self.assertEqual(summary["counters"]["deduped"], 0)      # 不是去重
+        self.assertEqual(summary["counters"]["candidates"], 0)   # 候选全部跳过
+        self.assertGreaterEqual(summary["counters"]["degraded"], 1)
+        self.assertTrue(any("删除" in w for w in summary["warnings"]))
+
     def test_no_queries_completed_with_warning(self):
         runner = self._runner()
         summary = runner.scan()

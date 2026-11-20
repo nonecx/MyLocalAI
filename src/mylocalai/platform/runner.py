@@ -212,6 +212,13 @@ class PlatformRunner:
         for cand in kept:
             if _cancelled(cancel_check):
                 return True
+            # 巡检中途监控词可能被删（其下条目会级联消失）：诚实跳过其余候选，
+            # 记 degraded——不让外键冲突伪装成"去重"（冒烟测试抓到的真实 race）。
+            if persist and not self.store.watch_query_exists(query_id):
+                summary["counters"]["degraded"] += 1
+                summary["warnings"].append(
+                    f"监控词「{query[:40]}」在巡检中途被删除，其余候选已跳过")
+                return False
             self._process_candidate(query_id, cand, summary, persist, e_score,
                                     e_prev, growth, breadth, screen_e, state)
         return False

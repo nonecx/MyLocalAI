@@ -92,6 +92,13 @@ class TestWatchQueries(unittest.TestCase):
         self.assertFalse(self.store.set_watch_query_enabled(999, True))
         self.assertFalse(self.store.delete_watch_query(999))
 
+    def test_watch_query_exists(self):
+        qid = self.store.ensure_watch_query("话题A")
+        self.assertTrue(self.store.watch_query_exists(qid))
+        self.assertFalse(self.store.watch_query_exists(999))
+        self.store.delete_watch_query(qid)
+        self.assertFalse(self.store.watch_query_exists(qid))
+
 
 class TestFeedEntries(unittest.TestCase):
     def setUp(self):
@@ -145,6 +152,14 @@ class TestFeedEntries(unittest.TestCase):
     def test_add_bad_status_raises(self):
         with self.assertRaises(ValueError):
             self._add(status="bogus")
+
+    def test_add_orphaned_query_raises_not_dedup(self):
+        """query_id 不存在（监控词被删）→ 外键冲突原样抛，不伪装成去重 None
+        （冒烟测试抓到过：误记 deduped 会掩盖"巡检中途删词"的真实情况）。"""
+        import sqlite3
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.add_feed_entry(query_id=999, title="t",
+                                      url="https://a.example.com/1")
 
     def test_warnings_ordering(self):
         e1 = self._add(url="https://a.example.com/1")

@@ -6,6 +6,8 @@
   <title>网络言论智能分析系统</title>
   <link rel="stylesheet" href="static/style.css" />
   <link rel="stylesheet" href="static/chat.css" />
+  <!-- 监测平台视图样式：只新增 platform-* 类，复用 style.css 设计令牌 -->
+  <link rel="stylesheet" href="static/platform.css" />
   <!-- 设置弹层（模型管理）样式：只新增 settings-* 类，复用 style.css 的 :root 令牌 -->
   <link rel="stylesheet" href="static/settings.css" />
 </head>
@@ -24,6 +26,13 @@
         <p>粘贴一条消息，拿回带证据与复审条件的核查卡片 —— 只述证据，不判定真假</p>
       </div>
     </div>
+    <!-- 视图导航：对话（助手，等用户发消息）↔ 监测平台（主动巡检热门信息）。
+         默认对话视图；平台视图由 platform.js 接管（chat.js 不参与切换）。 -->
+    <nav class="site-nav" aria-label="视图切换">
+      <button id="navChat" class="site-nav-item active" type="button"
+        aria-current="page">对话</button>
+      <button id="navPlatform" class="site-nav-item" type="button">监测平台</button>
+    </nav>
     <div class="header-actions">
       <span id="apiStatus" class="status-chip checking">服务检查中…</span>
       <!-- 设置入口：放在「关于」左边（规格 §4.1）；弹层开合由 shell.js 绑定到 SettingsPanel -->
@@ -194,10 +203,83 @@
     最终判断权与事实核查请由用户自行把握。
   </footer>
 
+  <!-- ============ 监测平台视图（platform.js 接管；默认隐藏，导航切换） ============ -->
+  <main class="platform-layout hidden" id="platformView">
+    <!-- 顶行：调度状态 + 手动巡检 -->
+    <section class="panel platform-head-panel">
+      <div class="panel-head">
+        <h2>监测平台</h2>
+        <span id="platformAuthState" class="status-chip checking">授权检查中…</span>
+      </div>
+      <p class="platform-head-note muted">按监控词自动发现热门信息，初筛后对高危候选联网查验，
+        纯函数推导传播风险并分级预警。<b>风险分级只描述传播风险，不判定内容真假</b>；
+        热度为代理/估计口径。预警只在本页呈现，无推送、不打扰。</p>
+      <div class="platform-head-row">
+        <span id="platformSchedulerState" class="platform-stat">调度器：—</span>
+        <span id="platformLastScan" class="platform-stat">最近巡检：—</span>
+        <button id="platformScanBtn" class="btn-primary" type="button">立即巡检一次</button>
+        <button id="platformRefreshBtn" class="btn-ghost" type="button">刷新</button>
+      </div>
+      <div id="platformScanHint" class="platform-scan-hint hidden"></div>
+    </section>
+
+    <!-- 预警横幅（high/urgent） -->
+    <section id="platformWarningBanner" class="platform-warning-banner hidden"></section>
+
+    <!-- 未授权引导（外部检索默认关闭：fail-closed，不静默失败） -->
+    <section id="platformAuthGuide" class="panel platform-auth-guide hidden">
+      <div class="panel-head"><h2>外部检索未授权</h2></div>
+      <p>平台发现热门信息需要联网检索/抓取（搜索引擎与 RSS 源都算外发）。
+        默认关闭是故意的——授权后才开始巡检，不授权就不外发、不落库。</p>
+      <button id="platformAuthSettingsBtn" class="btn-primary" type="button">去设置里授权</button>
+    </section>
+
+    <!-- 监控词管理 -->
+    <section class="panel platform-watch-panel">
+      <div class="panel-head">
+        <h2>监控词</h2>
+        <span id="platformWatchCount" class="count-chip">0</span>
+      </div>
+      <div class="platform-watch-add">
+        <input id="platformWatchInput" type="text" maxlength="200"
+          placeholder="输入监控词（话题/事件关键词，如“自来水 投毒 通报”）" />
+        <button id="platformWatchAddBtn" class="btn-primary" type="button">添加</button>
+      </div>
+      <ul id="platformWatchList" class="platform-watch-list">
+        <li class="empty">暂无监控词；添加后按调度间隔自动巡检（也可点「立即巡检一次」）</li>
+      </ul>
+    </section>
+
+    <!-- 信息流 -->
+    <section class="panel platform-feed-panel">
+      <div class="panel-head">
+        <h2>信息流</h2>
+        <div class="platform-feed-filters">
+          <button class="platform-feed-filter active" data-risk="" type="button">全部</button>
+          <button class="platform-feed-filter" data-risk="high,urgent" type="button">预警</button>
+          <button class="platform-feed-filter" data-risk="suspect" type="button">疑似</button>
+        </div>
+      </div>
+      <ul id="platformFeed" class="platform-feed">
+        <li class="empty">暂无信息；完成一次巡检后，发现的热门信息会列在这里</li>
+      </ul>
+    </section>
+
+    <!-- 巡检历史 -->
+    <section class="panel platform-scans-panel">
+      <div class="panel-head"><h2>巡检历史</h2></div>
+      <ul id="platformScans" class="platform-scans">
+        <li class="empty">暂无巡检记录</li>
+      </ul>
+    </section>
+  </main>
+
   <script src="static/shell.js"></script>
   <!-- 设置弹层：紧接 shell.js（外壳只做开合绑定，面板逻辑与渲染全在 settings.js） -->
   <script src="static/settings.js"></script>
   <script src="static/cards.js"></script>
   <script src="static/chat.js"></script>
+  <!-- 监测平台视图：与对话页并列（导航切换），不碰 chat.js 契约 -->
+  <script src="static/platform.js"></script>
 </body>
 </html>

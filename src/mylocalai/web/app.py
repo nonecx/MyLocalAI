@@ -48,6 +48,7 @@ from mylocalai.llm import llm_cache  # noqa: E402
 from mylocalai.llm import llm_client as _llm_client  # noqa: E402
 from mylocalai.util.console_io import force_utf8_stdio  # noqa: E402
 from mylocalai.util.text_safety import has_surrogates, sanitize_text  # noqa: E402
+from mylocalai.web import platform_api  # noqa: E402
 from mylocalai.web.privacy_api import router as privacy_router  # noqa: E402
 
 # 非 UTF-8 控制台（英文 Windows 的 cp1252 等）下，日志里的中文会抛 UnicodeEncodeError。
@@ -100,6 +101,9 @@ app = FastAPI(
     version="1.0.0",
 )
 app.include_router(privacy_router)
+# 监测平台（platform 包）：状态/信息流/预警/监控词/巡检触发；调度器线程由
+# platform_api.start_scheduler_if_enabled() 在下方启动（默认 enabled=false 空操作）
+app.include_router(platform_api.router)
 
 # 内存历史（最新在前）。仅作演示用途：重启服务即清空，不落盘。
 _history: List[Dict[str, Any]] = []
@@ -134,6 +138,13 @@ def _warn_if_multiworker() -> None:
 
 # 启动时提示一次（放在函数定义之后，避免 NameError）
 _warn_if_multiworker()
+
+# 平台巡检调度器：规则 enabled=false 时是空操作（默认不打扰）；多 worker 部署不启——
+# 每 worker 一个调度器会重复巡检（单进程部署见 my_website/README）。启动失败只记
+# 日志，网站主功能不受影响（fail-soft）。
+if _WORKERS <= 1:
+    platform_api.start_scheduler_if_enabled()
+
 
 
 class AnalyzeRequest(BaseModel):

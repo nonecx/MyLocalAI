@@ -100,6 +100,14 @@ class PlatformStore:
                 return int(row["id"])
         raise RuntimeError(f"监控词并发创建冲突: {q}")   # 理论不可达（单写者）
 
+    def watch_query_exists(self, query_id: int) -> bool:
+        """监控词是否还在（巡检中途可能被用户删掉：删了其下条目会级联消失，
+        在跑候选应诚实跳过而不是撞外键）。"""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM watch_queries WHERE id = ?", (int(query_id),)).fetchone()
+        return row is not None
+
     def list_watch_queries(self, enabled_only: bool = False) -> List[Dict[str, Any]]:
         sql = "SELECT * FROM watch_queries"
         if enabled_only:
@@ -137,6 +145,9 @@ class PlatformStore:
         """写入信息流条目；URL 已存在返回 None（去重第一道闸，调用方按 deduped 处理）。
 
         status 越界抛 ValueError（调用方 bug，不静默纠正）。
+        query_id 不存在（监控词被删）触发外键冲突时**原样抛 IntegrityError**——
+        那不是"去重"，是调用方状态问题，不许伪装成 None 让上层误记 deduped
+        （runner 有前置存在性检查；这里是纵深防御，冒烟测试抓到过该 race）。
         """
         if status not in FEED_STATUSES:
             raise ValueError(f"feed 状态非法: {status}")
@@ -150,8 +161,10 @@ class PlatformStore:
                     (int(query_id), scan_id, str(title or "")[:200], str(url or ""),
                      str(snippet or "")[:2000], str(domain or ""), str(domain_tier or ""),
                      str(discovered_at or ""), e_score, status, result_expires_at, _now()))
-            except sqlite3.IntegrityError:
-                return None
+            except sqlite3.IntegrityError as exc:
+                if "foreign key" in str(exc).lower():
+                    raise                   # 外键冲突不是去重：上层按降级处理
+                return None                # URL 唯一冲突 → 去重闸
             return int(cur.lastrowid)
 
     def update_feed_entry(self, entry_id: int, **fields: Any) -> bool:
