@@ -759,6 +759,134 @@
 }
 .chat-ev-src-title { font-weight: 600; margin-top: 10px; }
 
+/* ---------- 资料收集卡（collect_research：主动调研 + 逐字引文） ----------
+   与证据研究卡（.chat-card-evresearch）同族：复用 .chat-ev-list/.chat-ev-quote/
+   .chat-evidence-fold 的折叠排版，这里只补分区标题、发现/线索/时间线/分析的层次。
+   口径：关键发现与线索分两级呈现，未核验线索明确降权；不显示任何数值评分。 */
+.chat-card-research { font-size: 12.5px; line-height: 1.8; }
+.chat-res-section-title {
+  font-weight: 600;
+  margin-top: 10px;
+  color: var(--primary-dark);
+}
+.chat-res-subqs,
+.chat-res-findings,
+.chat-res-leads,
+.chat-res-timeline,
+.chat-res-conflicts,
+.chat-res-followups { list-style: none; margin: 6px 0 0; padding: 0; }
+
+.chat-res-subq {
+  margin-top: 5px;
+  padding: 5px 8px;
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.chat-res-subq b { color: var(--primary-dark); margin-right: 6px; }
+
+.chat-res-finding {
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+.chat-res-finding:first-child { border-top: none; padding-top: 0; }
+.chat-res-finding-head > b { color: var(--primary-dark); margin-right: 6px; }
+.chat-res-finding-text { font-weight: 600; margin-top: 3px; }
+
+/* 线索与关键发现分层：线索整体降权（更小、更淡），避免被误读成同等确定性 */
+.chat-res-lead {
+  margin-top: 5px;
+  padding-left: 8px;
+  border-left: 2px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+}
+.chat-res-lead-reason { color: var(--muted); }
+
+.chat-res-timeline-item { margin-top: 5px; display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
+.chat-res-date {
+  font-weight: 600;
+  color: var(--primary-dark);
+  min-width: 78px;
+}
+.chat-res-conflict { margin-top: 6px; }
+
+.chat-res-analysis {
+  margin-top: 5px;
+  padding: 7px 9px;
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.chat-res-analysis-label {
+  display: inline-block;
+  margin-bottom: 3px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.chat-res-analysis p { margin: 3px 0 0; }
+.chat-res-followups li { margin-top: 4px; }
+
+/* ---------- 权威核验卡（verify_authority：逐主张证据倾向 + 受约束分析） ----------
+   与资料收集卡同族：主张逐条分组、证据按 supports/refutes/其他三分、结论原文透传；
+   balance/lean 只用中文文字徽章（绿/红/琥珀/灰），不显示任何数值分。 */
+.chat-card-authority { font-size: 12.5px; line-height: 1.8; }
+.chat-auth-claims,
+.chat-auth-conflicts,
+.chat-auth-limits { list-style: none; margin: 8px 0 0; padding: 0; }
+
+.chat-auth-claim {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+.chat-auth-claim:first-child { border-top: none; padding-top: 0; }
+.chat-auth-claim-head > b { color: var(--primary-dark); margin-right: 6px; }
+.chat-auth-claim-text { font-weight: 600; }
+
+.chat-auth-ev-groups { margin-top: 5px; }
+.chat-auth-ev-group-title { font-weight: 600; margin-top: 7px; }
+.chat-auth-ev-group-title .badge { margin-right: 5px; }
+.chat-auth-ev { margin-top: 6px; }
+
+/* 结论区是"权威资料能证明/反驳什么"的原文透传：弱化背景、突出文字 */
+.chat-auth-conclusion {
+  margin-top: 5px;
+  padding: 7px 10px;
+  background: var(--primary-soft);
+  border-left: 3px solid var(--primary);
+  border-radius: 0 6px 6px 0;
+  font-weight: 600;
+}
+
+.chat-auth-analysis { margin-top: 6px; }
+.chat-auth-analysis-item {
+  margin-top: 5px;
+  padding: 6px 9px;
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.chat-auth-analysis-label {
+  display: inline-block;
+  margin-bottom: 3px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.chat-auth-analysis-item p { margin: 3px 0 0; }
+
+.chat-auth-section-title { font-weight: 600; margin-top: 10px; color: var(--primary-dark); }
+.chat-auth-conflict { margin-top: 6px; }
+.chat-auth-limits li { margin-top: 4px; color: var(--muted); font-size: 12px; }
+
+/* ---------- 窄屏补充：两种新卡的时间线/结论区改成纵向堆叠 ---------- */
+@media (max-width: 900px) {
+  .chat-res-timeline-item { flex-direction: column; gap: 2px; }
+  .chat-res-date { min-width: 0; }
+  .chat-res-finding-head > b { display: inline-block; margin-bottom: 2px; }
+}
+
 .chat-report-text {
   margin: 6px 0 0;
   padding: 10px 12px;

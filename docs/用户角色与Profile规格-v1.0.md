@@ -1,9 +1,9 @@
-# 用户角色与档案工作区规格 v1.0
+﻿# 用户角色与档案工作区规格 v1.0
 
 > 状态：阶段 1 已实现（Profile 骨架 + 普通用户呈现）；阶段 2（材料批量分析）、
 > 阶段 3（领域监测订阅）按本文档的接口契约分阶段落地。
 > 日期：2026-11-20
-> 上游依据：`docs/Agent工作流规格-v0.1.md`（四类用户能力）、
+> 上游依据：`docs/Agent工作流规格-v0.1.md`（八项用户能力）、
 > `docs/工作指导-智能助手重塑-2026-10-30.md`（§2.4 非目标：不做多用户与鉴权）。
 
 ## 1. 定位与边界
@@ -125,7 +125,7 @@ loop.py 自动合并且经 review——角色扩展的 `_session_profile`/`_pres
 | layperson 普通用户 | claim-checking（**呈现档位**：简化卡、无数值） | claim_checking/SKILL.md | roles.layperson（router 偏向 verify_claim；narrate 人话结论禁数值） | 对话 |
 | analyst 专业·材料分析 | material-analysis（claim-checking 批量复合）+ evidence-research | material_analysis/SKILL.md、evidence_research/SKILL.md | roles.analyst（识别"批量/我收集的材料"→ 导流面板，不拼工具） | 材料批次面板 + REST |
 | monitor 专业·领域监测 | domain-monitoring（topic-understanding 持续复合） | domain_monitoring/SKILL.md、topic_understanding/SKILL.md | roles.monitor（识别"盯着某领域"→ 导流面板；只述变化） | 领域监测面板 + REST + 调度 |
-| full 全部能力 | 四能力全量 | 四份既有 SKILL | 不合并（roles.full = {}） | 对话 |
+| full 全部能力 | 八项能力全量 | 八份 SKILL | 不合并（roles.full = {}） | 对话 |
 
 横向能力（speech-understanding 言论理解）与对话跟进机制不按角色裁剪，全部工作区可用。
 
@@ -145,10 +145,10 @@ loop.py 自动合并且经 review——角色扩展的 `_session_profile`/`_pres
    角色逐位一致且 narrate 与基座相等；
 3. 导流口径：analyst/monitor 附加段含"材料批次/领域监测"面板导流与"不拼工具/
    不新开 action"指令；
-4. SKILL.md lint：六份能力文档头字段（能力 id/版本/一句话目标/文档性质）与必备
+4. SKILL.md lint：八份能力文档头字段（能力 id/版本/一句话目标/文档性质）与必备
    章节齐全、能力 id 与目录名一致、**无悬空《总览》引用**；
 5. 对拍：prompts.json 的 roles 键 ⊆ `dossier/profiles.py` 的 ROLES（`_` 开头为
-   注释键）；capabilities 目录集合 == 六个预期能力。
+   注释键）；capabilities 目录集合 == 八个预期能力。
 
 ## 9. 已知取舍
 

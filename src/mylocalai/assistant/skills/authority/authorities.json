@@ -1,0 +1,27 @@
+{
+  "_comment": "权威类别与动态核验信号（信息收集/权威核验两套流水线共用）。改这里不改代码：collect_core.load_authority_config 会做类型校验，缺键/坏类型逐键回退内置默认。决定性类别只认官方/国际组织/学术与标准/事实核查；权威媒体只能作证据倾向，不能单独证明或反驳；未核验域名一律不作决定性证据。",
+  "version": 1,
+
+  "class_overrides": {
+    "piyao.org.cn": "factcheck",
+    "12377.cn": "factcheck",
+    "who.int": "international_org",
+    "europa.eu": "international_org",
+    "cas.cn": "academic",
+    "nature.com": "academic",
+    "sciencemag.org": "academic",
+    "nih.gov": "academic"
+  },
+
+  "decisive_classes": ["official", "international_org", "academic", "standards", "factcheck"],
+  "media_classes": ["media"],
+
+  "official_suffixes": ["gov.cn", "gov", "mil.cn"],
+  "official_markers": ["政府网站标识码", "网站标识码"],
+  "_markers_comment": "official_markers 只收编办颁发的政府网站标识码/网站标识码——这是唯一具备身份鉴别力的字段。ICP备案号、主办单位、公网安备是中国大陆所有合法托管网站页脚的法定字段，任何站点都能满足，把它们算进来等于让第二个信号免费通过（页面自称通道），故不计入。",
+
+  "dynamic_enabled": true,
+  "dynamic_min_signals": 2,
+  "dynamic_requires_corroboration": true,
+  "max_dynamic_domains": 4
+}

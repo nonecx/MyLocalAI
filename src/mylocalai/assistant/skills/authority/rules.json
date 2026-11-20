@@ -1,0 +1,21 @@
+{
+  "_comment": "权威核验流水线的预算与开关（契约 §5.2）。改这里不改代码：load_rules 会做类型校验，缺键/坏类型逐键回退内置默认，数值越界夹到安全区间，未知键丢弃。计数类键（max_searches/max_pages/max_llm_calls）由 collect_core.CollectBudget 记账，其余键由 pipeline 自行按上限截断。",
+  "max_input_chars": 4000,
+  "max_claims": 4,
+  "max_authority_sources": 8,
+  "max_candidates": 16,
+  "max_searches": 12,
+  "max_pages": 12,
+  "per_claim_max_queries": 2,
+  "per_claim_max_pages": 3,
+  "max_llm_calls": 20,
+  "total_deadline_s": 90,
+  "io_timeout_s": 10,
+  "max_page_bytes": 1500000,
+  "max_text_chars": 20000,
+  "max_redirect_hops": 3,
+  "max_quote_chars": 300,
+  "max_dynamic_domains": 4,
+  "allow_dynamic_authority": true,
+  "dynamic_min_signals": 2
+}

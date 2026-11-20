@@ -39,8 +39,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from mylocalai.llm import llm_cache
 from mylocalai.assistant import router as router_mod
-from mylocalai.assistant import (tools_chapters, tools_evidence, tools_heat, tools_insights,
-                                 tools_memory, tools_verify)
+from mylocalai.assistant import (tools_authority, tools_chapters, tools_evidence,
+                                 tools_heat, tools_insights, tools_memory, tools_research,
+                                 tools_verify)
 from mylocalai.assistant.context import build_context
 from mylocalai.assistant.events import EventStream
 from mylocalai.assistant.fingerprint import DEFAULT_SHINGLE_SIZE
@@ -72,6 +73,10 @@ _CARD_TYPE = {
     "insights": "insights",
     # 取证三技能流水线（collect_evidence）：evidence 卡，前端 cards.js renderEvidence
     "collect_evidence": "evidence",
+    # 第三波两条只读对话能力：collect_research → research 卡（cards.js renderResearch）、
+    # verify_authority → authority 卡（cards.js renderAuthority）
+    "collect_research": "research",
+    "verify_authority": "authority",
 }
 
 _ARGS_PREVIEW_WIDTH = 60
@@ -539,6 +544,121 @@ def _real_service(name: str, rules: Dict[str, Any],
                                   fetch_fn=_fetch, llm_fn=_llm)
         return _evidence_skills
 
+    if name == "research_skills":
+        def _research_skills():
+            from mylocalai.assistant.skills.research import ResearchSkills
+            from mylocalai.assistant.skills.research.pipeline import load_rules
+            from mylocalai.assistant.skills.transport import default_transport
+            from mylocalai.core.privacy import load_preferences
+            from mylocalai.llm import llm_client
+
+            cfg = (rules or {}).get("research_model") or {}
+            pipe_rules = load_rules()
+
+            def _llm(system, user):
+                return llm_client.chat_json(system, user,
+                    temperature=float(cfg.get("temperature", 0)),
+                    max_tokens=int(cfg.get("max_tokens", 900)),
+                    namespace=str(cfg.get("cache_namespace", "assistant_research")))
+
+            def _search(query, k=6):
+                # 外发授权门（与 evidence_skills 同口径）：consent 未开 = 如实降级，
+                # 不当"搜过了没找到"；engines 全败同理（网络故障不是空结果）。
+                if not load_preferences().external_allowed("public-search"):
+                    return {"results": [], "degraded": True,
+                            "error": "consent_denied: 外部检索未授权"}
+                from mylocalai.retrieval.search import search_all
+                raw = search_all(str(query), k=k)
+                engines = raw.get("engines") or {}
+                error = str(raw.get("error") or "")
+                degraded = (bool(raw.get("blocked")) or bool(error)
+                            or not any((e or {}).get("ok") for e in engines.values()))
+                if degraded and not error:
+                    error = "检索后端均不可用"
+                # search_all 给的是 SearchResult 对象，pipeline 的 search_fn 契约要 dict
+                # （url/title/snippet）——不过这一层，全部结果会被当成坏形状静默丢弃。
+                rows = [r.to_dict() if hasattr(r, "to_dict") else r
+                        for r in (raw.get("results") or [])]
+                return {"results": rows, "degraded": degraded,
+                        "error": error, "engines": engines}
+            # rules.json 是取页上限的唯一来源：默认 transport 单例用的是
+            # SafeTransport 的硬编码默认值，不按本实例规则构造的话，
+            # 运维改 rules.json 的 max_page_bytes/io_timeout_s/max_redirect_hops/
+            # max_text_chars 对真实取页毫无作用（正是注释里要避免的"两处漂移"）。
+            transport = default_transport(
+                max_bytes=int(pipe_rules["max_page_bytes"]),
+                max_text_chars=int(pipe_rules["max_text_chars"]),
+                timeout_s=float(pipe_rules["io_timeout_s"]),
+                max_hops=int(pipe_rules["max_redirect_hops"]))
+
+            def _fetch(url, *, allowed_domains=None, cancel_check=None, deadline=None):
+                if not load_preferences().external_allowed("public-web"):
+                    return {"status": "error", "category": "consent_denied",
+                            "detail": "外部取页未授权", "url": url, "final_url": ""}
+                return transport.fetch(url, allowed_domains=allowed_domains,
+                                       cancel_check=cancel_check, deadline=deadline)
+            return ResearchSkills(rules=pipe_rules, search_fn=_search,
+                                  fetch_fn=_fetch, llm_fn=_llm)
+        return _research_skills
+
+    if name == "authority_skills":
+        def _authority_skills():
+            from mylocalai.assistant.skills.authority import AuthoritySkills
+            from mylocalai.assistant.skills.authority.pipeline import load_rules
+            from mylocalai.assistant.skills.collect_core import load_authority_config
+            from mylocalai.assistant.skills.transport import default_transport
+            from mylocalai.core.privacy import load_preferences
+            from mylocalai.llm import llm_client
+
+            cfg = (rules or {}).get("authority_model") or {}
+            pipe_rules = load_rules()
+
+            def _llm(system, user):
+                return llm_client.chat_json(system, user,
+                    temperature=float(cfg.get("temperature", 0)),
+                    max_tokens=int(cfg.get("max_tokens", 900)),
+                    namespace=str(cfg.get("cache_namespace", "assistant_authority")))
+
+            def _search(query, k=6):
+                # 与 evidence_skills / research_skills 同口径：consent 门 +
+                # SearchResult 转 dict + degraded 判定（网络故障不是空结果）。
+                if not load_preferences().external_allowed("public-search"):
+                    return {"results": [], "degraded": True,
+                            "error": "consent_denied: 外部检索未授权"}
+                from mylocalai.retrieval.search import search_all
+                raw = search_all(str(query), k=k)
+                engines = raw.get("engines") or {}
+                error = str(raw.get("error") or "")
+                degraded = (bool(raw.get("blocked")) or bool(error)
+                            or not any((e or {}).get("ok") for e in engines.values()))
+                if degraded and not error:
+                    error = "检索后端均不可用"
+                rows = [r.to_dict() if hasattr(r, "to_dict") else r
+                        for r in (raw.get("results") or [])]
+                return {"results": rows, "degraded": degraded,
+                        "error": error, "engines": engines}
+            # rules.json 是取页上限的唯一来源（同 research_skills 口径）：
+            # 不按规则构造 transport 的话，运维改 max_page_bytes/io_timeout_s/
+            # max_redirect_hops/max_text_chars 对真实取页毫无作用。
+            transport = default_transport(
+                max_bytes=int(pipe_rules["max_page_bytes"]),
+                max_text_chars=int(pipe_rules["max_text_chars"]),
+                timeout_s=float(pipe_rules["io_timeout_s"]),
+                max_hops=int(pipe_rules["max_redirect_hops"]))
+
+            def _fetch(url, *, allowed_domains=None, cancel_check=None, deadline=None):
+                if not load_preferences().external_allowed("public-web"):
+                    return {"status": "error", "category": "consent_denied",
+                            "detail": "外部取页未授权", "url": url, "final_url": ""}
+                return transport.fetch(url, allowed_domains=allowed_domains,
+                                       cancel_check=cancel_check, deadline=deadline)
+            # authority_config 默认从 authorities.json 加载（collect_core 提供，
+            # 缺文件/坏类型逐键回退内置默认，不抛）。
+            return AuthoritySkills(rules=pipe_rules, search_fn=_search,
+                                   fetch_fn=_fetch, llm_fn=_llm,
+                                   authority_config=load_authority_config())
+        return _authority_skills
+
     if name == "route_llm":
         cfg = (rules or {}).get("route_model") or {}
 
@@ -653,6 +773,12 @@ class AssistantLoop:
             # 逐个去已核验信源找可定位引文，不建档、不出真假分（铁律：不扩权）。
             # 路由枚举与 allowlist 同步补 "collect_evidence"。
             tools_evidence.register_all(reg, None)
+            # 第三波两条只读对话能力（资料收集 / 权威核验）：collect_research 按主题
+            # 主动调研出带逐字引文的研究简报，verify_authority 逐主张找权威资料给
+            # 证据倾向与受约束分析；均不建档、无分数、不出真假结论（铁律：不扩权）。
+            # 路由枚举与 allowlist 同步补 "collect_research" / "verify_authority"。
+            tools_research.register_all(reg, None)
+            tools_authority.register_all(reg, None)
             self._registry = reg
         return self._registry
 
