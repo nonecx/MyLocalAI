@@ -38,6 +38,13 @@
 
   const MAX_MESSAGE_LENGTH = 8000;   // 与后端 /api/chat 校验一致
 
+  /* 档案工作区切换事件（v6 多 Profile 分家）：profiles.js 切换/改名成功后派发，
+     这里重载左栏并清空当前会话视图——会话与档案都归属各自的工作区，切换后
+     当前打开的那个会话可能已不属于激活档案（继续往它发消息会 404），
+     所以如实换边：清空消息流、丢掉 currentSessionId、重载两个列表。
+     事件名与 profiles.js 的 window.ProfilesPanel.CHANGED_EVENT 一致。 */
+  const PROFILE_CHANGED_EVENT = "mylocalai:profile-changed";
+
   let currentSessionId = null;   // 当前会话；null = 下一条消息自动新建
   let activeController = null;   // 本轮请求的取消句柄
   let currentTurnEl = null;      // 本轮助手回复的容器（事件往里追加）
@@ -430,9 +437,40 @@
     insights: () => sendInsights("patterns"),
   };
 
+  /* ---------- 当前档案工作区行（v6 多 Profile 分家） ---------- */
+  function renderProfileLine() {
+    const line = $("#chatProfileLine");
+    if (!line) return;
+    const panel = window.ProfilesPanel;
+    const snap = (panel && typeof panel.snapshot === "function") ? panel.snapshot() : null;
+    const active = (snap && snap.active) || null;
+    if (!active) {
+      line.textContent = "";
+      return;
+    }
+    const meta = (panel && typeof panel.roleMeta === "function")
+      ? panel.roleMeta(active.role) : { label: active.role || "" };
+    line.textContent = "";
+    const prefix = document.createTextNode("当前档案：");
+    const name = document.createElement("b");
+    name.textContent = active.display_name || "默认档案";
+    const suffix = document.createTextNode(`（${meta.label || "全部能力"}）`);
+    line.appendChild(prefix);
+    line.appendChild(name);
+    line.appendChild(suffix);
+  }
+
+  function onProfileChanged() {
+    /* 切换/改名后：左栏换边。当前会话视图一并清空（归属可能已变）。 */
+    currentSessionId = null;
+    clearConversation();
+    renderProfileLine();
+    loadSessions();
+    loadDossiers();
+  }
+
   /* ---------- 会话列表 ---------- */
-  function highlightActiveSession() {
-    document.querySelectorAll("#chatSessionList li[data-sid]").forEach((li) => {
+  function highlightActiveSession() {    document.querySelectorAll("#chatSessionList li[data-sid]").forEach((li) => {
       li.classList.toggle("active", Number(li.dataset.sid) === currentSessionId);
     });
   }
@@ -794,6 +832,9 @@
         sendMessage();
       }
     });
+    /* 档案工作区切换（profiles.js 派发）：左栏换边 + 清空当前会话视图 */
+    document.addEventListener(PROFILE_CHANGED_EVENT, onProfileChanged);
+    renderProfileLine();
     loadSessions();
     loadDossiers();
   });

@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from mylocalai.assistant.registry import ToolRegistry, ValidationError, id_param, \
     limit_param, optional_query
+from mylocalai.assistant.tools_guard import dossier_visible
 
 __all__ = ["register_all", "format_param"]
 
@@ -48,7 +49,11 @@ def _conclusion_card(latest: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any
 def _list_dossiers(ctx: Any, query: str = "", limit: int = 20) -> Dict[str, Any]:
     rows: List[Dict[str, Any]] = []
     try:
-        rows = ctx.dossiers.store.list_dossiers(str(query or ""), int(limit or 20)) or []
+        # profile_id：只列当前会话所属工作区的档案（v6 多 Profile 分家）；
+        # ctx 未注入（stub/旧装配）时 None = 不过滤，与加参数前逐位一致。
+        rows = ctx.dossiers.store.list_dossiers(
+            str(query or ""), int(limit or 20),
+            profile_id=getattr(ctx, "profile_id", None)) or []
     except Exception as exc:  # noqa: BLE001  库读失败诚实降级，不崩
         return {"ok": False, "card": None,
                 "digest": f"档案库读取失败：{type(exc).__name__}",
@@ -67,6 +72,16 @@ def _list_dossiers(ctx: Any, query: str = "", limit: int = 20) -> Dict[str, Any]
 
 def _get_dossier(ctx: Any, id: int) -> Dict[str, Any]:  # noqa: A002  与路由参数名一致
     store = ctx.dossiers.store
+    visible, store_error = dossier_visible(ctx, id)
+    if store_error:
+        return {"ok": False, "card": None, "digest": f"档案库读取失败：{store_error}",
+                "cost": {"requests": 0, "tokens": 0}, "dossier_id": None, "degraded": True}
+    if not visible:
+        # 不存在或不属于当前工作区：同一种回答（tools_guard 契约）
+        return {"ok": False, "card": None, "digest": f"档案 #{id} 不存在。",
+                "cost": {"requests": 0, "tokens": 0}, "dossier_id": None, "degraded": False,
+                "not_found": True}
+
     try:
         row = store.get_dossier(int(id))
     except Exception as exc:  # noqa: BLE001

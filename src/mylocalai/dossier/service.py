@@ -100,8 +100,14 @@ class DossierService:
     # ---- 建档 ----
 
     def start_dossier(self, text: str, title: Optional[str] = None,
-                      input_kind: str = "text", *, claim_excerpt: str = "") -> Optional[int]:
-        """Create a result record only when enabled; raw input is stored independently."""
+                      input_kind: str = "text", *, claim_excerpt: str = "",
+                      profile_id: Optional[int] = None) -> Optional[int]:
+        """Create a result record only when enabled; raw input is stored independently.
+
+        profile_id：建档落到哪个档案工作区（v6 多 Profile 分家）。None 时取当前
+        激活档案——对话路径由 loop 显式传入会话所属档案（切过档案后往回发消息，
+        档案仍归原会话的工作区，不跟着激活态跑）。
+        """
         if not self.privacy.result_allowed():
             return None
         original = str(text or "")
@@ -110,13 +116,15 @@ class DossierService:
         saved_claim = str(claim_excerpt or "")
         title_source = saved_claim or input_text
         title = title or (title_source.strip()[:24] or "未命名核查")
+        # profile_id=None 时由 store.create_dossier 归当前激活档案（v6）。
         return self.store.create_dossier(
             title, input_text, input_kind=input_kind, claim_excerpt=saved_claim,
             save_result=True,
             result_retention_days=self.privacy.retention_days("results"),
             save_raw_input=bool(input_text),
             raw_input_retention_days=(self.privacy.retention_days("raw_input")
-                                      if input_text else None))
+                                      if input_text else None),
+            profile_id=profile_id)
 
     # ---- 结论落库（verify / recheck 共用） ----
 

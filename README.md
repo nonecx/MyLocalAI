@@ -45,7 +45,8 @@
 │   │   ├── attn_rules.json / deep_read_rules.json / society_issues.json / prompts.json
 │   │   └── README.md           关注度与深读的完整说明（公式、触发、护栏、隔离）
 │   ├── dossier/                档案库（SQLite 单文件 + WAL）
-│   │   ├── store.py            连接工厂、schema_version 顺序迁移（v4 含指纹表+话术标记表）、档案域七表 + 会话域三表
+│   │   ├── store.py            连接工厂、schema_version 顺序迁移（v4 含指纹表+话术标记表、v6 含 Profile 工作区）、档案域七表 + 会话域三表
+│   │   ├── profiles.py         Profile 工作区（多档案数据分家 + 角色，v6）
 │   │   ├── service.py          建档编排：结论卡片化落库、证据批次、recheck 版本化、六章节聚合与导出、初扫 markers 沉淀
 │   │   └── insights.py         参谋三聚合纯函数：话术模式库 / 信源画像 / 周报（零 LLM，永不抛）
 │   ├── assistant/              智能助手核心（对话 → 路由 → 工具 → 叙述 → 落库）
@@ -313,8 +314,8 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 1129 个用例（unittest discover 全量，2026-11-19 单页化后实测；**M4 起由
-`tests.test_readme_counts` 自动校验此数字与 mock 闸门条数，改动后须同步回写**）：
+离线套件共 1237 个用例（unittest discover 全量，2026-11-20 角色扩展阶段 1 后实测；
+**M4 起由 `tests.test_readme_counts` 自动校验此数字与 mock 闸门条数，改动后须同步回写**）：
 M1-M3 的全部回归（详见 git 历史），加上 M4 新增模块：
 **成本真实计数**（llm_client 进程级计数器：真实上游调用数 + usage tokens，缓存命中/
 single-flight 等待不计、取不到 usage 如实 0；loop 按"段前段后快照 delta"接线进
@@ -327,7 +328,10 @@ source_profile 注入：空画像逐位不变守卫、抬分端到端、装配�
 加上单页化新增模块：**insights 只读工具**（kind 封闭枚举 patterns/sources/weekly、
 零 LLM、空库合法空卡）、**结构化 action 通道**（未注册/不在 allowlist/写工具/坏参数
 一律 400，合法时跳过路由直达只读工具，事件协议不新增）、**卡片折叠字段**
-（结论卡 evidence_preview 前 5 条、言论土壤卡 report 完整报告）。
+（结论卡 evidence_preview 前 5 条、言论土壤卡 report 完整报告）；
+加上角色扩展阶段 1 新增模块：**Profile 工作区**（v6 迁移与存量回填、CRUD/激活/删除
+保护、会话/档案/指纹/画像按 profile_id 分家、跨工作区 404 防护、layperson 结论卡
+简化、/api/profiles 与前端切换器前后端自洽）。
 另有 `tests/run_module_tests.py`（12 条内置用例全模块跑一遍并落盘）、
 `tests/smoke_api.py`（配置自检 + 连通性）。
 
@@ -456,6 +460,31 @@ M4 起 `requests/tokens` 是**真实上游用量**，不再是粗口径估算（
 口径：助手**不判真假、只述证据**——汇总可核实的证据与来源立场并给出确定性结论卡片，
 真伪裁决留给用户；降级时如实说明，不编造。库路径与网页端同库（data/dossier.db，
 DOSSIER_DB_PATH 可覆盖）。测试：`tests.test_mcp_assistant`（同核对照、工具清单、守护路径）。
+
+## 用户角色与档案工作区（2026-11-20，schema v6）
+
+把"普通用户 / 专业用户"落成**同一产品内的多个档案工作区（Profile）**，不做账号体系
+（本项目明确不做多用户与鉴权，部署口径是单用户本地工具）。顶栏切换器一键换边，
+每个工作区有**独立的会话、档案与画像数据**（`profile_id` 分家，跨工作区访问一律按
+"不存在"处理，不泄露别的工作区有哪些会话/档案号）。
+
+| 角色 | 面向 | 现状（2026-11-20 阶段 1） |
+| --- | --- | --- |
+| `layperson` 普通用户 | 只做言论核查：输入一条消息，拿回结论 | 结论卡**简化呈现**（隐去 risk_score 数值、标注 presentation=simple，完整数值仍在档案库）；能力不裁剪 |
+| `analyst` 专业用户 · 材料分析 | 分析辨别自行搜集的多条材料 | 批量核查入口建设中（阶段 2） |
+| `monitor` 专业用户 · 领域监测 | 按领域自动搜集信息 | 订阅 + 服务内定时线程建设中（阶段 3） |
+| `full` 全部能力 | 不按角色裁剪 | v6 迁移给存量数据的默认档，保证旧行为逐位不变 |
+
+- **数据模型**：`profiles` 表（key/display_name/role）+ `app_state` 单行激活态；
+  `sessions`/`dossiers` 加 `profile_id`（v6 迁移把存量数据回填到"默认档案"，
+  role=full，旧档案可读、行为不变）。
+- **接口**：`GET/POST /api/profiles`、`PUT/DELETE /api/profiles/{id}`、
+  `POST /api/profiles/{id}/activate`；列表/详情/画像端点一律按激活档案过滤。
+- **删除保护**：最后一个档案、当前激活档案、仍有会话/档案数据的档案一律拒删（409）。
+- **口径**：角色只改**呈现与数据范围**，不改判定语义；`verdict.assess` 打分、
+  隐私 fail-closed 授权、路由四层防护链均不随角色放宽。
+- 测试：`tests.test_profiles`（迁移回填 / CRUD / 分家 / 跨区防护 / layperson 卡片 /
+  Web API 全链）。
 
 ## 参谋与洞察（2026-10-31，L4）
 

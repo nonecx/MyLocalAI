@@ -20,6 +20,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional
 
 from mylocalai.assistant.registry import ToolRegistry, ValidationError, text_param, deep_param, id_param
+from mylocalai.assistant.tools_guard import dossier_visible
 
 __all__ = ["register_all", "query_param"]
 
@@ -171,10 +172,15 @@ def _legacy_claim_answer(original_text: str, result: Dict[str, Any]) -> Dict[str
 
 def _start_dossier(ctx: Any, text: str, input_kind: str = "text",
                    claim_excerpt: str = "") -> Optional[int]:
-    """Build a dossier only when result saving is enabled; never turn refusal into failure."""
+    """Build a dossier only when result saving is enabled; never turn refusal into failure.
+
+    profile_id：落到会话所属的档案工作区（v6 多 Profile 分家）。ctx 未注入
+    （stub/旧装配）时传 None，由 DossierService 取当前激活档案兜底。
+    """
     try:
         return ctx.dossiers.start_dossier(text, input_kind=input_kind,
-                                          claim_excerpt=claim_excerpt)
+                                          claim_excerpt=claim_excerpt,
+                                          profile_id=getattr(ctx, "profile_id", None))
     except Exception:  # noqa: BLE001
         return None
 
@@ -331,7 +337,15 @@ def _analyze_speech(ctx: Any, text: str) -> Dict[str, Any]:
 def _recheck_dossier(ctx: Any, id: int) -> Dict[str, Any]:  # noqa: A002  与路由参数名一致
     """recheck_dossier：读旧档案原文 → 重跑 verify → 同档案追加 v2/新证据批次。"""
     services = ctx.services
-    row = None
+    visible, store_error = dossier_visible(ctx, id)
+    if store_error:
+        return _result({}, None, f"档案库读取失败：{store_error}",
+                       {"requests": 0, "tokens": 0}, None, False, ok=False, degraded=True)
+    if not visible:
+        # 档案不存在**或不属于当前工作区**：同一种诚实回答，不泄露别的工作区
+        return _result({}, None, f"档案 #{id} 不存在，无法复检。请先用 list_dossiers 确认档案号。",
+                       {"requests": 0, "tokens": 0}, None, False, ok=False, not_found=True)
+
     try:
         row = ctx.dossiers.store.get_dossier(int(id))
     except Exception:  # noqa: BLE001

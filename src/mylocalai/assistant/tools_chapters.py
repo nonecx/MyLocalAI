@@ -36,6 +36,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 
 from mylocalai.assistant.registry import ToolRegistry, id_param
+from mylocalai.assistant.tools_guard import dossier_visible
 
 __all__ = ["register_all"]
 
@@ -55,12 +56,12 @@ def _result(ok: bool, digest: str, dossier_id: Optional[int], degraded: bool,
 
 
 def _dossier_exists(ctx: Any, dossier_id: int) -> Tuple[bool, str]:
-    """档案是否存在（章节工具的落点）；库读失败时把错误如实带回。"""
-    try:
-        row = ctx.dossiers.store.get_dossier(int(dossier_id))
-    except Exception as exc:  # noqa: BLE001  档案库故障折成诚实 error，不抛
-        return False, f"{type(exc).__name__}: {exc}"
-    return (row is not None), ""
+    """档案是否存在**且属于当前工作区**（章节工具的落点；v6 多 Profile 分家）。
+
+    跨工作区的档案号对外按"不存在"处理（tools_guard.dossier_visible 契约：
+    不泄露别的工作区有哪些档案）。库读失败时把错误如实带回（err 非空）。
+    """
+    return dossier_visible(ctx, dossier_id)
 
 
 def _degraded_of(payload: Dict[str, Any]) -> bool:

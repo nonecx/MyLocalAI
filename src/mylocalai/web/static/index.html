@@ -8,6 +8,8 @@
   <link rel="stylesheet" href="static/chat.css" />
   <!-- 设置弹层（模型管理）样式：只新增 settings-* 类，复用 style.css 的 :root 令牌 -->
   <link rel="stylesheet" href="static/settings.css" />
+  <!-- 档案工作区（多 Profile 分家）样式：只新增 profile-* 类，同样复用 :root 令牌 -->
+  <link rel="stylesheet" href="static/profiles.css" />
 </head>
 <body>
   <header class="site-header">
@@ -26,6 +28,17 @@
     </div>
     <div class="header-actions">
       <span id="apiStatus" class="status-chip checking">服务检查中…</span>
+      <!-- 档案工作区切换器（多 Profile 分家）：按钮显示当前档案与角色，下拉切换；
+           管理弹层开合由 profiles.js 绑定（与 settings 弹层同模式：按钮/关闭/遮罩/Esc）。 -->
+      <div class="profile-switcher" id="profileSwitcher">
+        <button id="profileBtn" class="btn-ghost profile-btn" type="button"
+          aria-haspopup="menu" aria-controls="profileMenu" aria-expanded="false">
+          <span class="profile-role-icon" id="profileRoleIcon" aria-hidden="true">🧭</span>
+          <span id="profileName">默认档案</span>
+          <span class="profile-caret" aria-hidden="true">▾</span>
+        </button>
+        <div id="profileMenu" class="profile-menu hidden" role="menu" aria-label="切换档案工作区"></div>
+      </div>
       <!-- 设置入口：放在「关于」左边（规格 §4.1）；弹层开合由 shell.js 绑定到 SettingsPanel -->
       <button id="settingsBtn" class="btn-ghost settings-open-btn" type="button"
         aria-haspopup="dialog" aria-controls="settingsDialog" aria-expanded="false">设置</button>
@@ -33,6 +46,38 @@
         aria-haspopup="dialog" aria-controls="aboutDialog">关于</button>
     </div>
   </header>
+
+  <!-- 档案工作区管理弹层：列表（改名/改角色/删除空档案）+ 新建表单。
+       用户输入一律 textContent 渲染（同 settings.js 纪律），不拼 innerHTML。 -->
+  <div id="profileDialog" class="profile-dialog hidden" role="dialog" aria-modal="true"
+    aria-labelledby="profileDialogTitle">
+    <div class="profile-dialog-card">
+      <div class="panel-head">
+        <h2 id="profileDialogTitle">档案工作区</h2>
+        <button id="profileDialogClose" class="btn-ghost profile-close-btn" type="button">关闭</button>
+      </div>
+      <p class="profile-dialog-hint muted">每个档案工作区有独立的会话、档案与画像数据；角色决定入口与呈现，能力不裁剪。切换后左栏与会话视图随之换边。</p>
+      <div id="profileStatus" class="profile-status hidden" role="status" aria-live="polite"></div>
+      <div id="profileList" class="profile-list"></div>
+      <form id="profileCreateForm" class="profile-create" novalidate>
+        <h3>新建档案</h3>
+        <div class="profile-create-fields">
+          <label>key（小写字母/数字/连字符/下划线）
+            <input id="profileNewKey" type="text" maxlength="32" autocomplete="off" />
+          </label>
+          <label>显示名称
+            <input id="profileNewName" type="text" maxlength="40" autocomplete="off" />
+          </label>
+          <label>角色
+            <select id="profileNewRole"></select>
+          </label>
+        </div>
+        <div class="profile-create-actions">
+          <button id="profileCreateSubmit" class="btn-primary" type="submit">创建档案</button>
+        </div>
+      </form>
+    </div>
+  </div>
 
   <!-- 关于弹层（原「关于系统」面板要点迁移到这里；不再占右栏位置） -->
   <div id="aboutDialog" class="about-dialog hidden" role="dialog" aria-modal="true"
@@ -95,6 +140,8 @@
           <h2>会话</h2>
           <button id="chatNewSession" class="btn-ghost chat-new-btn" type="button">＋ 新建会话</button>
         </div>
+        <!-- 当前档案工作区（多 Profile 分家）：由 chat.js 在 profiles 事件后刷新 -->
+        <p class="chat-profile-line" id="chatProfileLine"></p>
         <ul id="chatSessionList" class="chat-session-list">
           <li class="empty">暂无会话，发消息即可自动创建</li>
         </ul>
@@ -199,5 +246,8 @@
   <script src="static/settings.js"></script>
   <script src="static/cards.js"></script>
   <script src="static/chat.js"></script>
+  <!-- 档案工作区（多 Profile 分家）：切换器 + 管理弹层；chat.js 监听
+       mylocalai:profile-changed 事件重载左栏（两者经 DOM 事件解耦，不互相 import） -->
+  <script src="static/profiles.js"></script>
 </body>
 </html>

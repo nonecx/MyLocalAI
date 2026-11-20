@@ -242,11 +242,11 @@ class TestMarkersStore(unittest.TestCase):
 
     def test_fresh_migrate_reaches_current_schema_with_markers_table(self):
         """全新库 migrate：应用全部迁移段、schema_migrations 记到当前版本、
-        dossier_markers 表与唯一索引都在（v4 建表，v5 追加保留期列，当前 5）。"""
+        dossier_markers 表与唯一索引都在（v4 建表，v5 追加保留期列，
+        v6 建 Profile 工作区，当前 SCHEMA_VERSION）。"""
         conn = connect(self.db)
         try:
             self.assertEqual(migrate(conn), SCHEMA_VERSION)
-            self.assertEqual(SCHEMA_VERSION, 5)
             self.assertEqual(
                 conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0],
                 SCHEMA_VERSION)
@@ -261,8 +261,8 @@ class TestMarkersStore(unittest.TestCase):
 
     def test_upgrade_from_v3_keeps_history(self):
         """v3 老库升级路径：手工只跑 MIGRATIONS[0:3] 建库、登记版本 1-3（真实 v3 库
-        的 schema_migrations 状态）并写入历史数据，再 migrate 补跑 v4+v5 两段——
-        历史档案与结论原样保留。"""
+        的 schema_migrations 状态）并写入历史数据，再 migrate 补跑 v4+v5+v6 各段——
+        历史档案与结论原样保留，且被回填到默认档案工作区（v6 分家不丢旧数据）。"""
         conn = connect(self.db)
         try:
             # schema_migrations 由 migrate() 引导创建，不在迁移脚本里——手工补上
@@ -281,7 +281,7 @@ class TestMarkersStore(unittest.TestCase):
             conn.execute(
                 "INSERT INTO conclusions (dossier_id, version, label, created_at)"
                 " VALUES (?, 1, '疑似谣言', '2026-10-01T08:00:00+08:00')", (did,))
-            self.assertEqual(migrate(conn), 2)      # 补跑 v4 + v5
+            self.assertEqual(migrate(conn), SCHEMA_VERSION - 3)   # 补跑 v4 + v5 + v6
             self.assertEqual(
                 conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0],
                 SCHEMA_VERSION)
@@ -290,6 +290,13 @@ class TestMarkersStore(unittest.TestCase):
             row = conn.execute("SELECT label FROM conclusions WHERE dossier_id = ?",
                                (did,)).fetchone()
             self.assertEqual(row["label"], "疑似谣言")
+            # v6 回填：旧档案归默认档案工作区（role=full，不裁剪能力）
+            prof = conn.execute("SELECT profile_id FROM dossiers WHERE id = ?",
+                                (did,)).fetchone()
+            self.assertIsNotNone(prof["profile_id"])
+            role = conn.execute(
+                "SELECT role FROM profiles WHERE id = ?", (prof["profile_id"],)).fetchone()
+            self.assertEqual(role["role"], "full")
         finally:
             conn.close()
 

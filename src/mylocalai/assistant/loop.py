@@ -219,6 +219,27 @@ def _add_usage_delta(cost: Dict[str, int], base: Optional[Dict[str, int]],
         cost["requests"] += fallback_requests
 
 
+#: 卡片 → 角色呈现（v6 多 Profile 分家）：普通用户版隐去的**展示字段**。
+#: 只动呈现、不动判定语义：label/置信度/证据充分度/as_of/复审条件原样保留
+#: （口径诚实铁律：该标的都标）；risk_score 是 verdict.assess 的兼容层数值，
+#: 按 Agent工作流规格 §1.6“前端不显示风险分/置信度等数值评分”的方向，普通用户
+#: 视图不展示——档案详情页与 full/analyst/monitor 角色仍可看到完整数值。
+_LAYERSON_HIDDEN_CARD_FIELDS = ("risk_score",)
+
+
+def _present_for_role(card: Dict[str, Any], role: str) -> Dict[str, Any]:
+    """按档案角色调整对话卡片的呈现（layperson = 普通用户简化版）。
+
+    简化只发生在**对话卡片**（card 事件 + kind="card" 落库的这一份），不改
+    store 里的结论行——历史回放渲染同一份简化卡片，行为自洽。
+    """
+    if role != "layperson" or not isinstance(card, dict):
+        return card
+    out = {k: v for k, v in card.items() if k not in _LAYERSON_HIDDEN_CARD_FIELDS}
+    out["presentation"] = "simple"
+    return out
+
+
 class _CostDossiers:
     """ctx.dossiers 的成本接线代理（M4）：把真实 delta 注入 record_analysis。
 
@@ -252,6 +273,12 @@ def _qualified_profile(store: Any, rules: Dict[str, Any]) -> Optional[Dict[str, 
     {domain: {"refutes": n}}。空库返回 {}（引擎对空 dict 逐位不变）；min_refutes 取
     rules["source_profile"]["min_refutes"]，缺段/写坏按 2 兜底、不抛；任何读取故障
     返回 None（等价"不启用"）——画像是增益面，绝不挡核查。
+
+    口径说明（v6 多 Profile 分家）：这里的画像**按全库聚合、不按工作区过滤**。
+    原因：verify 服务在 _ServiceBox 里装配（无会话上下文），且测试 stub 的
+    services["verify"] 签名已被锁定（加参数会打穿约 40 处调用点）。单用户前提下
+    这是可接受的保守取向：抬分只影响证据权重，不向任何界面泄露别的工作区数据；
+    画像的**可见面**（insights 卡 / /api/insights/*）已按工作区过滤。
     """
     try:
         # 惰性 import（先例：_usage_now / _verify 内的引擎 import），测试可 mock 模块属性
@@ -750,12 +777,38 @@ class AssistantLoop:
 
     # ---- 指纹先问再查（M3-1 首要验收项：谣言库沉淀 + 相似说法秒回） ----
 
-    def _fingerprint_hit(self, plan: Dict[str, Any], rules: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _session_profile(self, sessions: Any, session_id: int) -> Dict[str, Any]:
+        """会话归属的档案工作区：{"profile_id", "role"}（v6 多 Profile 分家）。
+
+        role 决定卡片呈现（layperson → 简化结论卡）；profile_id 供工具层做
+        跨工作区防护与建档归属。任何失败（stub 会话库/旧装配/库故障）一律按
+        {"profile_id": None, "role": "full"} 降级——不裁剪、不拦截，与加角色
+        分家前的行为逐位一致。
+        """
+        getter = getattr(sessions, "session_profile", None)
+        if not callable(getter):
+            return {"profile_id": None, "role": "full"}
+        try:
+            row = getter(int(session_id)) or {}
+        except Exception:  # noqa: BLE001  工作区解析失败 = 不裁剪
+            return {"profile_id": None, "role": "full"}
+        pid = row.get("profile_id") if isinstance(row, dict) else None
+        try:
+            pid = int(pid) if pid is not None else None
+        except (TypeError, ValueError):
+            pid = None
+        role = str(row.get("role") or "").strip() if isinstance(row, dict) else ""
+        return {"profile_id": pid, "role": role or "full"}
+
+    def _fingerprint_hit(self, plan: Dict[str, Any], rules: Dict[str, Any],
+                         profile_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """verify_claim 执行前查指纹库：命中返回最高分行（含 score），未命中/故障返回 None。
 
         只看首个计划步骤（M2 路由恒单步；多槽位是 M3 预留）：verify_claim 才查——
         recheck_dossier 是对已有档案的显式重查，用户点名旧档案，无"先问"可言。
         指纹是增益层：库读失败/规则写坏一律按"不命中"降级，绝不挡正常核查。
+        profile_id 非 None 时只召回本工作区沉淀的指纹（别的工作区查过的说法
+        不该在这里被"秒回"）。
         """
         steps = plan.get("steps") or []
         if not steps:
@@ -770,7 +823,8 @@ class AssistantLoop:
             threshold = float(rules.get("fingerprint_threshold", 0.72))
             k = int((rules.get("fingerprint") or {}).get("shingle_size",
                                                          DEFAULT_SHINGLE_SIZE))
-            hits = self.dossiers.store.find_fingerprints(text, threshold, k=k)
+            hits = self.dossiers.store.find_fingerprints(text, threshold, k=k,
+                                                         profile_id=profile_id)
         except Exception:  # noqa: BLE001  指纹闸故障 ≠ 核查故障：放行
             return None
         return hits[0] if hits else None
@@ -893,6 +947,12 @@ class AssistantLoop:
         sessions, dossiers, services = self.sessions, self.dossiers, self.services
         cost = result["cost"]
 
+        # ② 会话所属档案工作区（v6 多 Profile 分家）：role 决定卡片呈现，
+        #    profile_id 供工具层做跨工作区防护与建档归属。解析失败按 full/None 降级。
+        profile = self._session_profile(sessions, session_id)
+        profile_id: Optional[int] = profile.get("profile_id")
+        profile_role: str = str(profile.get("role") or "full")
+
         # ① 用户消息落库；历史快照定在"本回合产物之前"（叙述吃 digest，不吃卡片 JSON）
         sessions.add_message(session_id, "user", user_text)
         # Persistence policy controls disk storage, not the in-flight conversation.
@@ -1006,7 +1066,7 @@ class AssistantLoop:
         #    ask_before_reuse=False → 不问，直接旁过为 get_dossier 秒回旧结论（自动复用）。
         #    "重查"构造的回合（skip_fp=True）不进本闸——否则同文再次命中、问了又问。
         if not skip_fp:
-            hit = self._fingerprint_hit(plan, rules)
+            hit = self._fingerprint_hit(plan, rules, profile_id=profile_id)
             if hit is not None:
                 if bool((rules.get("fingerprint") or {}).get("ask_before_reuse", True)):
                     self._fingerprint_ask_turn(session_id, hit, events, result, cost)
@@ -1066,7 +1126,7 @@ class AssistantLoop:
                 ctx = SimpleNamespace(sessions=sessions,
                                       dossiers=_CostDossiers(dossiers, tool_base),
                                       events=events, cancel_check=cancel_check,
-                                      services=services)
+                                      services=services, profile_id=profile_id)
                 if spec is None:
                     tool_error = f"工具未注册: {step['action']}"
                 else:
@@ -1125,7 +1185,8 @@ class AssistantLoop:
             card = out.get("card")
             if isinstance(card, dict) and card:
                 self._emit_card(events, sessions, session_id,
-                                _CARD_TYPE.get(str(step["action"]), "conclusion"), card, run_id,
+                                _CARD_TYPE.get(str(step["action"]), "conclusion"),
+                                card, run_id, role=profile_role,
                                 claim_answer=claim_answer if isinstance(claim_answer, dict) else None)
                 result["card"] = card
             cost["requests"] += int(run_cost.get("requests", 0))
@@ -1215,6 +1276,7 @@ class AssistantLoop:
 
     def _emit_card(self, events: EventStream, sessions: Any, session_id: int,
                    card_type: str, card: Dict[str, Any], run_id: Optional[int],
+                   role: str = "full",
                    claim_answer: Optional[Dict[str, Any]] = None) -> None:
         """card 事件 + kind="card" 落库。
 
@@ -1222,7 +1284,12 @@ class AssistantLoop:
         额外把卡片字段并置在顶层——chat.js 的历史回放（renderHistoryMessage）把整包
         payload 交给 renderCard 后按 card_type 分发、直接读顶层字段；实时路径
         onCard 会先解 d.card，两种形状都成立（与 web 层实现逐一对过）。
+
+        role（v6 多 Profile 分家）：layperson（普通用户）走 _present_for_role 简化
+        （隐去 risk_score 数值、标 presentation=simple）后再 emit/落库——实时与
+        历史回放看到同一份简化卡片；其余角色原样。
         """
+        card = _present_for_role(card, role)
         payload: Dict[str, Any] = {"card_type": card_type, "card": card}
         if isinstance(claim_answer, dict):
             payload["claim_answer"] = claim_answer

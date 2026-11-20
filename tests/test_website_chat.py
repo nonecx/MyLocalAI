@@ -480,5 +480,102 @@ class TestChatFrontendConsistency(unittest.TestCase):
             self.assertNotIn(marker, self.html, f"index.html 仍残留旧前端标记：{marker}")
 
 
+# --------------------------------------------------------------- 5. 档案工作区前端自洽
+class TestProfilesFrontendConsistency(unittest.TestCase):
+    """profiles.js / profiles.css 与后端 /api/profiles、index.html 的自洽（v6 角色扩展）。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.html = _read(INDEX_HTML)
+        cls.profiles_js = _read(STATIC / "profiles.js")
+        cls.profiles_css = _read(STATIC / "profiles.css")
+        cls.style_css = _read(STATIC / "style.css")
+
+    @staticmethod
+    def _normalize(path: str) -> str:
+        path = path.split("?")[0]
+        return re.sub(r"\{[^}]*\}", "{}", path)
+
+    def test_index_references_profiles_assets(self):
+        """index.html 引用 profiles.js/profiles.css，且文件真实存在。"""
+        for ref in ("static/profiles.js", "static/profiles.css"):
+            self.assertIn(ref, self.html, f"index.html 未引用 {ref}")
+            self.assertTrue((STATIC / Path(ref).name).exists(), f"文件不存在：{ref}")
+
+    def test_profiles_js_api_paths_exist_in_backend(self):
+        """profiles.js 引用的每个 /api/* 路径（含 {id} 模板）都在 app.py 路由表里。
+
+        路由表经 openapi.json 取：FastAPI 0.163 把 include_router 进来的路由包成
+        _IncludedRouter（app.routes 里 .path 为空），直接迭代会漏掉整组路由。
+        """
+        from app import app as fastapi_app
+        from fastapi.testclient import TestClient
+        spec = TestClient(fastapi_app).get("/openapi.json").json()
+        routes = {self._normalize(p) for p in (spec.get("paths") or {})}
+        paths = re.findall(r'"(/api/[^"]+)"', self.profiles_js)
+        self.assertTrue(paths, "没从 profiles.js 里解析到 API 路径")
+        for path in paths:
+            self.assertIn(self._normalize(path), routes,
+                          f"profiles.js 引用了后端不存在的接口：{path}")
+        # 五个端点逐个点名（少一个前端就是半残；路径参数名被 normalize 成 {}）
+        for endpoint in ("/api/profiles", "/api/profiles/{}",
+                         "/api/profiles/{}/activate"):
+            self.assertIn(endpoint, routes, f"后端缺少 Profile 端点：{endpoint}")
+
+    def test_profiles_js_element_ids_exist_in_html(self):
+        """profiles.js 的 $("#id") 引用的每个 id 在 index.html 里都有。"""
+        used = set(re.findall(r'\$\("#([A-Za-z][\w]*)', self.profiles_js))
+        self.assertTrue(used, "profiles.js 里没引用任何元素 id")
+        missing = sorted(i for i in used if f'id="{i}"' not in self.html)
+        self.assertEqual(missing, [], f"profiles.js 引用了 HTML 里不存在的元素 id: {missing}")
+        for core in ("profileBtn", "profileMenu", "profileDialog", "profileDialogClose",
+                     "profileList", "profileCreateForm", "profileNewKey",
+                     "profileNewName", "profileNewRole", "profileStatus",
+                     "profileName", "profileRoleIcon"):
+            self.assertIn(core, used, f"profiles.js 未接线 {core}")
+
+    def test_profiles_js_never_builds_html_from_user_input(self):
+        """纪律同 settings.js：禁止 innerHTML 类 HTML 拼接，用户输入走 textContent。"""
+        sinks = re.findall(r"\.(?:innerHTML|outerHTML)\b|insertAdjacentHTML\(|\bdocument\.write\(",
+                           self.profiles_js)
+        self.assertEqual(sinks, [], f"profiles.js 出现 HTML 注入点：{sinks}")
+        self.assertIn("document.createElement", self.profiles_js)
+        self.assertIn("textContent", self.profiles_js)
+
+    def test_profile_changed_event_name_matches_across_files(self):
+        """切换事件名在 profiles.js（派发方）与 chat.js（监听方）一致。"""
+        chat_js = _read(CHAT_JS)
+        m = re.search(r'const CHANGED_EVENT = "([^"]+)"', self.profiles_js)
+        self.assertIsNotNone(m, "profiles.js 缺少 CHANGED_EVENT 常量")
+        event = m.group(1)
+        self.assertIn(f'const PROFILE_CHANGED_EVENT = "{event}"', chat_js,
+                      "chat.js 与 profiles.js 的切换事件名不一致")
+        self.assertIn(f'new CustomEvent(CHANGED_EVENT', self.profiles_js)
+        self.assertIn(f'addEventListener(PROFILE_CHANGED_EVENT', chat_js)
+
+    def test_profiles_css_reuses_root_tokens(self):
+        """profiles.css 只用 style.css 已声明的 :root 令牌，不另起一套配色。"""
+        root_block = self.style_css.split(":root {", 1)[1].split("}", 1)[0]
+        declared = set(re.findall(r"(--[a-z0-9-]+)\s*:", root_block))
+        used = set(re.findall(r"var\((--[a-z0-9-]+)\)", self.profiles_css))
+        self.assertTrue(used, "profiles.css 没用到任何 :root 令牌")
+        self.assertEqual(sorted(used - declared), [],
+                         "profiles.css 用了 style.css 未声明的变量")
+        self.assertNotRegex(self.profiles_css, r"(?m)^\s*:root\s*\{",
+                            "profiles.css 不该重新定义 :root 配色")
+
+    def test_profiles_css_classes_have_styles(self):
+        """profiles.js 动态用到的 profile-* class 在 profiles.css 都有定义。"""
+        used = set()
+        for chunk in re.findall(r'className = "([^"]+)"', self.profiles_js):
+            used.update(chunk.split())
+        for chunk in re.findall(r'classList\.(?:add|toggle|remove)\("([^"]+)"', self.profiles_js):
+            used.add(chunk)
+        targets = sorted(n for n in used if n.startswith("profile-"))
+        self.assertTrue(targets, "解析不到 profiles.js 使用的 profile-* 类")
+        missing = [n for n in targets if f".{n}" not in self.profiles_css]
+        self.assertEqual(missing, [], f"profiles.css 缺少定义：{missing}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -100,15 +100,20 @@
     const hasRisk = riskRaw !== null && riskRaw !== undefined && Number.isFinite(risk);
     const conf = String(c.confidence || "");
     const recheck = Array.isArray(c.recheck_conditions) ? c.recheck_conditions : [];
+    /* presentation === "simple"（v6 普通用户档案工作区）：后端已隐去 risk_score
+       数值（Agent工作流规格 §1.6 方向），这里换标题并加一行说明——简化必须看得见。 */
+    const simple = c.presentation === "simple";
+    const title = simple ? "🧾 核查结果" : "🧾 核查结论";
     return `
-      <div class="chat-card chat-card-conclusion">
-        <div class="chat-card-title">🧾 核查结论<span class="badge gray">结论卡</span>${degradedBadge(c)}</div>
+      <div class="chat-card chat-card-conclusion${simple ? " chat-card-simple" : ""}">
+        <div class="chat-card-title">${title}${simple ? "" : '<span class="badge gray">结论卡</span>'}${degradedBadge(c)}</div>
         <div class="chat-card-label">${escapeHtml(c.label || "（无标签）")}</div>
         ${hasRisk ? `
         <div class="score-line">
           <div class="score-num">风险分 <b>${risk}</b> / 100</div>
           <div class="score-bar"><i style="width: ${Math.min(100, Math.max(0, risk))}%"></i></div>
         </div>` : ""}
+        ${simple ? '<p class="chat-simple-note muted">已按普通用户视图简化：不展示风险分数值；完整数值与证据批次可在档案库查看。</p>' : ""}
         <div class="chat-badges">
           ${conf ? `<span class="badge ${CONF_CLS[conf] || "gray"}">置信度 ${escapeHtml(conf)}</span>` : ""}
           <span class="badge gray">证据充分度：官方 ${Number(suff.official) || 0} · 非官方 ${Number(suff.unofficial) || 0} · 未知 ${Number(suff.unknown) || 0} / 共 ${Number(suff.total) || 0} 条</span>
