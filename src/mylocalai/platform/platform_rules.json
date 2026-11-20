@@ -1,0 +1,32 @@
+{
+  "_comment": "热门监测平台规则（platform 包）：改这里而非改代码。加载器见 platform/rules.py。",
+  "enabled": false,
+  "scan_interval_s": 900,
+  "max_queries_per_scan": 5,
+  "max_candidates_per_query": 8,
+  "screen": {
+    "_comment": "初筛门槛：E 低于 heat_screen_e 且无话术特征命中的候选只登记不深查。",
+    "heat_screen_e": 40
+  },
+  "deep_verify": {
+    "_comment": "深查（RumorAgent 全链路）预算：单次巡检最多深查几条、总时限多少秒。",
+    "max_per_scan": 3,
+    "deadline_s": 120
+  },
+  "dedup": {
+    "_comment": "指纹去重阈值（与 assistant_rules.json 的 fingerprint_threshold 同口径）。",
+    "fingerprint_threshold": 0.72
+  },
+  "risk": {
+    "_comment": "传播风险分级：加权分（各因素 0-100）× 权重 → 档位阈值；floors 是最低档位规则。全部纯函数推导，大模型不参与。",
+    "weights": {"heat": 0.4, "growth": 0.15, "breadth": 0.2, "rumor": 0.25},
+    "breadth_full_sources": 10,
+    "levels": {"suspect": 35, "high": 60, "urgent": 80},
+    "floors": [
+      {"min_rumor_score": 60, "min_breadth": 50, "level": "high"},
+      {"min_growth": 60, "min_heat": 50, "level": "suspect"}
+    ]
+  },
+  "watch_queries": [],
+  "rss_sources": []
+}

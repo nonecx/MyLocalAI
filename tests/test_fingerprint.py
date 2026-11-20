@@ -256,7 +256,7 @@ class TestStoreClaimFingerprints(unittest.TestCase):
 
         store = DossierStore(db)   # 构造即迁移 v2→当前版本
         try:
-            self.assertEqual(SCHEMA_VERSION, 5)
+            self.assertEqual(SCHEMA_VERSION, 6)
             row = store.get_dossier(did)
             self.assertEqual(row["title"], "旧档案")
             self.assertEqual(store.latest_conclusion(did)["label"], "疑似谣言")
@@ -270,7 +270,7 @@ class TestStoreClaimFingerprints(unittest.TestCase):
                     "SELECT version FROM schema_migrations")}
             finally:
                 conn2.close()
-            self.assertEqual(versions, {1, 2, 3, 4, 5})
+            self.assertEqual(versions, {1, 2, 3, 4, 5, 6})
         finally:
             store.close()
 

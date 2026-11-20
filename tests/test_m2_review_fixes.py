@@ -461,15 +461,17 @@ from tests.test_import_rules import FORBIDDEN, _violations  # noqa: E402
 
 class TestImportRulesExtended(unittest.TestCase):
     """FORBIDDEN 补三行（§4.1 依赖方向）：assistant 禁 web、dossier 禁 web+assistant、
-    web 为顶层无上游可禁（空集）。"""
+    web 为顶层无上游可禁（空集）。2026-11-20 平台包（platform）落地后再补一行：
+    上游各包禁 platform、platform 自身禁 web+assistant。"""
 
     def test_new_forbidden_entries(self):
-        self.assertEqual(FORBIDDEN["mylocalai.assistant"], {"web"})
-        self.assertEqual(FORBIDDEN["mylocalai.dossier"], {"web", "assistant"})
+        self.assertEqual(FORBIDDEN["mylocalai.assistant"], {"web", "platform"})
+        self.assertEqual(FORBIDDEN["mylocalai.dossier"], {"web", "assistant", "platform"})
+        self.assertEqual(FORBIDDEN["mylocalai.platform"], {"web", "assistant"})
         self.assertEqual(FORBIDDEN["mylocalai.web"], set())
 
     def test_whole_tree_still_violation_free(self):
-        """新规则下全仓 AST 检查仍零违规（含新增的 dossier/assistant/web 三包）。"""
+        """新规则下全仓 AST 检查仍零违规（含新增的 dossier/assistant/web/platform 四包）。"""
         self.assertEqual(_violations(), [])
 
 

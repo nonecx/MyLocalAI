@@ -26,7 +26,7 @@ from typing import Any, Dict, Iterable, List, Optional
 __all__ = ["SCHEMA_VERSION", "DEFAULT_DB_PATH", "connect", "migrate",
            "DossierStore", "default_db_path"]
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 #: 顺序迁移：索引 i 的脚本把库从版本 i 升到 i+1。永不修改已发布的条目，只允许追加。
 MIGRATIONS: List[str] = [
@@ -203,6 +203,54 @@ MIGRATIONS: List[str] = [
     CREATE INDEX IF NOT EXISTS idx_sessions_input_expiry ON sessions(raw_input_expires_at);
     CREATE INDEX IF NOT EXISTS idx_messages_input_expiry ON messages(raw_input_expires_at);
     CREATE INDEX IF NOT EXISTS idx_messages_result_expiry ON messages(result_expires_at);
+    """,
+    # v6: 平台域三表（热门监测平台）。watch_queries 是监控词；feed_entries 是巡检
+    # 发现的信息流条目（url 唯一约束即去重第一道闸，result_expires_at 走 results
+    # 保留期）；scan_runs 记录每次巡检的执行状态。建表顺序：scan_runs 先于
+    # feed_entries（后者有 FK 指向前者）。
+    """
+    CREATE TABLE IF NOT EXISTS scan_runs (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        started_at  TEXT NOT NULL,
+        finished_at TEXT,
+        status      TEXT NOT NULL DEFAULT 'running',
+        queries     INTEGER NOT NULL DEFAULT 0,
+        candidates  INTEGER NOT NULL DEFAULT 0,
+        verified    INTEGER NOT NULL DEFAULT 0,
+        degraded    INTEGER NOT NULL DEFAULT 0,
+        error       TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS watch_queries (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        query      TEXT NOT NULL UNIQUE,
+        enabled    INTEGER NOT NULL DEFAULT 1,
+        note       TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS feed_entries (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        query_id      INTEGER NOT NULL REFERENCES watch_queries(id) ON DELETE CASCADE,
+        scan_id       INTEGER REFERENCES scan_runs(id) ON DELETE SET NULL,
+        title         TEXT NOT NULL DEFAULT '',
+        url           TEXT NOT NULL UNIQUE,
+        domain        TEXT NOT NULL DEFAULT '',
+        domain_tier   TEXT NOT NULL DEFAULT '',
+        snippet       TEXT NOT NULL DEFAULT '',
+        discovered_at TEXT NOT NULL DEFAULT '',
+        e_score       REAL,
+        e_prev        REAL,
+        risk_level    TEXT NOT NULL DEFAULT 'notice',
+        risk_reasons  TEXT NOT NULL DEFAULT '[]',
+        verdict_label TEXT NOT NULL DEFAULT '',
+        risk_score    REAL,
+        dossier_id    INTEGER REFERENCES dossiers(id) ON DELETE SET NULL,
+        status        TEXT NOT NULL DEFAULT 'new',
+        result_expires_at TEXT,
+        created_at    TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_feed_query ON feed_entries(query_id, id);
+    CREATE INDEX IF NOT EXISTS idx_feed_risk ON feed_entries(risk_level, id);
+    CREATE INDEX IF NOT EXISTS idx_feed_expiry ON feed_entries(result_expires_at);
     """,
 ]
 
