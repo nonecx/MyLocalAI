@@ -10,6 +10,7 @@
       POST /api/attention     关注度评分（手动传 x/y/z，纯确定性、不调大模型）
       POST /api/attention/search  关注度评分（输入话题，联网估出 x/y/z 后评分）
       GET  /api/history       最近的分析记录（内存保存，重启清空）
+      GET  /api/models        模型管理（提供方 / 模型目录 / 密钥，设置面板用）
       GET  /api/health        健康检查
   - 托管 static/ 下的前端页面，单进程即可前后端一体运行
   - 交互式接口文档：http://127.0.0.1:8000/docs
@@ -46,9 +47,11 @@ from mylocalai.classic.language import analyze_aggression, analyze_emotion  # no
 from mylocalai.classic.logic import analyze_logic  # noqa: E402
 from mylocalai.llm import llm_cache  # noqa: E402
 from mylocalai.llm import llm_client as _llm_client  # noqa: E402
+from mylocalai.llm import model_registry as _model_registry  # noqa: E402
 from mylocalai.util.console_io import force_utf8_stdio  # noqa: E402
 from mylocalai.util.text_safety import has_surrogates, sanitize_text  # noqa: E402
 from mylocalai.web import platform_api  # noqa: E402
+from mylocalai.web.models_api import router as models_router  # noqa: E402
 from mylocalai.web.privacy_api import router as privacy_router  # noqa: E402
 
 # 非 UTF-8 控制台（英文 Windows 的 cp1252 等）下，日志里的中文会抛 UnicodeEncodeError。
@@ -101,6 +104,9 @@ app = FastAPI(
     version="1.0.0",
 )
 app.include_router(privacy_router)
+# 模型管理（设置面板）：与 privacy_router 紧挨——两者都是"用户在本机改自己的配置"，
+# 前缀/异常口径保持一致（404 未知、400 中文 detail、写后 llm_client.reset_cache()）
+app.include_router(models_router)
 # 监测平台（platform 包）：状态/信息流/预警/监控词/巡检触发；调度器线程由
 # platform_api.start_scheduler_if_enabled() 在下方启动（默认 enabled=false 空操作）
 app.include_router(platform_api.router)
@@ -144,7 +150,6 @@ _warn_if_multiworker()
 # 日志，网站主功能不受影响（fail-soft）。
 if _WORKERS <= 1:
     platform_api.start_scheduler_if_enabled()
-
 
 
 class AnalyzeRequest(BaseModel):
@@ -206,6 +211,10 @@ def health() -> Dict[str, Any]:
             "base_url": _llm_client.get_base_url(),
             "error": "" if llm_ok else llm_detail,
         },
+        # 模型注册表的加载期告警数：data/models.json 缺失/损坏/版本不符时 > 0
+        # （注册表会 fail-soft 退回内置提供方表，服务照常起）。原文在设置面板里看，
+        # 这里给一个计数，便于不看页面也知道"配置没被正常加载"。
+        "models": {"warnings": len(_model_registry.warnings())},
     }
 
 

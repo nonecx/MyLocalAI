@@ -19,6 +19,11 @@
     "cache_namespace": "assistant_sum",
     "trigger_messages": 60
   },
+  "skills_model": {
+    "temperature": 0,
+    "max_tokens": 800,
+    "cache_namespace": "assistant_skills"
+  },
   "max_tool_calls_per_turn": 2,
   "turn_deadline_s": 180,
   "context_char_budget": 12000,
@@ -34,7 +39,8 @@
   "tool_allowlist": [
     "verify_claim", "analyze_speech", "check_heat", "compute_heat",
     "list_dossiers", "get_dossier", "recheck_dossier", "export_card",
-    "search_web", "read_opinions", "deep_read", "insights", "platform_feed",
+    "search_web", "read_opinions", "deep_read", "insights", "collect_evidence",
+    "platform_feed",
     "chitchat", "clarify", "refuse"
   ],
   "refusal_triggers": [

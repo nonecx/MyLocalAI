@@ -357,6 +357,57 @@
       </div>`;
   }
 
+  /* ---------- 新事实核查答案（双维、逐 claim、默认不泄露旧评分） ---------- */
+  const RUMOR_LABELS = {
+    propagation_insufficient: "传播证据不足",
+    awaiting_review: "尚待核查",
+    suspected_rumor: "疑似谣言（尚未证实）",
+    refuted_rumor: "已证伪的谣言",
+    no_specific_issue_found: "未发现具体问题",
+  };
+
+  function renderClaimAnswer(answer) {
+    answer = answer && typeof answer === "object" ? answer : {};
+    const claims = Array.isArray(answer.claims) ? answer.claims : [];
+    if (answer.answer_status !== "validated") {
+      const rows = claims.map((claim) => {
+        const limitations = Array.isArray(claim.limitations) ? claim.limitations : [];
+        return `<li><b>${escapeHtml(claim.claim_excerpt || "待核查主张")}</b>` +
+          `<div>真实性判断：尚未形成经过完整校验的答案。</div>` +
+          `<div>谣言状态：暂不下五态结论。</div>` +
+          `${limitations.length ? `<ul>${limitations.map((x) => `<li>${escapeHtml(x)}</li>`).join("")}</ul>` : ""}</li>`;
+      }).join("");
+      return `<section class="chat-card chat-card-claim-answer" data-answer-status="${escapeHtml(answer.answer_status || "insufficient_data")}">` +
+        `<div class="chat-card-title">事实核查</div>` +
+        `<p>本轮没有足够的已核验材料形成完整判断；旧风险标签不代表真假或谣言状态。</p>` +
+        `${rows ? `<ol>${rows}</ol>` : ""}` +
+        `${Array.isArray(answer.limitations) && answer.limitations.length ? `<ul>${answer.limitations.map((x) => `<li>${escapeHtml(x)}</li>`).join("")}</ul>` : ""}` +
+        `</section>`;
+    }
+    const rows = claims.map((claim) => {
+      const truth = claim.truth_assessment || {};
+      const rumor = claim.rumor_assessment || {};
+      const evidence = Array.isArray(claim.key_evidence) ? claim.key_evidence : [];
+      const records = Array.isArray(claim.propagation_records) ? claim.propagation_records : [];
+      const refs = evidence.map((item) => `<li><span>${escapeHtml(item.title || item.source_id || "来源")}</span>` +
+        `${item.url ? ` <a href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer">打开来源</a>` : ""}` +
+        `${item.quote ? `<blockquote>${escapeHtml(item.quote)}</blockquote>` : ""}</li>`).join("");
+      const propagation = records.map((item) => `<li><a href="${escapeHtml(item.url || "")}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.url || "公开发布记录")}</a>` +
+        `${item.verified_at ? `（核验于 ${escapeHtml(item.verified_at)}）` : ""}</li>`).join("");
+      const limitations = [...(rumor.limitations || []), ...(truth.limitations || [])];
+      return `<li class="claim-answer-item"><b>${escapeHtml(claim.claim_excerpt || "待核查主张")}</b>` +
+        `<p>真实性判断：${escapeHtml(truth.statement || "未提供")}</p>` +
+        `<p>谣言状态：<strong>${escapeHtml(RUMOR_LABELS[rumor.state] || "状态未知")}</strong></p>` +
+        `${refs ? `<details open><summary>关键证据</summary><ul>${refs}</ul></details>` : ""}` +
+        `${propagation ? `<details><summary>公开传播记录</summary><ul>${propagation}</ul></details>` : ""}` +
+        `${limitations.length ? `<ul>${limitations.map((x) => `<li>${escapeHtml(x)}</li>`).join("")}</ul>` : ""}` +
+        `</li>`;
+    }).join("");
+    return `<section class="chat-card chat-card-claim-answer" data-answer-status="validated">` +
+      `<div class="chat-card-title">事实核查</div><ol>${rows}</ol>` +
+      `<div class="chat-asof">核查时间：${escapeHtml(answer.checked_at || "未知")}</div></section>`;
+  }
+
   /* ---------- 5. 证据研究卡（collect_evidence：取证三技能，只读取证） ----------
      由后端 collect_evidence 工具产出：card = {card_type:"evidence", status, task_status,
      as_of, degraded, domain, sources{verified,unverified}, claims, evidence, counts,
@@ -470,7 +521,7 @@
     const statusText = EVIDENCE_STATUS[c.status] || escapeHtml(String(c.status || "未知"));
     const taskText = EVIDENCE_TASK[c.task_status] || "";
     return `
-      <div class="chat-card chat-card-evidence">
+      <div class="chat-card chat-card-evresearch">
         <div class="chat-card-title">🔎 证据研究<span class="badge gray">只读取证 · 不判真假</span>${degradedBadge(c)}</div>
         <div class="chat-badges">
           <span class="badge gray">${escapeHtml(statusText)}</span>
@@ -486,57 +537,6 @@
         <p class="chat-insight-note muted">已执行 ${Number(counts.searches) || 0} 次搜索 · ${Number(counts.pages) || 0} 次读页 · ${Number(counts.llm_calls) || 0} 次模型调用。引文逐字来自实际读取的正文；只述证据，不输出真假结论。</p>
         ${asOfLine(c.as_of)}
       </div>`;
-  }
-
-  /* ---------- 新事实核查答案（双维、逐 claim、默认不泄露旧评分） ---------- */
-  const RUMOR_LABELS = {
-    propagation_insufficient: "传播证据不足",
-    awaiting_review: "尚待核查",
-    suspected_rumor: "疑似谣言（尚未证实）",
-    refuted_rumor: "已证伪的谣言",
-    no_specific_issue_found: "未发现具体问题",
-  };
-
-  function renderClaimAnswer(answer) {
-    answer = answer && typeof answer === "object" ? answer : {};
-    const claims = Array.isArray(answer.claims) ? answer.claims : [];
-    if (answer.answer_status !== "validated") {
-      const rows = claims.map((claim) => {
-        const limitations = Array.isArray(claim.limitations) ? claim.limitations : [];
-        return `<li><b>${escapeHtml(claim.claim_excerpt || "待核查主张")}</b>` +
-          `<div>真实性判断：尚未形成经过完整校验的答案。</div>` +
-          `<div>谣言状态：暂不下五态结论。</div>` +
-          `${limitations.length ? `<ul>${limitations.map((x) => `<li>${escapeHtml(x)}</li>`).join("")}</ul>` : ""}</li>`;
-      }).join("");
-      return `<section class="chat-card chat-card-claim-answer" data-answer-status="${escapeHtml(answer.answer_status || "insufficient_data")}">` +
-        `<div class="chat-card-title">事实核查</div>` +
-        `<p>本轮没有足够的已核验材料形成完整判断；旧风险标签不代表真假或谣言状态。</p>` +
-        `${rows ? `<ol>${rows}</ol>` : ""}` +
-        `${Array.isArray(answer.limitations) && answer.limitations.length ? `<ul>${answer.limitations.map((x) => `<li>${escapeHtml(x)}</li>`).join("")}</ul>` : ""}` +
-        `</section>`;
-    }
-    const rows = claims.map((claim) => {
-      const truth = claim.truth_assessment || {};
-      const rumor = claim.rumor_assessment || {};
-      const evidence = Array.isArray(claim.key_evidence) ? claim.key_evidence : [];
-      const records = Array.isArray(claim.propagation_records) ? claim.propagation_records : [];
-      const refs = evidence.map((item) => `<li><span>${escapeHtml(item.title || item.source_id || "来源")}</span>` +
-        `${item.url ? ` <a href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer">打开来源</a>` : ""}` +
-        `${item.quote ? `<blockquote>${escapeHtml(item.quote)}</blockquote>` : ""}</li>`).join("");
-      const propagation = records.map((item) => `<li><a href="${escapeHtml(item.url || "")}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.url || "公开发布记录")}</a>` +
-        `${item.verified_at ? `（核验于 ${escapeHtml(item.verified_at)}）` : ""}</li>`).join("");
-      const limitations = [...(rumor.limitations || []), ...(truth.limitations || [])];
-      return `<li class="claim-answer-item"><b>${escapeHtml(claim.claim_excerpt || "待核查主张")}</b>` +
-        `<p>真实性判断：${escapeHtml(truth.statement || "未提供")}</p>` +
-        `<p>谣言状态：<strong>${escapeHtml(RUMOR_LABELS[rumor.state] || "状态未知")}</strong></p>` +
-        `${refs ? `<details open><summary>关键证据</summary><ul>${refs}</ul></details>` : ""}` +
-        `${propagation ? `<details><summary>公开传播记录</summary><ul>${propagation}</ul></details>` : ""}` +
-        `${limitations.length ? `<ul>${limitations.map((x) => `<li>${escapeHtml(x)}</li>`).join("")}</ul>` : ""}` +
-        `</li>`;
-    }).join("");
-    return `<section class="chat-card chat-card-claim-answer" data-answer-status="validated">` +
-      `<div class="chat-card-title">事实核查</div><ol>${rows}</ol>` +
-      `<div class="chat-asof">核查时间：${escapeHtml(answer.checked_at || "未知")}</div></section>`;
   }
 
   /* ---------- 监测平台卡（platform_feed 工具：预警/信息流/巡检记录） ----------

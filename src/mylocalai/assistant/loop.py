@@ -39,8 +39,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from mylocalai.llm import llm_cache
 from mylocalai.assistant import router as router_mod
-from mylocalai.assistant import (tools_chapters, tools_heat, tools_insights, tools_memory,
-                                 tools_platform, tools_verify)
+from mylocalai.assistant import (tools_chapters, tools_evidence, tools_heat, tools_insights,
+                                 tools_memory, tools_platform, tools_verify)
 from mylocalai.assistant.context import build_context
 from mylocalai.assistant.events import EventStream
 from mylocalai.assistant.fingerprint import DEFAULT_SHINGLE_SIZE
@@ -70,6 +70,8 @@ _CARD_TYPE = {
     "check_heat": "heat", "compute_heat": "heat",
     # L4 参谋：一张卡三种子视图（kind=patterns/sources/weekly 由卡片字段自带）
     "insights": "insights",
+    # 取证三技能流水线（collect_evidence）：evidence 卡，前端 cards.js renderEvidence
+    "collect_evidence": "evidence",
     # 监测平台只读工具（platform_feed）：platform 卡，前端 cards.js renderPlatform
     "platform_feed": "platform",
 }
@@ -431,6 +433,54 @@ def _real_service(name: str, rules: Dict[str, Any],
                                 **ev_arg, **sig_arg, **hist_arg)
         return _deep_read
 
+    if name == "evidence_skills":
+        def _evidence_skills():
+            from mylocalai.assistant.skills import EvidenceSkills
+            from mylocalai.assistant.skills.pipeline import load_rules
+            from mylocalai.assistant.skills.transport import default_transport
+            from mylocalai.core.privacy import load_preferences
+            from mylocalai.llm import llm_client
+
+            cfg = (rules or {}).get("skills_model") or {}
+
+            def _llm(system, user):
+                return llm_client.chat_json(system, user,
+                    temperature=float(cfg.get("temperature", 0)),
+                    max_tokens=int(cfg.get("max_tokens", 800)),
+                    namespace=str(cfg.get("cache_namespace", "assistant_skills")))
+
+            def _search(query, k=6):
+                # 外发授权门（总览 §5.4）：consent 未开 = 如实降级记 search_unavailable，
+                # 不当"搜过了没找到"；engines 全败同理（网络故障不是空结果）。
+                if not load_preferences().external_allowed("public-search"):
+                    return {"results": [], "degraded": True,
+                            "error": "consent_denied: 外部检索未授权"}
+                from mylocalai.retrieval.search import search_all
+                raw = search_all(str(query), k=k)
+                engines = raw.get("engines") or {}
+                error = str(raw.get("error") or "")
+                degraded = (bool(raw.get("blocked")) or bool(error)
+                            or not any((e or {}).get("ok") for e in engines.values()))
+                if degraded and not error:
+                    error = "检索后端均不可用"
+                # search_all 给的是 SearchResult 对象，pipeline 的 search_fn 契约要 dict
+                # （url/title/snippet）——不过这一层，全部结果会被当成坏形状静默丢弃。
+                rows = [r.to_dict() if hasattr(r, "to_dict") else r
+                        for r in (raw.get("results") or [])]
+                return {"results": rows, "degraded": degraded,
+                        "error": error, "engines": engines}
+            transport = default_transport()
+
+            def _fetch(url, *, allowed_domains=None, cancel_check=None, deadline=None):
+                if not load_preferences().external_allowed("public-web"):
+                    return {"status": "error", "category": "consent_denied",
+                            "detail": "外部取页未授权", "url": url, "final_url": ""}
+                return transport.fetch(url, allowed_domains=allowed_domains,
+                                       cancel_check=cancel_check, deadline=deadline)
+            return EvidenceSkills(rules=load_rules(), search_fn=_search,
+                                  fetch_fn=_fetch, llm_fn=_llm)
+        return _evidence_skills
+
     if name == "route_llm":
         cfg = (rules or {}).get("route_model") or {}
 
@@ -541,6 +591,10 @@ class AssistantLoop:
             # L4 参谋工具（insights）：只读零 LLM 的画像/周报视图，路由枚举与
             # allowlist 同步补 "insights"。
             tools_insights.register_all(reg, None)
+            # 取证三技能流水线（collect_evidence）：只读取证工具——把原文拆成主张、
+            # 逐个去已核验信源找可定位引文，不建档、不出真假分（铁律：不扩权）。
+            # 路由枚举与 allowlist 同步补 "collect_evidence"。
+            tools_evidence.register_all(reg, None)
             # 监测平台只读工具（platform_feed）：预警/信息流/巡检记录，零 LLM。
             # 路由枚举与 allowlist 同步补 "platform_feed"。
             tools_platform.register_all(reg, None)

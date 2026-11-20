@@ -1,0 +1,206 @@
+{
+  "_comment": "信源目录（总览 §5.2 / 契约 §3.7）。域名取自 src/mylocalai/config/sources_registry.json 的 tiers（tier 用该文件档名：官方权威 / 权威媒体/辟谣平台 / 一般门户媒体 / 自媒体/UGC）。目录锚点由 anchor 声明，程序独立判定，不靠模型自封：anchor=true 只代表“本目录登记的可信锚点”，页面上自称权威、模型说“匹配”都不算数；未登记域名最多记为 unverified_candidate，不进入证据检索。",
+  "version": 1,
+  "sources": [
+    {
+      "source_id": "SRC-NHC",
+      "name": "国家卫生健康委员会",
+      "domain": "nhc.gov.cn",
+      "tier": "官方权威",
+      "domains": ["public_health", "food_safety", "policy_law"],
+      "regions": ["CN"],
+      "material_types": ["通报", "政策发布", "回应"],
+      "anchor": true
+    },
+    {
+      "source_id": "SRC-CHINACDC",
+      "name": "中国疾病预防控制中心",
+      "domain": "chinacdc.cn",
+      "tier": "官方权威",
+      "domains": ["public_health"],
+      "regions": ["CN"],
+      "material_types": ["疫情通报", "科普"],
+      "anchor": true
+    },
+    {
+      "source_id": "SRC-PIYAO",
+      "name": "中国互联网联合辟谣平台",
+      "domain": "piyao.org.cn",
+      "tier": "官方权威",
+      "domains": ["public_health", "food_safety", "social_events", "policy_law", "technology"],
+      "regions": ["CN"],
+      "material_types": ["辟谣", "核查"],
+      "anchor": true
+    },
+    {
+      "source_id": "SRC-12377",
+      "name": "中央网信办违法和不良信息举报中心",
+      "domain": "12377.cn",
+      "tier": "官方权威",
+      "domains": ["social_events", "policy_law"],
+      "regions": ["CN"],
+      "material_types": ["通报", "处置公示"],
+      "anchor": true
+    },
+    {
+      "source_id": "SRC-SAMR",
+      "name": "国家市场监督管理总局",
+      "domain": "samr.gov.cn",
+      "tier": "官方权威",
+      "domains": ["food_safety", "finance", "policy_law"],
+      "regions": ["CN"],
+      "material_types": ["通报", "抽检", "处罚"],
+      "anchor": true
+    },
+    {
+      "source_id": "SRC-XINHUA",
+      "name": "新华网",
+      "domain": "xinhuanet.com",
+      "tier": "权威媒体/辟谣平台",
+      "domains": ["policy_law", "social_events", "international", "finance"],
+      "regions": ["CN", "GLOBAL"],
+      "material_types": ["新闻", "权威发布"],
+      "anchor": true
+    },
+    {
+      "source_id": "SRC-PEOPLE",
+      "name": "人民网",
+      "domain": "people.com.cn",
+      "tier": "权威媒体/辟谣平台",
+      "domains": ["policy_law", "education", "social_events"],
+      "regions": ["CN"],
+      "material_types": ["新闻", "评论"],
+      "anchor": true
+    },
+    {
+      "source_id": "SRC-CCTV",
+      "name": "央视新闻",
+      "domain": "cctv.com",
+      "tier": "权威媒体/辟谣平台",
+      "domains": ["social_events", "policy_law", "international", "celebrity_entertainment"],
+      "regions": ["CN", "GLOBAL"],
+      "material_types": ["新闻", "调查"],
+      "anchor": true
+    },
+    {
+      "source_id": "SRC-CNR",
+      "name": "央广网",
+      "domain": "cnr.cn",
+      "tier": "权威媒体/辟谣平台",
+      "domains": ["social_events", "policy_law"],
+      "regions": ["CN"],
+      "material_types": ["新闻", "直播"],
+      "anchor": true
+    },
+    {
+      "source_id": "SRC-CHINANEWS",
+      "name": "中国新闻网",
+      "domain": "chinanews.com.cn",
+      "tier": "权威媒体/辟谣平台",
+      "domains": ["social_events", "international", "history"],
+      "regions": ["CN", "GLOBAL"],
+      "material_types": ["新闻", "纪实"],
+      "anchor": true
+    },
+    {
+      "source_id": "SRC-CHINADAILY",
+      "name": "中国日报网",
+      "domain": "chinadaily.com.cn",
+      "tier": "权威媒体/辟谣平台",
+      "domains": ["international", "policy_law"],
+      "regions": ["CN", "GLOBAL"],
+      "material_types": ["新闻", "双语发布"],
+      "anchor": true
+    },
+    {
+      "source_id": "SRC-GUANGMING",
+      "name": "光明网",
+      "domain": "gmw.cn",
+      "tier": "权威媒体/辟谣平台",
+      "domains": ["education", "history", "technology"],
+      "regions": ["CN"],
+      "material_types": ["新闻", "科普"],
+      "anchor": true
+    },
+    {
+      "source_id": "SRC-THEPAPER",
+      "name": "澎湃新闻",
+      "domain": "thepaper.cn",
+      "tier": "权威媒体/辟谣平台",
+      "domains": ["social_events", "finance", "policy_law"],
+      "regions": ["CN"],
+      "material_types": ["新闻", "调查"],
+      "anchor": true
+    },
+    {
+      "source_id": "SRC-YICAI",
+      "name": "第一财经",
+      "domain": "yicai.com",
+      "tier": "权威媒体/辟谣平台",
+      "domains": ["finance", "technology"],
+      "regions": ["CN"],
+      "material_types": ["新闻", "数据"],
+      "anchor": true
+    },
+    {
+      "source_id": "SRC-KEPUCHINA",
+      "name": "科普中国",
+      "domain": "kepuchina.cn",
+      "tier": "权威媒体/辟谣平台",
+      "domains": ["public_health", "food_safety", "technology", "environment"],
+      "regions": ["CN"],
+      "material_types": ["科普", "辟谣"],
+      "anchor": true
+    },
+    {
+      "source_id": "SRC-DXY",
+      "name": "丁香园",
+      "domain": "dxy.cn",
+      "tier": "权威媒体/辟谣平台",
+      "domains": ["public_health"],
+      "regions": ["CN"],
+      "material_types": ["科普", "循证评述"],
+      "anchor": false
+    },
+    {
+      "source_id": "SRC-CAS",
+      "name": "中国科学院",
+      "domain": "cas.cn",
+      "tier": "官方权威",
+      "domains": ["technology", "environment", "history"],
+      "regions": ["CN"],
+      "material_types": ["科普", "科研发布"],
+      "anchor": true
+    },
+    {
+      "source_id": "SRC-WHO",
+      "name": "世界卫生组织",
+      "domain": "who.int",
+      "tier": "官方权威",
+      "domains": ["public_health"],
+      "regions": ["GLOBAL"],
+      "material_types": ["指南", "疫情通报"],
+      "anchor": true
+    },
+    {
+      "source_id": "SRC-GUOKR",
+      "name": "果壳网",
+      "domain": "guokr.com",
+      "tier": "权威媒体/辟谣平台",
+      "domains": ["technology", "public_health", "environment"],
+      "regions": ["CN"],
+      "material_types": ["科普"],
+      "anchor": false
+    },
+    {
+      "source_id": "SRC-LEGALDAILY",
+      "name": "法治日报",
+      "domain": "legaldaily.com.cn",
+      "tier": "权威媒体/辟谣平台",
+      "domains": ["policy_law", "social_events"],
+      "regions": ["CN"],
+      "material_types": ["新闻", "以案说法"],
+      "anchor": false
+    }
+  ]
+}
