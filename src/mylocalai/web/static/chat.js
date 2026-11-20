@@ -10,7 +10,10 @@
      - 会话列表加载/切换/新建（左侧栏）+ 档案库视图（列表 → 详情六章节区块
        + Markdown 导出）+ 被动提醒一行呈现（不制造新压力）；
      - 结构化只读入口：左栏「我的画像」三按钮、composer 上方快捷 chips 与
-       「算热度」小面板——都走 POST /api/chat 的可选 action 字段，不新开 Tab。
+       「算热度」小面板——都走 POST /api/chat 的可选 action 字段，不新开 Tab；
+     - 档案工作区（v6）：监听 profiles.js 派发的 mylocalai:profile-changed
+       重载左栏，并转发给 batch.js 的「材料批次」面板（role=analyst 才显示）
+       与 monitor.js 的「领域监测」面板（role=monitor 才显示）。
    ============================================================ */
 "use strict";
 
@@ -37,6 +40,13 @@
                       "card", "narrative", "tool_end", "done", "error"];
 
   const MAX_MESSAGE_LENGTH = 8000;   // 与后端 /api/chat 校验一致
+
+  /* 档案工作区切换事件（v6 多 Profile 分家）：profiles.js 切换/改名成功后派发，
+     这里重载左栏并清空当前会话视图——会话与档案都归属各自的工作区，切换后
+     当前打开的那个会话可能已不属于激活档案（继续往它发消息会 404），
+     所以如实换边：清空消息流、丢掉 currentSessionId、重载两个列表。
+     事件名与 profiles.js 的 window.ProfilesPanel.CHANGED_EVENT 一致。 */
+  const PROFILE_CHANGED_EVENT = "mylocalai:profile-changed";
 
   let currentSessionId = null;   // 当前会话；null = 下一条消息自动新建
   let activeController = null;   // 本轮请求的取消句柄
@@ -430,9 +440,44 @@
     insights: () => sendInsights("patterns"),
   };
 
+  /* ---------- 当前档案工作区行（v6 多 Profile 分家） ---------- */
+  function renderProfileLine() {
+    const line = $("#chatProfileLine");
+    if (!line) return;
+    const panel = window.ProfilesPanel;
+    const snap = (panel && typeof panel.snapshot === "function") ? panel.snapshot() : null;
+    const active = (snap && snap.active) || null;
+    if (!active) {
+      line.textContent = "";
+      return;
+    }
+    const meta = (panel && typeof panel.roleMeta === "function")
+      ? panel.roleMeta(active.role) : { label: active.role || "" };
+    line.textContent = "";
+    const prefix = document.createTextNode("当前档案：");
+    const name = document.createElement("b");
+    name.textContent = active.display_name || "默认档案";
+    const suffix = document.createTextNode(`（${meta.label || "全部能力"}）`);
+    line.appendChild(prefix);
+    line.appendChild(name);
+    line.appendChild(suffix);
+  }
+
+  function onProfileChanged() {
+    /* 切换/改名后：左栏换边。当前会话视图一并清空（归属可能已变）。 */
+    currentSessionId = null;
+    clearConversation();
+    renderProfileLine();
+    loadSessions();
+    loadDossiers();
+    /* 材料批次面板跟着换边：可见性按新档案角色重判，列表按新工作区重载 */
+    window.BatchPanel?.onProfileChanged();
+    /* 领域监测面板跟着换边：run-now 轮询与选择属于旧工作区，monitor.js 自行清理 */
+    window.MonitorPanel?.onProfileChanged();
+  }
+
   /* ---------- 会话列表 ---------- */
-  function highlightActiveSession() {
-    document.querySelectorAll("#chatSessionList li[data-sid]").forEach((li) => {
+  function highlightActiveSession() {    document.querySelectorAll("#chatSessionList li[data-sid]").forEach((li) => {
       li.classList.toggle("active", Number(li.dataset.sid) === currentSessionId);
     });
   }
@@ -794,6 +839,13 @@
         sendMessage();
       }
     });
+    /* 档案工作区切换（profiles.js 派发）：左栏换边 + 清空当前会话视图 */
+    document.addEventListener(PROFILE_CHANGED_EVENT, onProfileChanged);
+    /* 材料批次面板（专业用户·材料分析）：显隐由 batch.js 按档案角色自管 */
+    window.BatchPanel?.init();
+    /* 领域监测面板（专业用户·领域监测）：显隐由 monitor.js 按档案角色自管 */
+    window.MonitorPanel?.init();
+    renderProfileLine();
     loadSessions();
     loadDossiers();
   });

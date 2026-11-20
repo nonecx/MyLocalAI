@@ -51,15 +51,21 @@ class SessionStore:
 
     # ---- sessions ----
 
-    def create_session(self, title: str = "") -> int:
+    def create_session(self, title: str = "", profile_id: Optional[int] = None) -> int:
         now = _now()
         persisted_title = str(title or "") if self._can_persist_input() else ""
         raw_expiry = _expiry(self._privacy.retention_days("raw_input")) if persisted_title else None
+        if profile_id is None:
+            # 未显式指定 → 归当前激活的档案工作区（v6 多 Profile 分家）。
+            from mylocalai.dossier.profiles import active_profile_id
+            with self._lock:
+                profile_id = active_profile_id(self._conn)
         with self._lock, self._conn:
             cur = self._conn.execute(
-                "INSERT INTO sessions (title, created_at, updated_at, raw_input_expires_at)"
-                " VALUES (?, ?, ?, ?)",
-                (persisted_title, now, now, raw_expiry))
+                "INSERT INTO sessions (title, created_at, updated_at, raw_input_expires_at,"
+                " profile_id) VALUES (?, ?, ?, ?, ?)",
+                (persisted_title, now, now, raw_expiry,
+                 int(profile_id) if profile_id is not None else None))
             return int(cur.lastrowid)
 
     def get_session(self, session_id: int) -> Optional[Dict[str, Any]]:
@@ -68,13 +74,42 @@ class SessionStore:
                                      (session_id,)).fetchone()
         return dict(row) if row else None
 
-    def list_sessions(self, include_archived: bool = False, limit: int = 50) -> List[Dict[str, Any]]:
-        sql = "SELECT * FROM sessions"
-        if not include_archived:
-            sql += " WHERE archived = 0"
-        sql += " ORDER BY updated_at DESC, id DESC LIMIT ?"
+    def session_profile(self, session_id: int) -> Dict[str, Any]:
+        """会话归属的档案工作区（{profile_id, role, display_name, key}）；查不到返空 dict。
+
+        role 供助手按角色呈现卡片（layperson 简化结论卡）；display_name/key 供
+        左栏显示"这个会话属于哪个工作区"。LEFT JOIN：v6 之前建的会话也有 profile_id
+        （迁移已回填），这里是双保险。
+        """
         with self._lock:
-            return [dict(r) for r in self._conn.execute(sql, (max(1, int(limit)),))]
+            row = self._conn.execute(
+                "SELECT s.profile_id AS profile_id, p.role AS role,"
+                " p.display_name AS display_name, p.key AS key"
+                " FROM sessions s LEFT JOIN profiles p ON p.id = s.profile_id"
+                " WHERE s.id = ?", (int(session_id),)).fetchone()
+        if not row:
+            return {}
+        return {"profile_id": (int(row["profile_id"]) if row["profile_id"] is not None else None),
+                "role": str(row["role"] or ""),
+                "display_name": str(row["display_name"] or ""),
+                "key": str(row["key"] or "")}
+
+    def list_sessions(self, include_archived: bool = False, limit: int = 50,
+                      profile_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        sql = "SELECT * FROM sessions"
+        args: List[Any] = []
+        where: List[str] = []
+        if not include_archived:
+            where.append("archived = 0")
+        if profile_id is not None:
+            where.append("profile_id = ?")
+            args.append(int(profile_id))
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY updated_at DESC, id DESC LIMIT ?"
+        args.append(max(1, int(limit)))
+        with self._lock:
+            return [dict(r) for r in self._conn.execute(sql, args)]
 
     def rename_session(self, session_id: int, title: str) -> None:
         with self._lock, self._conn:

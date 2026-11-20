@@ -45,7 +45,11 @@
 │   │   ├── attn_rules.json / deep_read_rules.json / society_issues.json / prompts.json
 │   │   └── README.md           关注度与深读的完整说明（公式、触发、护栏、隔离）
 │   ├── dossier/                档案库（SQLite 单文件 + WAL）
-│   │   ├── store.py            连接工厂、schema_version 顺序迁移（v4 含指纹表+话术标记表）、档案域七表 + 会话域三表
+│   │   ├── store.py            连接工厂、schema_version 顺序迁移（v4 指纹表+话术标记表、v6 Profile 工作区、v7 材料批次、v8 监测订阅）、档案域七表 + 会话域三表
+│   │   ├── profiles.py         Profile 工作区（多档案数据分家 + 角色，v6）
+│   │   ├── batches.py          材料批次存储（v7）
+│   │   ├── batch_summary.py    批次汇总纯函数（零 LLM，永不抛）
+│   │   ├── subscriptions.py    监测订阅存储（v8）
 │   │   ├── service.py          建档编排：结论卡片化落库、证据批次、recheck 版本化、六章节聚合与导出、初扫 markers 沉淀
 │   │   └── insights.py         参谋三聚合纯函数：话术模式库 / 信源画像 / 周报（零 LLM，永不抛）
 │   ├── assistant/              智能助手核心（对话 → 路由 → 工具 → 叙述 → 落库）
@@ -53,6 +57,8 @@
 │   │   ├── router.py           意图路由（chat_json + 封闭枚举 + 四层防护链，绝不猜）
 │   │   ├── registry.py         工具注册表（schema 校验、权限分级、成本/延迟元数据）
 │   │   ├── tools_verify.py / tools_heat.py / tools_memory.py / tools_chapters.py
+│   │   ├── tools_batch.py      材料批次编排（阶段 2：同源分组 + 逐条核查 + 双预算）
+│   │   └── tools_monitor.py    领域监测编排（阶段 3：授权闸 + 检索 + 变化摘要）
 │   │   ├── fingerprint.py      话术指纹纯函数（归一化/shingle/Jaccard——谣言库秒回的地基）
 │   │   ├── reminders.py        被动提醒纯函数（档案年龄/热度变化 → 一行提示）
 │   │   ├── context.py          上下文窗口构建器（12k 字符预算、裁剪与摘要）
@@ -62,9 +68,14 @@
 │   │   ├── prompts.json        人设与固定话术——改这里而非改代码
 │   │   └── assistant_rules.json  路由模型/上限/预算/指纹阈值/信源画像阈值/拒绝词表——改这里而非改代码
 │   ├── web/                    FastAPI 网站 + static/（src/mylocalai/web/app.py）
+│   │   ├── app.py              REST API 全貌（分析/关注度/对话/会话/档案/画像/Profile/批次/监测）+ lifespan 调度
+│   │   ├── profiles_api.py     Profile 工作区 CRUD + 激活（v6）
+│   │   ├── batch_api.py        材料批次 API + SSE 进度（v7）
+│   │   ├── materials_api.py    上传文件内存解析（txt/md/csv/json，不落盘）
+│   │   ├── monitor_api.py      监测订阅 API + 调度线程（v8）
 │   │   └── static/             单一对话页的全部界面：index.html + shell.js（file:// 引导/服务状态）
 │   │                           + chat.js/cards.js（会话、档案库、事件流与全部卡片渲染）+ chat.css
-│   │                           （单页化后 app.js 与 insights.js 已删除：工具模式、参谋 Tab 下线）
+│   │                           + profiles.js（档案切换器）+ batch.js（材料批次面板）+ monitor.js（领域监测面板）
 │   ├── util/                   text_safety（代理项规整）/ console_io（stdio 规整）
 │   └── cli.py                  命令行入口（python -m mylocalai.cli）
 ├── my_website/                 启动器（start.bat / start.sh）与说明，实际代码在 src/mylocalai/web/
@@ -313,8 +324,8 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 1335 个用例（unittest discover 全量，2026-11-20 模型管理合入主线后实测；**M4 起由
-`tests.test_readme_counts` 自动校验此数字与 mock 闸门条数，改动后须同步回写**）：
+离线套件共 1410 个用例（unittest discover 全量，2026-11-20 角色扩展合并回主线后实测；
+**M4 起由 `tests.test_readme_counts` 自动校验此数字与 mock 闸门条数，改动后须同步回写**）：
 M1-M3 的全部回归（详见 git 历史），加上 M4 新增模块：
 **成本真实计数**（llm_client 进程级计数器：真实上游调用数 + usage tokens，缓存命中/
 single-flight 等待不计、取不到 usage 如实 0；loop 按"段前段后快照 delta"接线进
@@ -328,6 +339,21 @@ source_profile 注入：空画像逐位不变守卫、抬分端到端、装配�
 零 LLM、空库合法空卡）、**结构化 action 通道**（未注册/不在 allowlist/写工具/坏参数
 一律 400，合法时跳过路由直达只读工具，事件协议不新增）、**卡片折叠字段**
 （结论卡 evidence_preview 前 5 条、言论土壤卡 report 完整报告）；
+加上角色扩展阶段 1 新增模块：**Profile 工作区**（v6 迁移与存量回填、CRUD/激活/删除
+保护、会话/档案/指纹/画像按 profile_id 分家、跨工作区 404 防护、layperson 结论卡
+简化、/api/profiles 与前端切换器前后端自洽）；
+加上角色扩展第二轮新增模块：**Skill 体系与提示词分层**（四个旧能力 SKILL 的角色化
+升级与悬空引用治理、material_analysis/domain_monitoring 两份复合能力 SKILL、
+prompts.json roles 段与 loop._prompts_for_role 合并注入、full 逐位不变守卫、
+角色↔能力↔Skill 映射对拍，`tests.test_role_prompts` 11 例）；
+加上角色扩展阶段 2 新增模块：**材料批次**（v7 batches/batch_items 存储、同源分组
+（assistant 层指纹，保守不并组）、逐条 RumorAgent 核查 + 自动建档、双预算与取消的
+诚实降级、汇总纯函数与 batch_summary 卡、/api/batch CRUD + SSE 进度 + 并发信号量、
+上传内存解析四格式、前端材料批次面板与前后端自洽）；
+加上角色扩展阶段 3 新增模块：**领域监测**（v8 subscriptions/subscription_runs、
+search_all site: 领域变体（不传逐位不变）、授权闸 blocked 零外发、监测档案证据
+批次 + 关注度快照现算、变化摘要纯函数（URL 差集 + E 首末差）、/api/subscriptions
+CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
 加上取证三技能新增模块：**安全取页**（`tests.test_skills_transport` 31 例：DNS 钉扎/
 混合解析/逐跳重定向/超量/压缩/PDF/死线/并发槽位）、**三技能确定性编排**
 （`tests.test_skills_pipeline` 26 例：分类标签白名单与原文定位、信息不足先追问、
@@ -431,6 +457,16 @@ source_profile 注入：空画像逐位不变守卫、抬分端到端、装配�
    注意：读网页需要"外部取页"授权（`data/privacy_preferences.json` 的
    `external_processing_providers`）；只开检索授权时选站与检索仍可用，读页会如实标注
    未授权而不是假装搜过。
+- **角色 Skill 体系与提示词分层**（2026-11-20 角色扩展第二轮）：四个旧能力 SKILL 升级
+  适配三角色现状（各加「角色与工作区」一节，19 处悬空《总览》引用改写为库内文档路径），
+  并按复合能力规格（§3.2）新增两份能力 SKILL：**material_analysis（材料分析）** 与
+  **domain_monitoring（领域监测）**——分别是 claim-checking 的批量复合与
+  topic-understanding 的持续复合，都不占对话路由枚举，通道是面板 + REST。
+  提示词按角色分层注入（`assistant/prompts.json` 的 `roles` 段 + `loop._prompts_for_role`）：
+  `*_addon` 键追加到 router/narrate 的基座提示词，`full`/未知角色逐位不变；
+  **判定语义与角色无关**（RumorAgent 引擎提示词保持共享，同一说法在任何工作区同结论）。
+  角色 ↔ 能力 ↔ Skill ↔ 通道的映射总表与防漂移测试见
+  `docs/用户角色与Profile规格-v1.0.md` §8 与 `tests/test_role_prompts.py`。
 - **MCP 同期交付**：见下节。
 
 ## 记忆与完整性（2026-10-31，M3）
@@ -484,6 +520,65 @@ M4 起 `requests/tokens` 是**真实上游用量**，不再是粗口径估算（
 口径：助手**不判真假、只述证据**——汇总可核实的证据与来源立场并给出确定性结论卡片，
 真伪裁决留给用户；降级时如实说明，不编造。库路径与网页端同库（data/dossier.db，
 DOSSIER_DB_PATH 可覆盖）。测试：`tests.test_mcp_assistant`（同核对照、工具清单、守护路径）。
+
+## 用户角色与档案工作区（2026-11-20，schema v6）
+
+把"普通用户 / 专业用户"落成**同一产品内的多个档案工作区（Profile）**，不做账号体系
+（本项目明确不做多用户与鉴权，部署口径是单用户本地工具）。顶栏切换器一键换边，
+每个工作区有**独立的会话、档案与画像数据**（`profile_id` 分家，跨工作区访问一律按
+"不存在"处理，不泄露别的工作区有哪些会话/档案号）。
+
+| 角色 | 面向 | 现状（2026-11-20 阶段 1） |
+| --- | --- | --- |
+| `layperson` 普通用户 | 只做言论核查：输入一条消息，拿回结论 | 结论卡**简化呈现**（隐去 risk_score 数值、标注 presentation=simple，完整数值仍在档案库）；能力不裁剪 |
+| `analyst` 专业用户 · 材料分析 | 分析辨别自行搜集的多条材料 | 批量核查入口建设中（阶段 2） |
+| `monitor` 专业用户 · 领域监测 | 按领域自动搜集信息 | 订阅 + 服务内定时线程建设中（阶段 3） |
+| `full` 全部能力 | 不按角色裁剪 | v6 迁移给存量数据的默认档，保证旧行为逐位不变 |
+
+- **数据模型**：`profiles` 表（key/display_name/role）+ `app_state` 单行激活态；
+  `sessions`/`dossiers` 加 `profile_id`（v6 迁移把存量数据回填到"默认档案"，
+  role=full，旧档案可读、行为不变）。
+- **接口**：`GET/POST /api/profiles`、`PUT/DELETE /api/profiles/{id}`、
+  `POST /api/profiles/{id}/activate`；列表/详情/画像端点一律按激活档案过滤。
+- **删除保护**：最后一个档案、当前激活档案、仍有会话/档案数据的档案一律拒删（409）。
+- **口径**：角色只改**呈现与数据范围**，不改判定语义；`verdict.assess` 打分、
+  隐私 fail-closed 授权、路由四层防护链均不随角色放宽。
+- 测试：`tests.test_profiles`（迁移回填 / CRUD / 分家 / 跨区防护 / layperson 卡片 /
+  Web API 全链）。
+
+### 专业用户 A · 材料批量分析（阶段 2）
+
+`analyst` 档案工作区左栏「材料批次」面板：多行文本（每行一条）/ 文件上传
+（txt/md/csv/json，内存解析不落盘）/ URL 列表（受控抓取，未授权记 blocked）三种输入，
+一次最多 8 条、双预算（条目 90s + 整批 900s）。逐条走 RumorAgent 全链路并自动建档；
+同源材料（指纹 Jaccard ≥ 0.72）分组呈现但**各自判定**；单条失败不阻断，预算用尽或
+取消的条目标 `not_run`（不把"没跑"显示成"没发现"）。
+
+- **接口**：`POST /api/batch`（202 + 后台跑）、`GET /api/batch`、`GET /api/batch/{id}`、
+  `GET /api/batch/{id}/stream`（SSE 进度）、`POST /api/materials/upload`；
+- **汇总卡**（`batch_summary`，零 LLM 纯函数）：状态计数 / 结论分布 / 疑似同源组 /
+  逐条结论与档案链接 / 降级清单；
+- **schema v7**：`batches` + `batch_items`（group_id 同源分组、status 六态）；
+- 测试：`tests.test_batch`（存储 / 分组 / 汇总 / 编排八场景 / Web API / 上传解析）。
+
+### 专业用户 B · 领域监测订阅（阶段 3）
+
+`monitor` 档案工作区左栏「领域监测」面板：订阅话题（可选关键词与域名限定，
+频率下限 300 秒），到点由**服务内调度线程**自动跑检，也可手动"立即运行"。每轮
+受控检索（`site:域名` 变体 ≤3 个，引擎不支持时如实标注）、证据落订阅专属监测
+档案、关注度快照用本次检索结果现算（零额外联网）；变化摘要只述事实（URL 差集 +
+E 分首末差，不外推）。
+
+- **接口**：`GET/POST /api/subscriptions`、`PUT/DELETE /api/subscriptions/{id}`、
+  `POST /api/subscriptions/{id}/run-now`（202 + 后台，409 防重入）、
+  `GET /api/subscriptions/{id}`（详情 + 运行历史 + 最新变化卡）、`GET .../runs`；
+- **授权闸**：每轮运行前查 public-search 外发授权，未过 → `blocked`、订阅暂停并
+  写明原因，**零外发**（fail-closed）；
+- **调度**：web lifespan 起 daemon 线程（tick 60s、串行、单 worker 假设 + 启动
+  告警）；关服即停，产品口径如实告知；
+- **schema v8**：`subscriptions` + `subscription_runs`；
+- 测试：`tests.test_monitor`（存储 / due / 变化摘要 / 编排含 blocked 零外发 /
+  失败不卡死 / API / 调度 tick）。
 
 ## 参谋与洞察（2026-10-31，L4）
 

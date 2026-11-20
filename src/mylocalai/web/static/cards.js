@@ -1,7 +1,8 @@
 /* ============================================================
    cards.js —— 对话卡片渲染器（M2，工作指导 §4.3）
    三个渲染器：结论卡 / 言论土壤卡（classic 四档） / 热度 E 分卡；
-   另加我的画像卡（insights 只读聚合）与事实核查答案渲染。
+   另加我的画像卡（insights 只读聚合）、事实核查答案渲染、材料批次汇总卡
+   与领域监测变化卡（monitor_change 订阅跑检）。
    标记从原分析页卡片"复制 + 参数化"而来（原 app.js 已在单页化中删除，
    卡片渲染逻辑现由本文件独家承载）。
    由 chat.js 调用（chat.js 不直接拼卡片 HTML）。
@@ -100,15 +101,20 @@
     const hasRisk = riskRaw !== null && riskRaw !== undefined && Number.isFinite(risk);
     const conf = String(c.confidence || "");
     const recheck = Array.isArray(c.recheck_conditions) ? c.recheck_conditions : [];
+    /* presentation === "simple"（v6 普通用户档案工作区）：后端已隐去 risk_score
+       数值（Agent工作流规格 §1.6 方向），这里换标题并加一行说明——简化必须看得见。 */
+    const simple = c.presentation === "simple";
+    const title = simple ? "🧾 核查结果" : "🧾 核查结论";
     return `
-      <div class="chat-card chat-card-conclusion">
-        <div class="chat-card-title">🧾 核查结论<span class="badge gray">结论卡</span>${degradedBadge(c)}</div>
+      <div class="chat-card chat-card-conclusion${simple ? " chat-card-simple" : ""}">
+        <div class="chat-card-title">${title}${simple ? "" : '<span class="badge gray">结论卡</span>'}${degradedBadge(c)}</div>
         <div class="chat-card-label">${escapeHtml(c.label || "（无标签）")}</div>
         ${hasRisk ? `
         <div class="score-line">
           <div class="score-num">风险分 <b>${risk}</b> / 100</div>
           <div class="score-bar"><i style="width: ${Math.min(100, Math.max(0, risk))}%"></i></div>
         </div>` : ""}
+        ${simple ? '<p class="chat-simple-note muted">已按普通用户视图简化：不展示风险分数值；完整数值与证据批次可在档案库查看。</p>' : ""}
         <div class="chat-badges">
           ${conf ? `<span class="badge ${CONF_CLS[conf] || "gray"}">置信度 ${escapeHtml(conf)}</span>` : ""}
           <span class="badge gray">证据充分度：官方 ${Number(suff.official) || 0} · 非官方 ${Number(suff.unofficial) || 0} · 未知 ${Number(suff.unknown) || 0} / 共 ${Number(suff.total) || 0} 条</span>
@@ -539,6 +545,240 @@
       </div>`;
   }
 
+  /* ---------- 6. 材料批次汇总卡（batch_summary：批量核查的计数 / 分布 / 同源组 / 条目） ----------
+     由后端 /api/batch/{id} 的 summary 与批次 SSE 的 card 事件产出：
+     card = {card_type:"batch_summary", batch_id, title, source, as_of, total, ok,
+     failed, blocked, not_run, by_label, groups, items, sources_top, degraded}。
+     口径诚实铁律同全文件：计数旁一律带 as_of；没有任何字段的块整块不显示，
+     不编造、不补造；代表文本超长截断并标注；条目状态用封闭枚举映射，未知原样。 */
+  const BATCH_ITEM_STATUS = {
+    ok: { text: "完成", cls: "green" },
+    done: { text: "完成", cls: "green" },
+    failed: { text: "失败", cls: "red" },
+    error: { text: "失败", cls: "red" },
+    blocked: { text: "已拦截", cls: "amber" },
+    not_run: { text: "未跑", cls: "amber" },
+    pending: { text: "排队中", cls: "gray" },
+    running: { text: "进行中", cls: "gray" },
+    cancelled: { text: "已取消", cls: "gray" },
+    canceled: { text: "已取消", cls: "gray" },
+  };
+
+  const BATCH_SOURCE_LABEL = { text: "文本", file: "文件", urls: "链接" };
+
+  /* 档案链接：只接受正整数 id（同 safeUrl 的"白名单才放行"思路），
+     产出站内相对路径 /api/dossiers/{id}，不产生任何外链 */
+  function batchDossierHref(id) {
+    const n = Number(id);
+    if (!Number.isInteger(n) || n <= 0) return "";
+    return `/api/dossiers/${n}`;
+  }
+
+  function renderBatchSummary(c) {
+    c = c || {};
+    const total = Number(c.total) || 0;
+    const ok = Number(c.ok) || 0;
+    const failed = Number(c.failed) || 0;
+    const blocked = Number(c.blocked) || 0;
+    const notRun = Number(c.not_run) || 0;
+    const byLabel = (c.by_label && typeof c.by_label === "object") ? c.by_label : {};
+    const groups = Array.isArray(c.groups) ? c.groups : [];
+    const items = Array.isArray(c.items) ? c.items : [];
+    const sourcesTop = Array.isArray(c.sources_top) ? c.sources_top : [];
+    const degraded = Array.isArray(c.degraded) ? c.degraded : [];
+    const source = BATCH_SOURCE_LABEL[String(c.source || "")] || "";
+
+    /* 计数徽章：四项恒显示；not_run > 0 时才标「未跑」（--warn 色，amber 徽章同色系） */
+    const countBadges = `
+        <span class="badge gray">共 ${total} 条</span>
+        <span class="badge green">完成 ${ok}</span>
+        <span class="badge red">失败 ${failed}</span>
+        <span class="badge amber">已拦截 ${blocked}</span>
+        ${notRun > 0 ? `<span class="badge amber">未跑 ${notRun}</span>` : ""}`;
+
+    /* 来源与批次号一行（缺 source 时只说批次号，不猜来源） */
+    const metaBits = [];
+    if (source) metaBits.push(`来源：${escapeHtml(source)}`);
+    if (c.batch_id !== undefined && c.batch_id !== null) {
+      metaBits.push(`批次 #${escapeHtml(String(c.batch_id))}`);
+    }
+    const metaLine = metaBits.length
+      ? `<p class="chat-batch-summary-meta muted">${metaBits.join(" · ")}</p>` : "";
+
+    /* 标签分布一行（缺 by_label 时不编造分布） */
+    const labelBits = Object.keys(byLabel).map((k) =>
+      `${escapeHtml(k)} ×${Number(byLabel[k]) || 0}`);
+    const labelLine = labelBits.length
+      ? `<p class="chat-batch-labels muted">标签分布：${labelBits.join(" · ")}</p>` : "";
+
+    /* 疑似同源组：代表文本截 60 字，截断要标注，不让用户以为看到的是全文 */
+    const groupHtml = groups.length ? `
+        <div class="chat-batch-group-title">疑似同源（${groups.length} 组）</div>
+        <ul class="chat-batch-groups">${groups.map((g) => {
+          g = g || {};
+          const rep = String(g.representative || "");
+          const cut = rep.length > 60;
+          const text = escapeHtml(cut ? rep.slice(0, 60) : rep) + (cut ? "…（已截断）" : "");
+          const positions = Array.isArray(g.positions) ? g.positions : [];
+          const size = Number(g.size) || positions.length;
+          /* 组内标签分布（后端 group_similar 后的聚合；没有就不显示） */
+          const labels = (g.labels && typeof g.labels === "object") ? g.labels : {};
+          const labelBits = Object.keys(labels).map((k) =>
+            `${escapeHtml(k)} ×${Number(labels[k]) || 0}`);
+          return `<li><span class="badge gray">${escapeHtml(String(g.group_id || ""))} · ${size} 条</span>`
+            + `<span class="chat-batch-group-rep">${text || "（无代表文本）"}</span>`
+            + (labelBits.length
+              ? `<span class="chat-batch-group-labels muted">${labelBits.join(" · ")}</span>` : "")
+            + `</li>`;
+        }).join("")}</ul>` : "";
+
+    /* 条目表：position + 状态徽章 + label（+ url）+ 风险分 + 档案链接 */
+    const itemHtml = items.length ? `
+        <table class="chat-batch-items-table">
+          <thead><tr><th>#</th><th>状态</th><th>标签</th><th>风险分</th><th>档案</th></tr></thead>
+          <tbody>${items.map((it) => {
+            it = it || {};
+            const meta = BATCH_ITEM_STATUS[String(it.status)] || null;
+            const statusText = meta ? meta.text : escapeHtml(String(it.status || "未知"));
+            const statusCls = meta ? meta.cls : "gray";
+            const risk = Number(it.risk_score);
+            const riskTxt = (it.risk_score !== null && it.risk_score !== undefined
+              && Number.isFinite(risk)) ? String(risk) : "—";
+            /* url 是外部内容：只放行 http(s)（safeUrl 同款正则），不给伪协议链接 */
+            const url = safeUrl(it.url);
+            const urlHtml = url
+              ? `<div class="chat-batch-item-url"><a href="${url}" target="_blank" rel="noopener nofollow">${url}</a></div>`
+              : "";
+            const href = batchDossierHref(it.dossier_id);
+            const dossier = href
+              ? `<a href="${href}">档案 #${escapeHtml(String(it.dossier_id))}</a>`
+              : "—";
+            return `<tr>
+                <td>${Number(it.position) || 0}</td>
+                <td><span class="badge ${statusCls}">${statusText}</span></td>
+                <td>${escapeHtml(it.label || "（无标签）")}${urlHtml}</td>
+                <td>${escapeHtml(riskTxt)}</td>
+                <td>${dossier}</td></tr>`;
+          }).join("")}</tbody>
+        </table>` : "";
+
+    /* 信源域名列表：只列域名与反驳条目数，不给任何站点判真假 */
+    const sourceHtml = sourcesTop.length ? `
+        <div class="chat-batch-source-title">出现最多的信源</div>
+        <ul class="chat-batch-sources">${sourcesTop.map((s) => {
+          s = s || {};
+          return `<li><span class="chat-batch-source-domain">${escapeHtml(s.domain || "—")}</span>`
+            + `<span class="chat-batch-source-num">反驳条目 ${Number(s.refute_entries) || 0}</span></li>`;
+        }).join("")}</ul>` : "";
+
+    /* 降级 / 异常记录逐条如实显示（后端原文，如"第3条：超时"） */
+    const degradedHtml = degraded.length ? `
+        <div class="chat-batch-degraded">
+          <div class="chat-batch-degraded-title">降级 / 异常记录（${degraded.length} 条）</div>
+          <ul>${degraded.map((d) => `<li>${escapeHtml(String(d))}</li>`).join("")}</ul>
+        </div>` : "";
+
+    return `
+      <div class="chat-card chat-card-batch-summary">
+        <div class="chat-card-title">📦 材料批次汇总<span class="badge gray">批量核查</span>${degradedBadge(c)}</div>
+        <div class="chat-card-label">${escapeHtml(c.title || `批次 #${Number(c.batch_id) || 0}`)}</div>
+        <div class="chat-badges">${countBadges}</div>
+        ${metaLine}
+        ${labelLine}
+        ${groupHtml}
+        ${itemHtml}
+        ${sourceHtml}
+        ${degradedHtml}
+        ${asOfLine(c.as_of)}
+      </div>`;
+  }
+
+  /* ---------- 7. 领域监测变化卡（monitor_change：订阅跑检一轮的 URL 差集 + E 分变化） ----------
+      由后端 tools_monitor.change_card 产出（monitor_api 详情接口的 card 段）：
+      card = {card_type:"monitor_change", subscription_id, topic, run_id, status,
+      results_count, new_count, new_urls, removed_urls, e_score, prev_e_score,
+      e_delta, as_of, error}。
+      口径诚实铁律同全文件：监测结果 URL 是外部内容，只做纯文本展示（截断 80 字并
+      标注），不生成任何可点链接；E 分是确定性公式输出（代理/估计口径，照实注明）；
+      没有任何字段的块整块不显示，不编造、不补造。 */
+  const MONITOR_STATUS = {
+    ok: { text: "已完成", cls: "green" },
+    partial: { text: "部分完成", cls: "amber" },
+    blocked: { text: "已拦截", cls: "amber" },
+    error: { text: "失败", cls: "red" },
+    running: { text: "进行中", cls: "gray" },
+  };
+
+  /* URL 只做纯文本：截断 80 字并标注，不生成 <a>（监测结果是外部内容，保持只读） */
+  function monitorUrlText(url) {
+    const s = String(url || "").trim();
+    if (!s) return "";
+    const cut = s.length > 80;
+    return escapeHtml(cut ? s.slice(0, 80) : s) + (cut ? "…（已截断）" : "");
+  }
+
+  /* 一个 URL 小节：字段缺失（undefined/null）整块不显示；有空数组时如实说"没有" */
+  function monitorUrlSection(urls, title, emptyText) {
+    if (urls === undefined || urls === null) return "";
+    const list = Array.isArray(urls) ? urls.filter((u) => String(u || "").trim()) : [];
+    const head = `<div class="chat-monitor-urls-title">${escapeHtml(title)} ${list.length} 条 · 纯文本展示，不做可点链接</div>`;
+    if (!list.length) {
+      return head + `<p class="chat-insight-sub muted">${escapeHtml(emptyText)}</p>`;
+    }
+    return head
+      + `<ul class="chat-monitor-urls">${list.map((u) => `<li>${monitorUrlText(u)}</li>`).join("")}</ul>`;
+  }
+
+  /* 数值字段：null/undefined/空串/非有限数一律当"没有"，不拿 0 冒充 */
+  function monitorNum(v) {
+    if (v === null || v === undefined || v === "") return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function renderMonitorChange(c) {
+    c = c || {};
+    const smeta = MONITOR_STATUS[String(c.status || "")] || null;
+    const statusText = smeta ? smeta.text : escapeHtml(String(c.status || "未知"));
+    const statusCls = smeta ? smeta.cls : "gray";
+    const results = Number(c.results_count) || 0;
+    const fresh = Number(c.new_count) || 0;
+    const eScore = monitorNum(c.e_score);
+    const prevE = monitorNum(c.prev_e_score);
+    const eDelta = monitorNum(c.e_delta);
+    const hasE = eScore !== null || prevE !== null || eDelta !== null;
+    const runId = monitorNum(c.run_id);
+
+    /* 错误 / 授权说明：error 非空时如实显示（blocked 轮次它就是授权说明） */
+    const errorTxt = String(c.error || "").trim();
+    const errorTitle = String(c.status || "") === "blocked" ? "授权说明" : "错误";
+    const errorHtml = errorTxt
+      ? `<p class="chat-monitor-notice"><b>${errorTitle}：</b>${escapeHtml(errorTxt)}</p>`
+      : "";
+
+    return `
+      <div class="chat-card chat-card-monitor-change">
+        <div class="chat-card-title">📡 监测变化<span class="badge gray">订阅跑检</span></div>
+        <div class="chat-card-label">${escapeHtml(c.topic || "（无话题）")}</div>
+        <div class="chat-badges">
+          <span class="badge ${statusCls}">${statusText}</span>
+          ${runId !== null && runId > 0 ? `<span class="badge gray">第 ${runId} 轮</span>` : ""}
+        </div>
+        <p class="chat-insight-count">本轮检到 ${results} 条 · 新增 ${fresh} 条</p>
+        ${monitorUrlSection(c.new_urls, "新增 URL", "本轮没有新增 URL。")}
+        ${monitorUrlSection(c.removed_urls, "消失 URL", "本轮没有消失的 URL。")}
+        ${hasE ? `
+        <div class="chat-dims">
+          ${eScore !== null ? `<div class="dim-row"><span class="k">本轮关注度 E</span><span class="v">${eScore.toFixed(2)}</span></div>` : ""}
+          ${prevE !== null ? `<div class="dim-row"><span class="k">上轮关注度 E</span><span class="v">${prevE.toFixed(2)}</span></div>` : ""}
+          ${eDelta !== null ? `<div class="dim-row"><span class="k">E 分变化</span><span class="v">${eDelta > 0 ? "+" : ""}${eDelta.toFixed(2)}</span></div>` : ""}
+        </div>
+        <p class="chat-insight-note muted">关注度 E 为确定性公式输出，代理估计值：只述首末两点之差，不预测趋势。</p>` : ""}
+        ${errorHtml}
+        ${asOfLine(c.as_of)}
+      </div>`;
+  }
+
   /* ---------- 分发：优先 claim_answer，其次保留既有业务卡片兼容 ---------- */
   function renderCard(payload) {
     if (!payload || typeof payload !== "object") return "";
@@ -548,6 +788,8 @@
     const type = String(payload.card_type || payload.type || "").toLowerCase();
     if (type === "insights") return renderInsights(payload);
     if (type === "evidence") return renderEvidence(payload);
+    if (type === "batch_summary") return renderBatchSummary(payload);
+    if (type === "monitor_change") return renderMonitorChange(payload);
     if (type === "conclusion") return renderConclusion(payload);
     if (type === "speech" || type === "classic") return renderSpeech(payload);
     if (type === "heat" || type === "attention") return renderHeat(payload);
@@ -557,12 +799,27 @@
     /* insights 卡即使没带 card_type，也能按聚合字段名识别出来 */
     if (payload.patterns !== undefined || payload.profiles !== undefined
         || (payload.digest !== undefined && payload.kind)) return renderInsights(payload);
+    /* batch_summary 卡即使没带 card_type（如 /api/batch/{id} 的 summary 段），
+       也能按汇总字段名识别：计数四件套 + 标签分布/同源组，与其它卡型不混淆 */
+    if ((payload.by_label !== undefined || payload.groups !== undefined)
+        && (payload.total !== undefined || payload.blocked !== undefined
+            || payload.not_run !== undefined)) return renderBatchSummary(payload);
     return renderConclusion(payload);
+  }
+
+  /* 供 chat.js / batch.js 挂载卡片用：把 renderCard 的产出写进容器。
+     innerHTML 只出现在本文件（cards.js 是唯一允许模板字符串的渲染层，
+     与 renderConclusion 同一模式）；调用方（batch.js）因此全文件没有
+     HTML 注入点，纪律同 settings.js / profiles.js。 */
+  function mountCard(container, payload) {
+    if (!container) return;
+    container.innerHTML = renderCard(payload);
   }
 
   /* 供 chat.js 调用的唯一入口（不污染全局命名空间） */
   window.ChatCards = {
     renderCard, renderClaimAnswer, renderConclusion, renderSpeech, renderHeat,
-    renderInsights, renderEvidence, escapeHtml,
+    renderInsights, renderEvidence, renderBatchSummary, renderMonitorChange,
+    mountCard, escapeHtml,
   };
 })();

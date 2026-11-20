@@ -196,19 +196,22 @@ def _degraded(reason: str) -> Dict[str, Any]:
 def _insights(ctx: Any, kind: str) -> Dict[str, Any]:
     """insights：按 kind 产出三种只读画像之一（零 LLM、零落库、永不抛）。"""
     as_of = _now_iso()
+    # v6 多 Profile 分家：画像只聚合当前会话所属工作区的档案史；ctx 未注入
+    # （stub/旧装配）时 None = 全库，与加参数前逐位一致。
+    profile_id = getattr(ctx, "profile_id", None)
     try:
         # 惰性 import（先例：loop._qualified_profile）：测试可 mock 模块属性模拟聚合故障。
         from mylocalai.dossier.insights import (pattern_library, source_profiles,
                                                 weekly_digest)
         store = _store_of(ctx)
         if kind == "patterns":
-            data = pattern_library(store)
+            data = pattern_library(store, profile_id)
             card, digest = _card(kind, as_of, "patterns", data), _patterns_digest(data)
         elif kind == "sources":
-            data = source_profiles(store)
+            data = source_profiles(store, profile_id)
             card, digest = _card(kind, as_of, "profiles", data), _sources_digest(data)
         else:   # kind_param 已限定封闭枚举，走到这里只可能是 weekly
-            data = weekly_digest(store, now=as_of, days=WEEKLY_DAYS)
+            data = weekly_digest(store, now=as_of, days=WEEKLY_DAYS, profile_id=profile_id)
             card, digest = _card(kind, as_of, "digest", data), _weekly_digest_text(data)
     except Exception as exc:  # noqa: BLE001  参谋是增益面：任何故障降级，绝不挡对话
         return _degraded(f"{type(exc).__name__}: {exc}")

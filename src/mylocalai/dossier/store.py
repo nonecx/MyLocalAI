@@ -26,7 +26,7 @@ from typing import Any, Dict, Iterable, List, Optional
 __all__ = ["SCHEMA_VERSION", "DEFAULT_DB_PATH", "connect", "migrate",
            "DossierStore", "default_db_path"]
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 8
 
 #: 顺序迁移：索引 i 的脚本把库从版本 i 升到 i+1。永不修改已发布的条目，只允许追加。
 MIGRATIONS: List[str] = [
@@ -204,6 +204,109 @@ MIGRATIONS: List[str] = [
     CREATE INDEX IF NOT EXISTS idx_messages_input_expiry ON messages(raw_input_expires_at);
     CREATE INDEX IF NOT EXISTS idx_messages_result_expiry ON messages(result_expires_at);
     """,
+    # v6：用户 Profile 工作区（多档案数据分家 + 角色，2026-11-20）。
+    # 存量数据不回迁、不删除：迁移后由 _ensure_default_profile 把所有
+    # profile_id IS NULL 的存量会话/档案归属"默认档案"（role=full 不裁剪能力，
+    # 旧行为逐位不变）。profiles.role 封闭枚举见 dossier/profiles.py 的 ROLE_*。
+    """
+    CREATE TABLE IF NOT EXISTS profiles (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        key          TEXT NOT NULL UNIQUE,
+        display_name TEXT NOT NULL DEFAULT '',
+        role         TEXT NOT NULL DEFAULT 'full'
+                     CHECK (role IN ('layperson', 'analyst', 'monitor', 'full')),
+        created_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS app_state (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL DEFAULT ''
+    );
+    ALTER TABLE sessions ADD COLUMN profile_id INTEGER;
+    ALTER TABLE dossiers ADD COLUMN profile_id INTEGER;
+    CREATE INDEX IF NOT EXISTS idx_sessions_profile ON sessions(profile_id);
+    CREATE INDEX IF NOT EXISTS idx_dossiers_profile ON dossiers(profile_id);
+    """,
+    # v7：材料批次（专业用户 A · 材料分析，2026-11-20）。一个批次挂 N 条材料，
+    # 每条材料一次独立核查并自动建档（dossier_id 可空：未建档/失败即空）。
+    # group_id 是"疑似同源"分组号（0=无组）：同组说法各自判定，汇总层合并呈现，
+    # 不擅自把不同材料当成同一条谣言。status 语义：
+    #   pending/running/ok/error/blocked/not_run（blocked=未授权抓取、not_run=预算用尽）
+    """
+    CREATE TABLE IF NOT EXISTS batches (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        profile_id   INTEGER,
+        title        TEXT NOT NULL DEFAULT '',
+        source       TEXT NOT NULL DEFAULT 'text'
+                     CHECK (source IN ('text', 'file', 'urls')),
+        item_count   INTEGER NOT NULL DEFAULT 0,
+        ok_count     INTEGER NOT NULL DEFAULT 0,
+        failed_count INTEGER NOT NULL DEFAULT 0,
+        not_run_count INTEGER NOT NULL DEFAULT 0,
+        status       TEXT NOT NULL DEFAULT 'running'
+                     CHECK (status IN ('running', 'done', 'partial', 'failed', 'cancelled')),
+        summary      TEXT NOT NULL DEFAULT '{}',
+        error        TEXT NOT NULL DEFAULT '',
+        created_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_batches_profile ON batches(profile_id, created_at);
+    CREATE TABLE IF NOT EXISTS batch_items (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        batch_id   INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+        position   INTEGER NOT NULL,
+        raw_text   TEXT NOT NULL DEFAULT '',
+        url        TEXT NOT NULL DEFAULT '',
+        dossier_id INTEGER REFERENCES dossiers(id) ON DELETE SET NULL,
+        status     TEXT NOT NULL DEFAULT 'pending'
+                   CHECK (status IN ('pending', 'running', 'ok', 'error', 'blocked', 'not_run')),
+        label      TEXT NOT NULL DEFAULT '',
+        risk_score REAL,
+        error      TEXT NOT NULL DEFAULT '',
+        group_id   INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_batch_items_batch ON batch_items(batch_id, position);
+    """,
+    # v8：领域监测订阅（专业用户 B · 阶段 3，2026-11-20）。每个订阅一个监测档案
+    # （dossiers.input_kind='topic'，证据按批次追加、快照进 attention_snapshots），
+    # 每轮运行一行 subscription_runs（status：ok/partial/blocked/error；
+    # blocked = 外发授权未开，零外发）。
+    """
+    CREATE TABLE IF NOT EXISTS subscriptions (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        profile_id   INTEGER,
+        topic        TEXT NOT NULL DEFAULT '',
+        keywords     TEXT NOT NULL DEFAULT '[]',
+        domains      TEXT NOT NULL DEFAULT '[]',
+        frequency_s  INTEGER NOT NULL DEFAULT 3600,
+        enabled      INTEGER NOT NULL DEFAULT 1,
+        dossier_id   INTEGER REFERENCES dossiers(id) ON DELETE SET NULL,
+        last_run_at  TEXT,
+        next_run_at  TEXT,
+        last_status  TEXT NOT NULL DEFAULT '',
+        paused_reason TEXT NOT NULL DEFAULT '',
+        created_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_subscriptions_profile ON subscriptions(profile_id);
+    CREATE INDEX IF NOT EXISTS idx_subscriptions_due ON subscriptions(enabled, next_run_at);
+    CREATE TABLE IF NOT EXISTS subscription_runs (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+        started_at     TEXT NOT NULL,
+        finished_at    TEXT NOT NULL DEFAULT '',
+        status         TEXT NOT NULL DEFAULT 'running'
+                       CHECK (status IN ('running', 'ok', 'partial', 'blocked', 'error')),
+        results_count  INTEGER NOT NULL DEFAULT 0,
+        new_count      INTEGER NOT NULL DEFAULT 0,
+        summary        TEXT NOT NULL DEFAULT '{}',
+        error          TEXT NOT NULL DEFAULT '',
+        created_at     TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_sub_runs_sub ON subscription_runs(subscription_id, id);
+    """,
 ]
 
 
@@ -356,7 +459,51 @@ def migrate(conn: sqlite3.Connection) -> int:
             conn.execute("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
                          (i, _now()))
         applied += 1
+    _ensure_default_profile(conn)
     return applied
+
+
+def _ensure_default_profile(conn: sqlite3.Connection) -> int:
+    """幂等确保 Profile 工作区可用（v6 迁移的 Python 侧收尾，每次 migrate 都跑）。
+
+    做三件事，全部幂等：
+      1. 一个档案都没有 → 建"默认档案"（key='default'，role='full' 不裁剪能力）；
+      2. profile_id IS NULL 的存量会话/档案 → 归属最老的档案（v6 之前的全部数据）；
+      3. app_state 的 active_profile_id 缺失或指向已删除的档案 → 重置为最老的档案。
+
+    单独成函数而不是塞进迁移 SQL：时间戳要用 _now()（与全库其他行同格式同时区），
+    且"删掉最后一个档案后被重新打开"这类运行期场景也要能自愈——自愈逻辑放代码里
+    才能随 ProfileStore 的删除保护一起演进。
+    """
+    with conn:
+        row = conn.execute("SELECT id FROM profiles ORDER BY id LIMIT 1").fetchone()
+        if row is None:
+            now = _now()
+            cur = conn.execute(
+                "INSERT INTO profiles (key, display_name, role, created_at, updated_at)"
+                " VALUES ('default', '默认档案', 'full', ?, ?)", (now, now))
+            default_id = int(cur.lastrowid)
+        else:
+            default_id = int(row["id"])
+        conn.execute("UPDATE sessions SET profile_id = ? WHERE profile_id IS NULL",
+                     (default_id,))
+        conn.execute("UPDATE dossiers SET profile_id = ? WHERE profile_id IS NULL",
+                     (default_id,))
+        active = conn.execute(
+            "SELECT value FROM app_state WHERE key = 'active_profile_id'").fetchone()
+        valid = False
+        if active is not None:
+            try:
+                valid = conn.execute("SELECT 1 FROM profiles WHERE id = ?",
+                                     (int(str(active["value"])),)).fetchone() is not None
+            except (TypeError, ValueError):
+                valid = False
+        if not valid:
+            conn.execute(
+                "INSERT INTO app_state (key, value) VALUES ('active_profile_id', ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (str(default_id),))
+    return default_id
 
 
 class DossierStore:
@@ -382,24 +529,44 @@ class DossierStore:
         with self._lock:
             self._conn.close()
 
+    def active_profile_id(self) -> int:
+        """当前激活的档案工作区 id（v6）；库异常时返 0（调用方按"不过滤"降级）。"""
+        from mylocalai.dossier.profiles import active_profile_id
+        try:
+            with self._lock:
+                return active_profile_id(self._conn)
+        except Exception:  # noqa: BLE001  激活态读失败不拖垮调用方
+            return 0
+
     # ---- 档案本体 ----
 
     def create_dossier(self, title: str, input_text: str, input_kind: str = "text", *,
                        claim_excerpt: str = "", save_result: bool = True,
                        result_retention_days: Optional[int] = None,
                        save_raw_input: bool = True,
-                       raw_input_retention_days: Optional[int] = None) -> int:
+                       raw_input_retention_days: Optional[int] = None,
+                       profile_id: Optional[int] = None) -> int:
         assert input_kind in ("text", "topic"), f"input_kind 非法: {input_kind}"
         now = _now()
         saved_input = str(input_text or "") if save_raw_input else ""
         result_expiry = _expiry(result_retention_days) if save_result else None
         input_expiry = _expiry(raw_input_retention_days) if save_raw_input and saved_input else None
+        if profile_id is None:
+            # v6 多 Profile 分家：未显式指定 → 归当前激活档案（与 SessionStore
+            # create_session 同口径）。直接调 store 的调用方（脚本/测试）因此
+            # 也不会落到"无归属"的档案上。
+            from mylocalai.dossier.profiles import active_profile_id
+            with self._lock:
+                resolved = active_profile_id(self._conn)
+            profile_id = resolved if resolved > 0 else None
         with self._lock, self._conn:
             cur = self._conn.execute(
                 "INSERT INTO dossiers (created_at, updated_at, title, input_text, input_kind,"
-                " result_expires_at, raw_input_expires_at, claim_excerpt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                " result_expires_at, raw_input_expires_at, claim_excerpt, profile_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (now, now, str(title or ""), saved_input, input_kind, result_expiry, input_expiry,
-                 str(claim_excerpt or "") if save_result else ""))
+                 str(claim_excerpt or "") if save_result else "",
+                 int(profile_id) if profile_id is not None else None))
             return int(cur.lastrowid)
 
     def get_dossier(self, dossier_id: int) -> Optional[Dict[str, Any]]:
@@ -412,15 +579,26 @@ class DossierStore:
             self._conn.execute("UPDATE dossiers SET updated_at = ? WHERE id = ?",
                                (_now(), dossier_id))
 
-    def list_dossiers(self, query: str = "", limit: int = 50) -> List[Dict[str, Any]]:
-        """按 updated_at 倒序列档案；query 非空时对 title/input_text 做 LIKE 过滤。"""
+    def list_dossiers(self, query: str = "", limit: int = 50,
+                      profile_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        """按 updated_at 倒序列档案；query 非空时对 title/input_text 做 LIKE 过滤。
+
+        profile_id 非 None 时只列该档案工作区的数据（多 Profile 分家）；None 时
+        不过滤（程序内部/迁移路径的全库视图，与加参数前逐位一致）。
+        """
         like = f"%{query}%"
         sql = ("SELECT id, created_at, updated_at, title, input_kind, schema_version"
                " FROM dossiers")
         args: List[Any] = []
+        where: List[str] = []
+        if profile_id is not None:
+            where.append("profile_id = ?")
+            args.append(int(profile_id))
         if query:
-            sql += " WHERE title LIKE ? OR input_text LIKE ?"
+            where.append("(title LIKE ? OR input_text LIKE ?)")
             args += [like, like]
+        if where:
+            sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY updated_at DESC, id DESC LIMIT ?"
         args.append(max(1, int(limit)))
         with self._lock:
@@ -697,7 +875,8 @@ class DossierStore:
             return int(cur.lastrowid)
 
     def find_fingerprints(self, query_text: str, threshold: float, limit: int = 5,
-                          k: int = FP_DEFAULT_SHINGLE_SIZE) -> List[Dict[str, Any]]:
+                          k: int = FP_DEFAULT_SHINGLE_SIZE,
+                          profile_id: Optional[int] = None) -> List[Dict[str, Any]]:
         """相似声明召回：返回 Jaccard ≥ threshold 的行，按分数降序、最多 limit 条。
 
         规模假设（注释即契约）：本库是**单机个人档案库**，已核查声明量级在千条以内，
@@ -714,10 +893,17 @@ class DossierStore:
         if not query_shingles:
             return []
         th = float(threshold)
+        # profile_id 非 None 时只召回该档案工作区沉淀的指纹（多 Profile 分家：
+        # 别的工作区查过的说法不该在这里被秒回）；None 时不过滤（逐位不变）。
+        sql = ("SELECT f.id AS id, f.dossier_id AS dossier_id, f.normalized AS normalized,"
+               " f.shingles AS shingles, f.label AS label, f.created_at AS created_at"
+               " FROM claim_fingerprints f")
+        args: List[Any] = []
+        if profile_id is not None:
+            sql += " JOIN dossiers d ON d.id = f.dossier_id WHERE d.profile_id = ?"
+            args.append(int(profile_id))
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT id, dossier_id, normalized, shingles, label, created_at"
-                " FROM claim_fingerprints").fetchall()
+            rows = self._conn.execute(sql, args).fetchall()
         hits: List[Dict[str, Any]] = []
         for r in rows:
             stored = _load(r["shingles"], [])

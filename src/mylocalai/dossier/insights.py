@@ -27,7 +27,7 @@ from __future__ import annotations
 import itertools
 import json
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from mylocalai.retrieval.sources import normalize_host
 from mylocalai.rumor.verdict import LABEL_HIGH, LABEL_LOW, LABEL_SUSPECT
@@ -58,21 +58,36 @@ def _load_json(raw: Any, default: Any) -> Any:
         return default
 
 
-def _latest_labels(conn: Any) -> Dict[int, str]:
-    """每档案最新结论（version 最大）的 label：{dossier_id: label}。"""
-    rows = conn.execute(
-        "SELECT c.dossier_id AS did, c.label AS label FROM conclusions c"
-        " JOIN (SELECT dossier_id, MAX(version) AS v FROM conclusions GROUP BY dossier_id) t"
-        " ON c.dossier_id = t.dossier_id AND c.version = t.v").fetchall()
+def _latest_labels(conn: Any, profile_id: Optional[int] = None) -> Dict[int, str]:
+    """每档案最新结论（version 最大）的 label：{dossier_id: label}。
+
+    profile_id 非 None 时只统计该档案工作区（v6 多 Profile 分家：画像不外泄到
+    别的工作区）；None 时不过滤（与加参数前逐位一致）。
+    """
+    sql = ("SELECT c.dossier_id AS did, c.label AS label FROM conclusions c"
+           " JOIN (SELECT dossier_id, MAX(version) AS v FROM conclusions GROUP BY dossier_id) t"
+           " ON c.dossier_id = t.dossier_id AND c.version = t.v")
+    args: List[Any] = []
+    if profile_id is not None:
+        sql += " JOIN dossiers d ON d.id = c.dossier_id WHERE d.profile_id = ?"
+        args.append(int(profile_id))
+    rows = conn.execute(sql, args).fetchall()
     return {int(r["did"]): str(r["label"] or "") for r in rows}
 
 
-def _marker_rows(conn: Any) -> List[Dict[str, Any]]:
-    """dossier_markers 全表 JOIN dossiers（CASCADE 保证都在），hits 已还原为 dict。"""
-    rows = conn.execute(
-        "SELECT m.dossier_id AS did, m.risk_hits AS risk_hits,"
-        " m.credibility_hits AS credibility_hits"
-        " FROM dossier_markers m JOIN dossiers d ON d.id = m.dossier_id").fetchall()
+def _marker_rows(conn: Any, profile_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    """dossier_markers 全表 JOIN dossiers（CASCADE 保证都在），hits 已还原为 dict。
+
+    profile_id 非 None 时只统计该档案工作区；None 时不过滤（逐位不变）。
+    """
+    sql = ("SELECT m.dossier_id AS did, m.risk_hits AS risk_hits,"
+           " m.credibility_hits AS credibility_hits"
+           " FROM dossier_markers m JOIN dossiers d ON d.id = m.dossier_id")
+    args: List[Any] = []
+    if profile_id is not None:
+        sql += " WHERE d.profile_id = ?"
+        args.append(int(profile_id))
+    rows = conn.execute(sql, args).fetchall()
     return [{"did": int(r["did"]),
              "risk": _load_json(r["risk_hits"], {}),
              "cred": _load_json(r["credibility_hits"], {})} for r in rows]
@@ -95,8 +110,11 @@ def _key_labels(rows: List[Dict[str, Any]], field: str) -> Dict[str, str]:
 # C3-1 话术模式库
 # ---------------------------------------------------------------------------
 
-def pattern_library(store: Any) -> Dict[str, Any]:
+def pattern_library(store: Any, profile_id: Optional[int] = None) -> Dict[str, Any]:
     """话术模式库：个人库里的话术特征 × 结论标签的聚合（纯读取、永不抛）。
+
+    profile_id 非 None 时只聚合该档案工作区（v6 多 Profile 分家）；None 时全库
+    （与加参数前逐位一致）。
 
     返回：
       total_dossiers        有结论的档案数
@@ -113,8 +131,8 @@ def pattern_library(store: Any) -> Dict[str, Any]:
              "risk_patterns": [], "credibility_patterns": [], "common_pairs": []}
     try:
         conn = store._conn
-        labels = _latest_labels(conn)
-        rows = _marker_rows(conn)
+        labels = _latest_labels(conn, profile_id)
+        rows = _marker_rows(conn, profile_id)
     except Exception:  # noqa: BLE001  空库/坏库都是合法的"暂无数据"
         return empty
 
@@ -178,8 +196,11 @@ def pattern_library(store: Any) -> Dict[str, Any]:
 # C3-2 信源画像
 # ---------------------------------------------------------------------------
 
-def source_profiles(store: Any) -> List[Dict[str, Any]]:
+def source_profiles(store: Any, profile_id: Optional[int] = None) -> List[Dict[str, Any]]:
     """按域名聚合证据条目的信源画像（纯读取、永不抛；空库返回 []）。
+
+    profile_id 非 None 时只聚合该档案工作区的证据（v6 多 Profile 分家）；
+    None 时全库（逐位不变）。
 
     每个域名一项：tier 取该域名条目中最常见的 domain_tier（并列取字母序第一个）；
     refuted_dossiers 只数"该域名反驳条目所在档案中最新结论为 高风险/疑似"的档案
@@ -189,10 +210,15 @@ def source_profiles(store: Any) -> List[Dict[str, Any]]:
     """
     try:
         conn = store._conn
-        labels = _latest_labels(conn)
-        rows = conn.execute(
-            "SELECT dossier_id, url, domain, domain_tier, stance, fetched_at"
-            " FROM evidence_entries").fetchall()
+        labels = _latest_labels(conn, profile_id)
+        sql = ("SELECT dossier_id, url, domain, domain_tier, stance, fetched_at"
+               " FROM evidence_entries")
+        args: List[Any] = []
+        if profile_id is not None:
+            sql += (" JOIN dossiers d ON d.id = evidence_entries.dossier_id"
+                    " WHERE d.profile_id = ?")
+            args.append(int(profile_id))
+        rows = conn.execute(sql, args).fetchall()
     except Exception:  # noqa: BLE001  空库/坏库都是合法的"暂无数据"
         return []
 
@@ -283,43 +309,63 @@ def _zero_digest(days: int) -> Dict[str, Any]:
     }
 
 
-def _fill_digest(conn: Any, digest: Dict[str, Any], start: str, end: str) -> None:
-    """把窗口 [start, end] 内的各域计数填进 digest（ISO 字符串直接比较，双端闭区间）。"""
+def _fill_digest(conn: Any, digest: Dict[str, Any], start: str, end: str,
+                 profile_id: Optional[int] = None) -> None:
+    """把窗口 [start, end] 内的各域计数填进 digest（ISO 字符串直接比较，双端闭区间）。
+
+    profile_id 非 None 时全部计数限定该档案工作区（v6 多 Profile 分家：周报是
+    “我的”周报，不混别的工作区）；None 时不过滤（与加参数前逐位一致）。
+    """
     args = (start, end)
+    scoped: List[Any] = [start, end, int(profile_id)] if profile_id is not None else args
 
     row = conn.execute("SELECT COUNT(*) AS n FROM dossiers"
-                       " WHERE created_at >= ? AND created_at <= ?", args).fetchone()
+                       " WHERE created_at >= ? AND created_at <= ?"
+                       + (" AND profile_id = ?" if profile_id is not None else ""),
+                       scoped).fetchone()
     digest["dossiers"]["new_count"] = int(row["n"])
     for r in conn.execute("SELECT input_kind AS k, COUNT(*) AS n FROM dossiers"
                           " WHERE created_at >= ? AND created_at <= ?"
-                          " GROUP BY input_kind", args):
+                          + (" AND profile_id = ?" if profile_id is not None else "")
+                          + " GROUP BY input_kind", scoped):
         digest["dossiers"]["by_input_kind"][str(r["k"])] = int(r["n"])
 
-    row = conn.execute("SELECT COUNT(*) AS n FROM conclusions"
-                       " WHERE created_at >= ? AND created_at <= ?", args).fetchone()
+    row = conn.execute("SELECT COUNT(*) AS n FROM conclusions c"
+                       " JOIN dossiers d ON d.id = c.dossier_id"
+                       " WHERE c.created_at >= ? AND c.created_at <= ?"
+                       + (" AND d.profile_id = ?" if profile_id is not None else ""),
+                       scoped).fetchone()
     digest["conclusions"]["count"] = int(row["n"])
-    for r in conn.execute("SELECT label AS k, COUNT(*) AS n FROM conclusions"
-                          " WHERE created_at >= ? AND created_at <= ?"
-                          " GROUP BY label", args):
+    for r in conn.execute("SELECT c.label AS k, COUNT(*) AS n FROM conclusions c"
+                          " JOIN dossiers d ON d.id = c.dossier_id"
+                          " WHERE c.created_at >= ? AND c.created_at <= ?"
+                          + (" AND d.profile_id = ?" if profile_id is not None else "")
+                          + " GROUP BY c.label", scoped):
         digest["conclusions"]["by_label"][str(r["k"])] = int(r["n"])
 
     row = conn.execute(
         "SELECT COUNT(*) AS n, COALESCE(SUM(degraded), 0) AS deg,"
         " COALESCE(SUM(requests), 0) AS req, COALESCE(SUM(tokens), 0) AS tok"
-        " FROM analysis_runs WHERE created_at >= ? AND created_at <= ?", args).fetchone()
+        " FROM analysis_runs r JOIN dossiers d ON d.id = r.dossier_id"
+        " WHERE r.created_at >= ? AND r.created_at <= ?"
+        + (" AND d.profile_id = ?" if profile_id is not None else ""), scoped).fetchone()
     digest["runs"]["count"] = int(row["n"])
     digest["runs"]["degraded_count"] = int(row["deg"])
     digest["runs"]["requests"] = int(row["req"])
     digest["runs"]["tokens"] = int(row["tok"])
-    for r in conn.execute("SELECT kind AS k, COUNT(*) AS n FROM analysis_runs"
-                          " WHERE created_at >= ? AND created_at <= ?"
-                          " GROUP BY kind", args):
+    for r in conn.execute("SELECT r.kind AS k, COUNT(*) AS n FROM analysis_runs r"
+                          " JOIN dossiers d ON d.id = r.dossier_id"
+                          " WHERE r.created_at >= ? AND r.created_at <= ?"
+                          + (" AND d.profile_id = ?" if profile_id is not None else "")
+                          + " GROUP BY r.kind", scoped):
         digest["runs"]["by_kind"][str(r["k"])] = int(r["n"])
 
     row = conn.execute(
         "SELECT COUNT(*) AS n, COALESCE(SUM(requests), 0) AS req,"
         " COALESCE(SUM(tokens), 0) AS tok"
-        " FROM tool_runs WHERE created_at >= ? AND created_at <= ?", args).fetchone()
+        " FROM tool_runs t JOIN sessions s ON s.id = t.session_id"
+        " WHERE t.created_at >= ? AND t.created_at <= ?"
+        + (" AND s.profile_id = ?" if profile_id is not None else ""), scoped).fetchone()
     digest["tool_runs"]["count"] = int(row["n"])
     digest["tool_runs"]["requests"] = int(row["req"])
     digest["tool_runs"]["tokens"] = int(row["tok"])
@@ -327,8 +373,11 @@ def _fill_digest(conn: Any, digest: Dict[str, Any], start: str, end: str) -> Non
     # patterns.top：窗口内落的 marker 行，risk_hits hits 非空的类目按档案数取前 5
     counts: Dict[str, int] = {}
     names: Dict[str, str] = {}
-    for r in conn.execute("SELECT risk_hits FROM dossier_markers"
-                          " WHERE created_at >= ? AND created_at <= ?", args):
+    for r in conn.execute("SELECT m.risk_hits AS risk_hits FROM dossier_markers m"
+                          " JOIN dossiers d ON d.id = m.dossier_id"
+                          " WHERE m.created_at >= ? AND m.created_at <= ?"
+                          + (" AND d.profile_id = ?" if profile_id is not None else ""),
+                          scoped):
         hits_map = _load_json(r["risk_hits"], {})
         if not isinstance(hits_map, dict):
             continue
@@ -347,7 +396,8 @@ def _fill_digest(conn: Any, digest: Dict[str, Any], start: str, end: str) -> Non
     for r in conn.execute(
             "SELECT e.url AS url FROM evidence_entries e"
             " JOIN dossiers d ON d.id = e.dossier_id"
-            " WHERE d.created_at >= ? AND d.created_at <= ? AND e.stance = '反驳'", args):
+            " WHERE d.created_at >= ? AND d.created_at <= ? AND e.stance = '反驳'"
+            + (" AND d.profile_id = ?" if profile_id is not None else ""), scoped):
         domain = normalize_host(str(r["url"] or ""))
         if domain:
             refute_counts[domain] = refute_counts.get(domain, 0) + 1
@@ -355,17 +405,27 @@ def _fill_digest(conn: Any, digest: Dict[str, Any], start: str, end: str) -> Non
     top_refute.sort(key=lambda p: (-p["refute_entries"], p["domain"]))
     digest["sources"]["top_refute"] = top_refute[:_TOP_PATTERNS]
 
-    row = conn.execute("SELECT COUNT(*) AS n FROM attention_snapshots"
-                       " WHERE taken_at >= ? AND taken_at <= ?", args).fetchone()
+    row = conn.execute("SELECT COUNT(*) AS n FROM attention_snapshots a"
+                       " JOIN dossiers d ON d.id = a.dossier_id"
+                       " WHERE a.taken_at >= ? AND a.taken_at <= ?"
+                       + (" AND d.profile_id = ?" if profile_id is not None else ""),
+                       scoped).fetchone()
     digest["heat"]["snapshot_count"] = int(row["n"])
 
-    row = conn.execute("SELECT COUNT(*) AS n FROM claim_fingerprints"
-                       " WHERE created_at >= ? AND created_at <= ?", args).fetchone()
+    row = conn.execute("SELECT COUNT(*) AS n FROM claim_fingerprints f"
+                       " JOIN dossiers d ON d.id = f.dossier_id"
+                       " WHERE f.created_at >= ? AND f.created_at <= ?"
+                       + (" AND d.profile_id = ?" if profile_id is not None else ""),
+                       scoped).fetchone()
     digest["fingerprints"]["count"] = int(row["n"])
 
 
-def weekly_digest(store: Any, now: str, days: int = 7) -> Dict[str, Any]:
+def weekly_digest(store: Any, now: str, days: int = 7,
+                  profile_id: Optional[int] = None) -> Dict[str, Any]:
     """个人信息环境周报：窗口 [start, end]（end=now，start=now 往前 days 天，闭区间）。
+
+    profile_id 非 None 时只统计该档案工作区（v6 多 Profile 分家）；None 时全库
+    （逐位不变）。
 
     时间口径：ISO 字符串直接比较（库内时间戳同源于 store._now()，见模块 docstring）；
     start 用 datetime.fromisoformat(now) 减 timedelta(days=days) 再 isoformat 得到。
@@ -386,7 +446,7 @@ def weekly_digest(store: Any, now: str, days: int = 7) -> Dict[str, Any]:
     digest["period"] = {"start": start, "end": end, "days": days_n}
     digest["as_of"] = str(now)
     try:
-        _fill_digest(store._conn, digest, start, end)
+        _fill_digest(store._conn, digest, start, end, profile_id)
     except Exception:  # noqa: BLE001  SQL 层任何故障都退全零结构，周报不能崩
         zero = _zero_digest(days_n)
         zero["period"] = digest["period"]

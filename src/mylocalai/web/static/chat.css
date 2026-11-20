@@ -780,3 +780,571 @@
   .chat-quick-panel { margin: 8px 12px 0; }
   .chat-heat-fields { grid-template-columns: 1fr; }
 }
+
+/* ---------- 多 Profile 分家（v6）：左栏当前档案行 + 普通用户简化结论卡 ---------- */
+.chat-profile-line {
+  font-size: 11.5px;
+  color: var(--muted);
+  padding: 0 6px 6px;
+}
+
+.chat-profile-line b { color: var(--primary-dark); font-weight: 600; }
+
+.chat-card-simple .chat-card-label { font-size: 16px; }
+
+.chat-simple-note { font-size: 11.5px; margin: 6px 0 0; }
+
+/* ============================================================
+   材料批次面板（专业用户 · 材料分析）：左栏「档案库」与「我的画像」之间，
+   初始 hidden，由 batch.js 按当前档案角色（role=analyst）显隐。
+   只复用 style.css 的 :root 令牌，不另起配色；写法参考 .chat-insights-*
+   与 .chat-quick-*（同一套左栏小面板惯例）。
+   ============================================================ */
+.chat-side > .chat-batch-panel { flex: 0 0 auto; }
+
+/* 输入模式切换：三个按钮一排，active 标当前模式（同 .chat-quick-chip.active） */
+.chat-batch-modes {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.chat-batch-mode-btn {
+  flex: 1;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 5px 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.chat-batch-mode-btn:hover {
+  border-color: var(--primary);
+  color: var(--primary-dark);
+  background: var(--primary-soft);
+}
+
+.chat-batch-mode-btn.active {
+  border-color: var(--primary);
+  color: var(--primary-dark);
+  background: var(--primary-soft);
+}
+
+.chat-batch-mode-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* 三个输入面板：一次只显示一个（hidden 由 batch.js 切换） */
+.chat-batch-pane { display: flex; flex-direction: column; gap: 6px; }
+
+.chat-batch-textarea {
+  width: 100%;
+  min-height: 96px;
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.chat-batch-file-input {
+  font-size: 12px;
+  color: var(--muted);
+  max-width: 100%;
+}
+
+.chat-batch-file-hint { font-size: 11.5px; margin: 0; line-height: 1.6; }
+
+/* 错误行：后端 detail 原文照抄，不替它改写 */
+.chat-batch-error {
+  font-size: 12px;
+  color: var(--danger);
+  background: var(--panel);
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  padding: 7px 10px;
+  margin: 8px 0 0;
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+.chat-batch-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.chat-batch-start { padding: 7px 16px; font-size: 13px; }
+.chat-batch-stop { padding: 6px 14px; font-size: 12.5px; }
+.chat-batch-start:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* 进度区：一行文字 + 细进度条（同 .chat-progress-bar 写法） */
+.chat-batch-progress { margin-top: 10px; }
+
+.chat-batch-progress-text {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 5px;
+  line-height: 1.6;
+}
+
+.chat-batch-progress-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.chat-batch-progress-bar > i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--primary);
+  transition: width 0.3s;
+}
+
+/* 批次列表 */
+.chat-batch-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 190px;
+  overflow-y: auto;
+}
+
+.chat-batch-list li.empty {
+  cursor: default;
+  color: var(--muted);
+  font-size: 12px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  padding: 9px 12px;
+}
+
+.chat-batch-item {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.chat-batch-item:hover {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.chat-batch-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.chat-batch-item-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-batch-item-meta { font-size: 11.5px; margin-top: 3px; line-height: 1.6; }
+
+/* 批次详情：头部 + 汇总卡槽 + 条目表 + 叙述 */
+.chat-batch-detail {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.chat-batch-detail-title { font-size: 13px; font-weight: 700; }
+.chat-batch-detail-meta { font-size: 11.5px; margin-top: 2px; line-height: 1.6; }
+
+/* 汇总卡由 ChatCards.renderCard 产出（cards.js 内转义），这里只给外间距 */
+.chat-batch-card-slot > .chat-card { margin: 0; }
+
+.chat-batch-narrative {
+  font-size: 12.5px;
+  line-height: 1.8;
+  white-space: pre-wrap;
+  color: var(--text);
+}
+
+.chat-batch-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.chat-batch-item-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  border-bottom: 1px dashed var(--border);
+  padding-bottom: 5px;
+}
+
+.chat-batch-item-row:last-child { border-bottom: none; }
+
+.chat-batch-item-pos {
+  font-weight: 700;
+  color: var(--muted);
+  min-width: 26px;
+}
+
+.chat-batch-item-label { font-weight: 600; }
+.chat-batch-item-url {
+  flex-basis: 100%;
+  font-size: 11px;
+  word-break: break-all;
+  padding-left: 26px;
+}
+.chat-batch-item-risk { font-size: 11.5px; }
+
+.chat-batch-item-group {
+  font-size: 11px;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0 5px;
+}
+
+.chat-batch-item-dossier {
+  font-size: 11.5px;
+  color: var(--primary-dark);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.chat-batch-item-dossier:hover { text-decoration: underline; }
+
+.chat-batch-item-error {
+  flex-basis: 100%;
+  font-size: 11.5px;
+  color: var(--danger);
+  word-break: break-all;
+}
+
+/* ---------- 批次汇总卡（cards.js renderBatchSummary 的 chat-batch-* 类） ---------- */
+.chat-card-batch-summary { font-size: 12.5px; line-height: 1.8; }
+
+.chat-batch-summary-meta { font-size: 11.5px; margin: 0 0 6px; }
+.chat-batch-labels { font-size: 12px; margin: 6px 0 0; }
+
+.chat-batch-group-title,
+.chat-batch-source-title,
+.chat-batch-degraded-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  margin: 10px 0 4px;
+}
+
+.chat-batch-groups,
+.chat-batch-sources {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.chat-batch-groups li,
+.chat-batch-sources li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  border-bottom: 1px dashed var(--border);
+  padding-bottom: 4px;
+}
+
+.chat-batch-groups li:last-child,
+.chat-batch-sources li:last-child { border-bottom: none; }
+
+.chat-batch-group-rep { color: var(--text); word-break: break-all; }
+
+.chat-batch-group-labels { font-size: 11px; margin-left: auto; text-align: right; }
+
+.chat-batch-source-domain { font-weight: 600; }
+.chat-batch-source-num { color: var(--muted); font-size: 11.5px; margin-left: auto; }
+
+.chat-batch-items-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin-top: 8px;
+}
+
+.chat-batch-items-table th,
+.chat-batch-items-table td {
+  border-bottom: 1px solid var(--border);
+  padding: 4px 6px;
+  text-align: left;
+  word-break: break-all;
+}
+
+.chat-batch-items-table th { color: var(--muted); font-weight: 600; }
+.chat-batch-items-table a { color: var(--primary-dark); text-decoration: none; }
+.chat-batch-items-table a:hover { text-decoration: underline; }
+
+.chat-batch-item-url { font-size: 11px; margin-top: 2px; }
+.chat-batch-item-url a { color: var(--muted); }
+
+.chat-batch-degraded {
+  margin-top: 10px;
+  border: 1px solid var(--warn);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.chat-batch-degraded ul {
+  margin: 4px 0 0 16px;
+  padding: 0;
+  font-size: 12px;
+  color: var(--warn);
+}
+
+.chat-batch-degraded li { line-height: 1.7; }
+
+/* ---------- 窄屏补充：批次面板铺满左栏 ---------- */
+@media (max-width: 900px) {
+  .chat-batch-list { max-height: 220px; }
+}
+
+/* ============================================================
+   领域监测面板（专业用户 · 领域监测）：左栏「材料批次」与「我的画像」之间，
+   初始 hidden，由 monitor.js 按当前档案角色（role=monitor）显隐。
+   只复用 style.css 的 :root 令牌，不另起配色；写法参考 .chat-batch-* 与
+   .chat-insights-*（同一套左栏小面板惯例）。
+   ============================================================ */
+.chat-side > .chat-monitor-panel { flex: 0 0 auto; }
+
+.chat-monitor-hint { font-size: 11.5px; margin: 0 0 10px; line-height: 1.7; }
+
+/* 新建表单：一列标签 + 输入（同 .chat-heat-fields 的标签排版） */
+.chat-monitor-create { display: flex; flex-direction: column; gap: 8px; }
+
+.chat-monitor-create label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.chat-monitor-create input,
+.chat-monitor-create select {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 9px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--panel);
+}
+
+/* 错误行：后端 detail 原文照抄，不替它改写（同 .chat-batch-error 写法） */
+.chat-monitor-error {
+  font-size: 12px;
+  color: var(--danger);
+  background: var(--panel);
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  padding: 7px 10px;
+  margin: 4px 0 0;
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+.chat-monitor-actions { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+
+.chat-monitor-submit { padding: 7px 16px; font-size: 13px; }
+.chat-monitor-submit:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* 订阅列表 */
+.chat-monitor-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.chat-monitor-list li.empty {
+  cursor: default;
+  color: var(--muted);
+  font-size: 12px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  padding: 9px 12px;
+}
+
+.chat-monitor-item {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.chat-monitor-item:hover { border-color: var(--primary); background: var(--primary-soft); }
+
+.chat-monitor-item.active {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  box-shadow: inset 3px 0 0 var(--primary);
+}
+
+.chat-monitor-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.chat-monitor-item-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-monitor-item-meta { font-size: 11.5px; margin-top: 3px; line-height: 1.6; }
+
+.chat-monitor-item-actions { display: flex; gap: 6px; margin-top: 7px; }
+
+.chat-monitor-btn {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 3px 10px;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.chat-monitor-btn:hover {
+  border-color: var(--primary);
+  color: var(--primary-dark);
+  background: var(--primary-soft);
+}
+
+.chat-monitor-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.chat-monitor-btn-danger:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: var(--panel);
+}
+
+/* 订阅详情：头部 + 变化卡槽 + 运行历史 */
+.chat-monitor-detail {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.chat-monitor-detail-title { font-size: 13px; font-weight: 700; }
+.chat-monitor-detail-meta { font-size: 11.5px; line-height: 1.6; }
+
+/* 暂停原因 / 错误说明：提示框（同 .chat-batch-error 写法，换 warn 色） */
+.chat-monitor-notice {
+  font-size: 12px;
+  color: var(--warn);
+  background: var(--panel);
+  border: 1px solid var(--warn);
+  border-radius: 8px;
+  padding: 7px 10px;
+  margin: 0;
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+/* 变化卡由 ChatCards.renderCard 产出（cards.js 内转义），这里只给外间距 */
+.chat-monitor-card-slot > .chat-card { margin: 0; }
+
+.chat-monitor-runs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.chat-monitor-run {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  border-bottom: 1px dashed var(--border);
+  padding-bottom: 5px;
+}
+
+.chat-monitor-run:last-child { border-bottom: none; }
+.chat-monitor-run-meta { font-size: 11.5px; }
+
+.chat-monitor-run-error {
+  flex-basis: 100%;
+  font-size: 11.5px;
+  color: var(--danger);
+  word-break: break-all;
+}
+
+/* ---------- 监测变化卡（cards.js renderMonitorChange 的 monitor-* 类） ---------- */
+.chat-card-monitor-change { font-size: 12.5px; line-height: 1.8; }
+
+.chat-monitor-urls-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  margin: 10px 0 4px;
+}
+
+.chat-monitor-urls {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.chat-monitor-urls li {
+  font-size: 11.5px;
+  color: var(--text);
+  word-break: break-all;
+  border-bottom: 1px dashed var(--border);
+  padding-bottom: 4px;
+}
+
+.chat-monitor-urls li:last-child { border-bottom: none; }
+
+/* ---------- 窄屏补充：监测面板铺满左栏 ---------- */
+@media (max-width: 900px) {
+  .chat-monitor-list { max-height: 240px; }
+}

@@ -29,6 +29,7 @@ import math
 import os
 import threading
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -52,6 +53,25 @@ from mylocalai.util.console_io import force_utf8_stdio  # noqa: E402
 from mylocalai.util.text_safety import has_surrogates, sanitize_text  # noqa: E402
 from mylocalai.web.models_api import router as models_router  # noqa: E402
 from mylocalai.web.privacy_api import router as privacy_router  # noqa: E402
+from mylocalai.web.profiles_api import router as profiles_router  # noqa: E402
+from mylocalai.web.batch_api import router as batch_router  # noqa: E402
+from mylocalai.web.materials_api import router as materials_router  # noqa: E402
+from mylocalai.web.monitor_api import router as monitor_router  # noqa: E402
+
+
+@asynccontextmanager
+async def _lifespan(_app: Any):
+    """应用生命周期：起领域监测调度 daemon 线程（阶段 3）。
+
+    调度只在**服务运行期间**有效（关服即停，产品口径如实告知用户）；多 worker
+    部署时只有主进程调度（启动告警复用 _warn_if_multiworker 的口径）。
+    """
+    from mylocalai.web import monitor_api
+    monitor_api.start_scheduler()
+    try:
+        yield
+    finally:
+        monitor_api.stop_scheduler()
 
 # 非 UTF-8 控制台（英文 Windows 的 cp1252 等）下，日志里的中文会抛 UnicodeEncodeError。
 force_utf8_stdio()
@@ -101,11 +121,30 @@ app = FastAPI(
     title="网络言论智能分析系统 API",
     description="情感 / 攻击性 / 逻辑三维分析 + 规则引擎裁判 + 报告生成（复用项目根目录分析链路）",
     version="1.0.0",
+    lifespan=_lifespan,
 )
 app.include_router(privacy_router)
 # 模型管理（设置面板）：与 privacy_router 紧挨——两者都是"用户在本机改自己的配置"，
 # 前缀/异常口径保持一致（404 未知、400 中文 detail、写后 llm_client.reset_cache()）
 app.include_router(models_router)
+# 档案工作区 / 材料批次 / 领域监测（角色扩展，v6-v8）
+app.include_router(profiles_router)
+app.include_router(batch_router)
+app.include_router(materials_router)
+app.include_router(monitor_router)
+
+
+def _active_profile_id() -> Optional[int]:
+    """当前激活的档案工作区 id；取不到返 None（不过滤——旧库/异常的安全退化）。
+
+    口径：一律从**档案库的 store** 解析（app_state 与 dossiers/sessions 同库），
+    不另开连接——测试注入的临时库与端点看到同一个激活态。
+    """
+    try:
+        pid = get_dossier_service().store.active_profile_id()
+        return int(pid) if pid else None
+    except Exception:  # noqa: BLE001  档案库不可用不拖垮其他端点
+        return None
 
 # 内存历史（最新在前）。仅作演示用途：重启服务即清空，不落盘。
 _history: List[Dict[str, Any]] = []
@@ -736,15 +775,22 @@ async def chat(req: ChatRequest, request: Request) -> StreamingResponse:
     message = _validate_chat_message(req.message)
     action = _normalize_chat_action(req.action)
     store = get_session_store()
+    profile_id = _active_profile_id()
     if req.session_id is not None:
         if isinstance(req.session_id, bool) or not isinstance(req.session_id, int) \
                 or req.session_id <= 0:
             raise HTTPException(status_code=400, detail="session_id 必须是正整数")
         if store.get_session(int(req.session_id)) is None:
             raise HTTPException(status_code=404, detail=f"会话不存在: {req.session_id}")
+        # 跨工作区防护（v6）：会话属于别的档案工作区 → 按不存在处理，
+        # 不泄露别的工作区有哪些会话，也不把消息写到别的工作区。
+        owner = store.session_profile(int(req.session_id)).get("profile_id")
+        if profile_id is not None and owner is not None and int(owner) != int(profile_id):
+            raise HTTPException(status_code=404, detail=f"会话不存在: {req.session_id}")
         session_id = int(req.session_id)
     else:
-        session_id = store.create_session(title=message[:24])
+        # 新会话归当前激活档案（SessionStore.create_session 内部同口径，这里显式传）
+        session_id = store.create_session(title=message[:24], profile_id=profile_id)
 
     loop = build_assistant_loop()
     if loop is None:
@@ -836,24 +882,26 @@ def sessions_list() -> Dict[str, Any]:
     查询（N≤100、单机个人库量级），不值得为此加一条聚合 SQL。
     """
     store = get_session_store()
-    items = store.list_sessions(limit=100)
+    profile_id = _active_profile_id()
+    items = store.list_sessions(limit=100, profile_id=profile_id)
     for item in items:
         try:
             item["cost"] = _sum_runs_cost(store.runs_for_session(int(item["id"])))
         except Exception:  # noqa: BLE001  成本汇总是增益面：取不到就缺省零值
             item["cost"] = {"requests": 0, "tokens": 0}
-    return {"sessions": items}
+    return {"sessions": items, "active_profile_id": profile_id}
 
 
 @app.post("/api/sessions")
 def sessions_create(req: Optional[SessionCreateRequest] = None) -> Dict[str, Any]:
-    """新建会话，返回含 id 的完整会话记录。"""
+    """新建会话（归当前激活档案工作区），返回含 id 的完整会话记录。"""
     body = req or SessionCreateRequest()
     title = (body.title or "").strip()
     if has_surrogates(title):
         raise HTTPException(status_code=400, detail="标题包含无效字符（无法编码的 Unicode 代理项）")
     store = get_session_store()
-    return store.get_session(store.create_session(title=title[:100]))
+    return store.get_session(store.create_session(title=title[:100],
+                                                   profile_id=_active_profile_id()))
 
 
 @app.get("/api/sessions/{session_id}/messages")
@@ -863,6 +911,11 @@ def session_messages(session_id: str) -> Dict[str, Any]:
     store = get_session_store()
     sid = _parse_path_id(session_id, "会话")
     if store.get_session(sid) is None:
+        raise HTTPException(status_code=404, detail=f"会话不存在: {sid}")
+    # v6 多 Profile 分家：会话属于别的档案工作区 → 按不存在处理（不泄露存在性）
+    profile_id = _active_profile_id()
+    owner = store.session_profile(sid).get("profile_id")
+    if profile_id is not None and owner is not None and int(owner) != int(profile_id):
         raise HTTPException(status_code=404, detail=f"会话不存在: {sid}")
     return {"session_id": sid, "messages": store.messages(sid),
             "cost": _sum_runs_cost(store.runs_for_session(sid))}
@@ -907,6 +960,11 @@ def session_reminders(session_id: str) -> Dict[str, Any]:
     sid = _parse_path_id(session_id, "会话")
     if store.get_session(sid) is None:
         raise HTTPException(status_code=404, detail=f"会话不存在: {sid}")
+    # v6 多 Profile 分家：会话属于别的档案工作区 → 按不存在处理
+    profile_id = _active_profile_id()
+    owner = store.session_profile(sid).get("profile_id")
+    if profile_id is not None and owner is not None and int(owner) != int(profile_id):
+        raise HTTPException(status_code=404, detail=f"会话不存在: {sid}")
     dossier_ids = _session_dossier_ids(store, sid)
     lines = aggregate_reminder_lines(dossier_ids, get_dossier_service().store)
     return {"session_id": sid, "dossier_ids": dossier_ids, "lines": lines}
@@ -927,9 +985,24 @@ def _parse_path_id(raw: str, kind: str) -> int:
 
 @app.get("/api/dossiers")
 def dossiers_list(query: str = "", limit: int = 50) -> Dict[str, Any]:
-    """档案列表（updated_at 倒序）。数据只经 DossierService/store 读取。"""
+    """档案列表（updated_at 倒序）。数据只经 DossierService/store 读取。
+
+    v6 多 Profile 分家：只列当前激活档案工作区的档案。
+    """
     return {"dossiers": get_dossier_service().store.list_dossiers(
-        query=query or "", limit=max(1, min(int(limit), 200)))}
+        query=query or "", limit=max(1, min(int(limit), 200)),
+        profile_id=_active_profile_id())}
+
+
+def _dossier_or_404(service: Any, did: int, profile_id: Optional[int]) -> Dict[str, Any]:
+    """档案详情/导出的共用前置：不存在 → 404；属于别的工作区 → 404（不泄露存在性）。"""
+    header = service.store.get_dossier(did)
+    if header is None:
+        raise HTTPException(status_code=404, detail=f"档案不存在: {did}")
+    owner = header.get("profile_id")
+    if profile_id is not None and owner is not None and int(owner) != int(profile_id):
+        raise HTTPException(status_code=404, detail=f"档案不存在: {did}")
+    return header
 
 
 @app.get("/api/dossiers/{dossier_id}")
@@ -937,12 +1010,11 @@ def dossier_detail(dossier_id: str) -> Dict[str, Any]:
     """档案详情：档案头 + 全版本结论 + 证据批次计数 + 快照计数 + 版本对比
     + chapters 六章节聚合（M3-2：conclusion/evidence/speech/heat/opinions/deep_read，
     经 service.chapters()，纯读取、缺章如实 absent、永不抛）。
-    M4：附 cost 汇总（sum analysis_runs 的真实落库 requests/tokens）。"""
+    M4：附 cost 汇总（sum analysis_runs 的真实落库 requests/tokens）。
+    v6：档案属于别的档案工作区 → 404（与不存在同形，不泄露存在性）。"""
     service = get_dossier_service()
     did = _parse_path_id(dossier_id, "档案")
-    header = service.store.get_dossier(did)
-    if header is None:
-        raise HTTPException(status_code=404, detail=f"档案不存在: {did}")
+    header = _dossier_or_404(service, did, _active_profile_id())
     cmp = service.compare_versions(did)
     runs = service.store.runs(did)
     return {
@@ -970,9 +1042,7 @@ def dossier_export(dossier_id: str, format: str = "md") -> PlainTextResponse:
         raise HTTPException(status_code=400, detail=f"暂只支持 format=md（收到: {format}）")
     service = get_dossier_service()
     did = _parse_path_id(dossier_id, "档案")
-    header = service.store.get_dossier(did)
-    if header is None:
-        raise HTTPException(status_code=404, detail=f"档案不存在: {did}")
+    _dossier_or_404(service, did, _active_profile_id())
     filename = f"dossier-{did}.md"
     return PlainTextResponse(
         service.export_markdown(did),
@@ -993,20 +1063,28 @@ def dossier_export(dossier_id: str, format: str = "md") -> PlainTextResponse:
 
 @app.get("/api/insights/patterns")
 def insights_patterns() -> Dict[str, Any]:
-    """话术模式库（零 LLM、纯只读聚合）：个人档案库里的话术特征 × 结论标签统计。"""
+    """话术模式库（零 LLM、纯只读聚合）：个人档案库里的话术特征 × 结论标签统计。
+
+    v6 多 Profile 分家：只聚合当前激活档案工作区的档案史。
+    """
     try:
         from mylocalai.dossier.insights import pattern_library  # 惰性 import（先例：build_assistant_loop）
-        return {"patterns": pattern_library(get_dossier_service().store)}
+        return {"patterns": pattern_library(get_dossier_service().store,
+                                            _active_profile_id())}
     except Exception:  # noqa: BLE001  参谋数据取不到就如实 503，不让页面 500
         return JSONResponse({"error": "insights_unavailable"}, status_code=503)
 
 
 @app.get("/api/insights/sources")
 def insights_sources() -> Dict[str, Any]:
-    """信源画像（零 LLM、纯只读聚合）：按域名聚合证据条目的反驳/支持战绩（已排序）。"""
+    """信源画像（零 LLM、纯只读聚合）：按域名聚合证据条目的反驳/支持战绩（已排序）。
+
+    v6 多 Profile 分家：只聚合当前激活档案工作区的证据史。
+    """
     try:
         from mylocalai.dossier.insights import source_profiles
-        return {"profiles": source_profiles(get_dossier_service().store)}
+        return {"profiles": source_profiles(get_dossier_service().store,
+                                            _active_profile_id())}
     except Exception:  # noqa: BLE001
         return JSONResponse({"error": "insights_unavailable"}, status_code=503)
 
@@ -1027,6 +1105,7 @@ def insights_weekly(days: str = "7") -> Dict[str, Any]:
     try:
         from mylocalai.dossier.insights import weekly_digest
         now = datetime.now().astimezone().isoformat()
-        return {"digest": weekly_digest(get_dossier_service().store, now=now, days=n)}
+        return {"digest": weekly_digest(get_dossier_service().store, now=now, days=n,
+                                        profile_id=_active_profile_id())}
     except Exception:  # noqa: BLE001
         return JSONResponse({"error": "insights_unavailable"}, status_code=503)
