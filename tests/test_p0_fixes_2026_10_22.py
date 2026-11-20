@@ -150,10 +150,12 @@ class TestCacheAndBudget(unittest.TestCase):
     def test_attempt_timeout_never_exceeds_the_remaining_budget(self):
         """P0-4：单次尝试超时不能突破剩余预算（原下限写死 1.0s）。
 
-        容差说明：remaining_seconds() 是 `(monotonic()+预算) - monotonic()`，而
-        Windows 的 monotonic 是粗粒度时钟（约 15.6ms 一跳）且绝对值很大，两步浮点
-        运算会把 0.3 抬成 0.3000000000029104（实测）。这个误差比时钟粒度小 10 个
-        数量级，不代表预算被突破，故比较时给 1e-6 容差——断言的实际强度不变。
+        容差说明：remaining_seconds() 是 `(monotonic()+预算) - monotonic()` 两次大数
+        相减，误差随开机时长增长——monotonic 基数越大（机器开机越久），0.3s 的表示
+        误差越大；Windows 的 monotonic 还是粗粒度时钟（约 15.6ms 一跳）。实测 0.3
+        会被抬成 0.3000000000029104：这个误差比时钟粒度小十个数量级，不代表预算被
+        突破，故比较时给 _BUDGET_FLOAT_TOL（1e-6）容差——只吃浮点噪声，不放松
+        "不得超预算"的契约，断言的实际强度不变。
         """
         with llm_cache.deadline_scope(0.3):
             timeout = llm_cache.attempt_timeout(30.0)
