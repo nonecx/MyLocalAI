@@ -24,6 +24,16 @@
     "max_tokens": 800,
     "cache_namespace": "assistant_skills"
   },
+  "research_model": {
+    "temperature": 0,
+    "max_tokens": 900,
+    "cache_namespace": "assistant_research"
+  },
+  "authority_model": {
+    "temperature": 0,
+    "max_tokens": 900,
+    "cache_namespace": "assistant_authority"
+  },
   "max_tool_calls_per_turn": 2,
   "turn_deadline_s": 180,
   "context_char_budget": 12000,
@@ -50,6 +60,7 @@
     "verify_claim", "analyze_speech", "check_heat", "compute_heat",
     "list_dossiers", "get_dossier", "recheck_dossier", "export_card",
     "search_web", "read_opinions", "deep_read", "insights", "collect_evidence",
+    "collect_research", "verify_authority", "collect_and_verify",
     "chitchat", "clarify", "refuse"
   ],
   "refusal_triggers": [

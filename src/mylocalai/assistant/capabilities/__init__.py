@@ -10,7 +10,11 @@
     claim-checking 的批量复合，analyst 主能力）与 domain_monitoring（领域监测，
     topic-understanding 的持续复合，monitor 主能力）。两者都不占对话路由枚举，
     通道是面板 + REST（web/batch_api.py、web/monitor_api.py）。
-  - 本包只放"人读"的能力策略文档，不放代码：SKILL.md 是文档不是 Python 模块，
+  - 2026-11-21 再追加两个只读用户能力：information_collection（资料收集，工具
+    collect_research）与 authority_verification（权威核验，工具 verify_authority），
+    并由 collect_and_verify 提供“一句话同时收集+核验”的复合形态；两者都占对话路由枚举。
+  - 本包只放"人读"的能力策略文档，不放代码：SKILL.md 是文档不是 Python 模块（资料收集/
+    权威核验的可执行契约分别在 skills/research/pipeline.py 与 skills/authority/pipeline.py），
     因此本 __init__ 不 import 任何子目录、不导出符号（__all__ = []）。
   - 机器可执行契约（能力 id/版本/输入 schema/计划步骤/预算/权限）的唯一规范来源是
     assistant.registry 注册表 + assistant.skills.pipeline（《规格》§2 防双维护），

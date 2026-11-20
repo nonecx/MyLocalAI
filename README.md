@@ -58,7 +58,13 @@
 │   │   ├── registry.py         工具注册表（schema 校验、权限分级、成本/延迟元数据）
 │   │   ├── tools_verify.py / tools_heat.py / tools_memory.py / tools_chapters.py
 │   │   ├── tools_batch.py      材料批次编排（阶段 2：同源分组 + 逐条核查 + 双预算）
-│   │   └── tools_monitor.py    领域监测编排（阶段 3：授权闸 + 检索 + 变化摘要）
+│   │   ├── tools_monitor.py    领域监测编排（阶段 3：授权闸 + 检索 + 变化摘要）
+│   │   ├── tools_research.py / tools_authority.py / tools_composite.py
+│   │   │                       资料收集 / 权威核验 / 复合工具（只读、重成本、不建档）
+│   │   ├── tools_skill_cards.py  三张新卡的纯函数组装（引文逐字、无分数）
+│   │   ├── skills/research/    资料收集流水线（pipeline/agent 两模式、prior 增量、规则/SKILL）
+│   │   ├── skills/authority/   权威核验流水线（权威类别/动态核验/balance/lean、规则/SKILL）
+│   │   └── skills/collect_core.py  两套新流水线共用的预算/状态/来源/去重/锚定底座
 │   │   ├── fingerprint.py      话术指纹纯函数（归一化/shingle/Jaccard——谣言库秒回的地基）
 │   │   ├── reminders.py        被动提醒纯函数（档案年龄/热度变化 → 一行提示）
 │   │   ├── context.py          上下文窗口构建器（12k 字符预算、裁剪与摘要）
@@ -73,9 +79,11 @@
 │   │   ├── batch_api.py        材料批次 API + SSE 进度（v7）
 │   │   ├── materials_api.py    上传文件内存解析（txt/md/csv/json，不落盘）
 │   │   ├── monitor_api.py      监测订阅 API + 调度线程（v8）
+│   │   ├── skills_api.py       技能工作流偏好 GET/PUT（设置页“技能”页）
 │   │   └── static/             单一对话页的全部界面：index.html + shell.js（file:// 引导/服务状态）
 │   │                           + chat.js/cards.js（会话、档案库、事件流与全部卡片渲染）+ chat.css
 │   │                           + profiles.js（档案切换器）+ batch.js（材料批次面板）+ monitor.js（领域监测面板）
+│   │                           + settings.js/settings.css（模型/技能/隐私设置弹层）
 │   ├── util/                   text_safety（代理项规整）/ console_io（stdio 规整）
 │   └── cli.py                  命令行入口（python -m mylocalai.cli）
 ├── my_website/                 启动器（start.bat / start.sh）与说明，实际代码在 src/mylocalai/web/
@@ -324,7 +332,7 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 1410 个用例（unittest discover 全量，2026-11-20 角色扩展合并回主线后实测；
+离线套件共 1662 个用例（unittest discover 全量，2026-11-20 角色扩展合并回主线后实测；
 **M4 起由 `tests.test_readme_counts` 自动校验此数字与 mock 闸门条数，改动后须同步回写**）：
 M1-M3 的全部回归（详见 git 历史），加上 M4 新增模块：
 **成本真实计数**（llm_client 进程级计数器：真实上游调用数 + usage tokens，缓存命中/
@@ -362,6 +370,13 @@ CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
 真假判定）、**collect_evidence 工具与研究助手接线**（`tests.test_research_assistant`
 22 例：工具注册与校验、取消与绝对死线透传、六种状态保真、路由与 allowlist、
 上下文不伪造档案号、报告引用逐字保留）。
+加上 2026-11-21 信息收集/权威核验新增模块：**两套新流水线**（`tests.test_research_pipeline`
+40 例 + `tests.test_authority_pipeline` 53 例：两模式、引文锚定、动态权威防伪、balance/lean
+决策表、增量、预算/取消/注入页）、**共享底座与受限 Agent 循环**（`tests.test_collect_core`
+37 例、`tests.test_agent_loop` 37 例）、**偏好与追问**（`tests.test_skills_preferences`、
+`tests.test_continuation`）、**三工具/复合卡**（`tests.test_skill_tools`、`tests.test_skill_integration`）、
+**设置页技能分组**（`tests.test_skills_api`、`tests.test_skills_ui`）、**三张新卡渲染**
+（`tests.test_research_ui`）。
 另有 `tests/run_module_tests.py`（12 条内置用例全模块跑一遍并落盘）、
 `tests/smoke_api.py`（配置自检 + 连通性）。
 
@@ -380,10 +395,14 @@ CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
   内存轻模式（重启清空，契约不变）。多 worker 部署时缓存与历史各自独立（见 `my_website/README.md`）。
 - **真实上游冒烟依赖提供方状态**：LongCat 有返回空 content 的前科（2026-10-14 检验报告、
   2026-10-31 M2 末冒烟复现两次），冒烟失败不代表链路回退——离线套件与 mock 闸门全绿为准。
+- **动态权威是有限信任**：目录外官方站点只有在代码信号（官方后缀/正文标记/入链/交叉提及）
+  满足下限且经独立佐证时才作决定性证据，且仅会话内有效、不写回目录；高仿站点仍可能欺骗，
+  高利害主题请以官方原文为准。资料收集/权威核验不解析 PDF/JS 渲染页/付费墙，覆盖受预算限制。
 
 ## 文档
 
 - `docs/Agent工作流规格-v0.1.md` —— **Agent 工作流实施基线**（用户能力、主张/传播证据双维判定、外发授权、分类保存与验收矩阵；规格不等于所有阶段已实现）。
+- `docs/信息收集与权威核验技能-2026-11-20.md` —— 资料收集/权威核验/Skill 调用与工作流实施规格（两模式、自动接力、增量、动态权威、预算/状态/失败矩阵与测试）。
 - `docs/取证技能-2026-11-05.md` —— 取证三技能（领域识别/信源发现/证据检索）的口径文档：分工、执行流程、安全模型、状态取值、预算与局限。
 - `docs/智能助手Skill工作流设计讨论-2026-11-07.md` —— Skill 融入工作流的问题与方向讨论汇总（两套证据链现状、能力分层、混合表达、内部机制不暴露、待决问题清单）。
 - `docs/使用说明书.md` —— **使用者操作手册**（安装/配置/启动/单页对话与左栏/命令行/MCP/配置调整/数据备份/常见问题）。
@@ -439,8 +458,9 @@ CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
 - **回合预算与取消**：`CHAT_TURN_DEADLINE_S`（默认 180s）经 llm_cache 预算继承进引擎链；
   前端 AbortController → SSE 断开 → 协作取消（agent 轮询 cancel_check、judge 四取消位），
   超时/取消都诚实降级、已有卡片照发。
-- **取证三技能与用户能力分层**（2026-11-20）：面向用户的能力收敛为四个**用户能力 Skill**
-   （事实核查 / 证据研究 / 话题理解 / 言论理解，`src/mylocalai/assistant/capabilities/`，
+- **取证三技能与用户能力分层**（2026-11-20）：面向用户的能力为八类**用户能力 Skill**
+   （四类基础：事实核查 / 证据研究 / 话题理解 / 言论理解；角色扩展：材料分析 / 领域监测；
+   2026-11-21 新增：资料收集 / 权威核验，`src/mylocalai/assistant/capabilities/`，
    各一份人读的 SKILL.md；机器可执行契约的唯一规范来源是 registry 注册表 +
    skills/pipeline.py，不搞两处维护），内部由**取证三技能**（领域识别 → 信源发现 →
    证据检索，`src/mylocalai/assistant/skills/`）作为执行层支撑。
@@ -579,6 +599,39 @@ E 分首末差，不外推）。
 - **schema v8**：`subscriptions` + `subscription_runs`；
 - 测试：`tests.test_monitor`（存储 / due / 变化摘要 / 编排含 blocked 零外发 /
   失败不卡死 / API / 调度 tick）。
+
+## 信息收集与权威核验（2026-11-21）
+
+新增两个**只读**用户能力，并支持一句话同时跑两段：
+
+| 能力 | 工具 | 典型说法 | 输出 |
+|---|---|---|---|
+| 资料收集 `information-collection` | `collect_research(topic, followup)` | “帮我收集/整理/调研某主题的资料、最新进展、各方说法” | `research` 卡：子问题、关键发现（每条带 evidence_id 与逐字引文）、线索（未核验）、来源分级、时间线、分歧、缺口、执行计数 |
+| 权威核验 `authority-verification` | `verify_authority(text, followup)` | “找权威资料证明/反驳这个说法”“做权威核验” | `authority` 卡：逐主张 balance（权威证据支持/反驳/冲突/不足/不可核查）+ lean（证据倾向）+ 条件式结论 + 支持/反驳证据 + 分析 + 限制 |
+| 复合 `collect-and-verify` | `collect_and_verify(topic, claim)` | “帮我收集某主题资料，并核实其中‘某说法’” | `composite` 卡：research + authority 两个子卡，两段互不吞并 |
+
+- **两套工作流模式，按技能分别设置**：`pipeline`（固定阶段流水线，默认）或 `agent`（受限
+  Agent 循环：模型只能在代码给的候选池内选 search/read/extract/finish；预算、死线、取消、
+  URL 候选池、引文锚定、结论/状态/分数全部由代码掌握）。设置入口：顶栏「设置」→「技能」。
+- **自动接力**：① 一句话同时给“主题 + 要核实的说法”由路由选 `collect_and_verify`；
+  ② 开启“研究后自动核验直接引文”时，只对资料卡 `key_findings[].source_quote`（原文直接引文，
+  最多 2 条）自动跑权威核验，**不核验助手综述句**；无引文时只出资料卡并说明原因。
+  失败不自动换能力；结果不足时明确报缺口并建议改用另一能力。
+- **追问增量**：说“补充/再深一点/换个角度/第二条再查”等，复用同会话上一张同类型卡，只补
+  增量；说“重新查/换主题”才完整重跑。
+- **口径**：两能力都不建档、不写回信源目录、不显示真假标签/数值分。资料收集不判真假；
+  权威核验只有在决定性权威证据支持/反驳时才允许“权威资料可以证明/直接反驳”，媒体/可靠
+  倾向只能写“倾向……但缺少权威确认，不能据此证明/反驳”，没有决定性证据就明确说“没有找到
+  能证明或反驳的权威资料”。动态权威（目录外官方/标准/事实核查站点）仅在会话内按代码信号
+  核验并需独立佐证，不写回目录；高利害主题以官方原文为准。
+- **授权前提**：需要隐私偏好授权 `public-search`（检索）与 `public-web`（读页）；未授权时
+  明确失败，不伪装成空结果。设置页「隐私与授权」有提示。
+- **配置/接口**：`data/skills_preferences.json`（不入库）；`GET/PUT /api/skills/preferences`
+  （全量校验，非法 400）；预算在 `skills/research/rules.json` 与 `skills/authority/rules.json`，
+  权威类别/动态信号在 `skills/authority/authorities.json`。
+- 测试：`tests.test_research_pipeline` / `test_authority_pipeline` / `test_collect_core` /
+  `test_agent_loop` / `test_skill_tools` / `test_skill_integration` / `test_skills_preferences` /
+  `test_continuation` / `test_skills_api` / `test_skills_ui` / `test_research_ui`。
 
 ## 参谋与洞察（2026-10-31，L4）
 

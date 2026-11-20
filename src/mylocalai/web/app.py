@@ -53,6 +53,7 @@ from mylocalai.util.console_io import force_utf8_stdio  # noqa: E402
 from mylocalai.util.text_safety import has_surrogates, sanitize_text  # noqa: E402
 from mylocalai.web.models_api import router as models_router  # noqa: E402
 from mylocalai.web.privacy_api import router as privacy_router  # noqa: E402
+from mylocalai.web.skills_api import router as skills_router  # noqa: E402
 from mylocalai.web.profiles_api import router as profiles_router  # noqa: E402
 from mylocalai.web.batch_api import router as batch_router  # noqa: E402
 from mylocalai.web.materials_api import router as materials_router  # noqa: E402
@@ -124,6 +125,8 @@ app = FastAPI(
     lifespan=_lifespan,
 )
 app.include_router(privacy_router)
+# 技能工作流偏好（设置面板“技能”页）：与隐私/模型同属本机配置，一并挂载。
+app.include_router(skills_router)
 # 模型管理（设置面板）：与 privacy_router 紧挨——两者都是"用户在本机改自己的配置"，
 # 前缀/异常口径保持一致（404 未知、400 中文 detail、写后 llm_client.reset_cache()）
 app.include_router(models_router)

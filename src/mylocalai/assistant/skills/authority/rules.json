@@ -1,0 +1,25 @@
+{
+  "_comment": "权威核验流水线（verify_authority）的预算与上限。改这里不改代码：collect_core.load_collect_rules 会做类型校验与区间夹取，缺键/坏值逐键回退代码内默认值。max_claims=4 表示一次最多核验 4 条主张；per_claim_max_pages=3 是单条主张最多读几页；dynamic_authority 是动态权威核验的总开关（关掉后目录外候选一律只作线索，不升格为 session_verified）。",
+  "version": 1,
+
+  "max_input_chars": 4000,
+  "max_claims": 4,
+
+  "max_searches": 12,
+  "max_pages": 12,
+  "per_claim_max_queries": 2,
+  "per_claim_max_pages": 3,
+  "max_catalog_sources_per_claim": 3,
+
+  "max_llm_calls": 20,
+  "agent_max_steps": 8,
+
+  "total_deadline_s": 90,
+  "io_timeout_s": 10,
+  "max_page_bytes": 1500000,
+  "max_text_chars": 20000,
+  "max_redirect_hops": 3,
+  "max_quote_chars": 300,
+
+  "dynamic_authority": true
+}

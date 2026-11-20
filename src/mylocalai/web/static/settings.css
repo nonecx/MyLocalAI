@@ -476,3 +476,33 @@
   .settings-model-row-main { grid-template-columns: 1fr 1fr; }
   .settings-tier-row { grid-template-columns: 1fr 1fr auto; }
 }
+
+/* ---------- 技能工作流页（2026-11-21）：只复用现有 :root 令牌 ---------- */
+.settings-skills { display: flex; flex-direction: column; gap: 12px; }
+.settings-skill-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: var(--panel);
+}
+.settings-skill-card h4 { margin: 0 0 6px; font-size: 14px; color: var(--text); }
+.settings-radio-row { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.settings-radio-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+}
+.settings-radio { margin-top: 2px; accent-color: var(--primary); }
+.settings-check-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 6px 0;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+}
+.settings-check-label .settings-checkbox { margin-top: 2px; }

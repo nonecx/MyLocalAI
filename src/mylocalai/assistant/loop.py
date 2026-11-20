@@ -39,8 +39,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from mylocalai.llm import llm_cache
 from mylocalai.assistant import router as router_mod
-from mylocalai.assistant import (tools_chapters, tools_evidence, tools_heat, tools_insights,
-                                 tools_memory, tools_verify)
+from mylocalai.assistant import (tools_authority, tools_chapters, tools_composite,
+                                 tools_evidence, tools_heat, tools_insights, tools_memory,
+                                 tools_research, tools_verify)
 from mylocalai.assistant.context import build_context
 from mylocalai.assistant.events import EventStream
 from mylocalai.assistant.fingerprint import DEFAULT_SHINGLE_SIZE
@@ -72,6 +73,10 @@ _CARD_TYPE = {
     "insights": "insights",
     # 取证三技能流水线（collect_evidence）：evidence 卡，前端 cards.js renderEvidence
     "collect_evidence": "evidence",
+    # 信息收集 / 权威核验 / 复合：三张新卡（cards.js renderResearch/Authority/Composite）
+    "collect_research": "research",
+    "verify_authority": "authority",
+    "collect_and_verify": "composite",
 }
 
 _ARGS_PREVIEW_WIDTH = 60
@@ -539,6 +544,58 @@ def _real_service(name: str, rules: Dict[str, Any],
                                   fetch_fn=_fetch, llm_fn=_llm)
         return _evidence_skills
 
+    if name in ("research_skills", "authority_skills"):
+        def _skill_factory():
+            from mylocalai.assistant.skills.preferences import load_preferences
+            from mylocalai.assistant.skills.transport import default_transport
+            from mylocalai.core.privacy import load_preferences as load_privacy
+            from mylocalai.llm import llm_client
+
+            cfg = (rules or {}).get(
+                "research_model" if name == "research_skills" else "authority_model") or {}
+            prefs = load_preferences()
+
+            def _llm(system, user):
+                return llm_client.chat_json(
+                    system, user, temperature=float(cfg.get("temperature", 0)),
+                    max_tokens=int(cfg.get("max_tokens", 900)),
+                    namespace=str(cfg.get("cache_namespace", "assistant_" + name)))
+
+            def _search(query, k=6):
+                if not load_privacy().external_allowed("public-search"):
+                    return {"results": [], "degraded": True,
+                            "error": "consent_denied: 外部检索未授权"}
+                from mylocalai.retrieval.search import search_all
+                raw = search_all(str(query), k=k)
+                engines = raw.get("engines") or {}
+                error = str(raw.get("error") or "")
+                degraded = (bool(raw.get("blocked")) or bool(error)
+                            or not any((e or {}).get("ok") for e in engines.values()))
+                if degraded and not error:
+                    error = "检索后端均不可用"
+                rows = [r.to_dict() if hasattr(r, "to_dict") else r
+                        for r in (raw.get("results") or [])]
+                return {"results": rows, "degraded": degraded,
+                        "error": error, "engines": engines}
+
+            transport = default_transport()
+
+            def _fetch(url, *, allowed_domains=None, cancel_check=None, deadline=None):
+                if not load_privacy().external_allowed("public-web"):
+                    return {"status": "error", "category": "consent_denied",
+                            "detail": "外部取页未授权", "url": url, "final_url": ""}
+                return transport.fetch(url, allowed_domains=allowed_domains,
+                                       cancel_check=cancel_check, deadline=deadline)
+
+            if name == "research_skills":
+                from mylocalai.assistant.skills.research.pipeline import ResearchSkills
+                return ResearchSkills(search_fn=_search, fetch_fn=_fetch, llm_fn=_llm,
+                                      preferences=prefs)
+            from mylocalai.assistant.skills.authority.pipeline import AuthoritySkills
+            return AuthoritySkills(search_fn=_search, fetch_fn=_fetch, llm_fn=_llm,
+                                   preferences=prefs)
+        return _skill_factory
+
     if name == "route_llm":
         cfg = (rules or {}).get("route_model") or {}
 
@@ -653,6 +710,10 @@ class AssistantLoop:
             # 逐个去已核验信源找可定位引文，不建档、不出真假分（铁律：不扩权）。
             # 路由枚举与 allowlist 同步补 "collect_evidence"。
             tools_evidence.register_all(reg, None)
+            # 信息收集 / 权威核验 / 复合：只读重成本工具（不建档、不出数值分）。
+            tools_research.register_all(reg, None)
+            tools_authority.register_all(reg, None)
+            tools_composite.register_all(reg, None)
             self._registry = reg
         return self._registry
 
@@ -1221,7 +1282,8 @@ class AssistantLoop:
                 ctx = SimpleNamespace(sessions=sessions,
                                       dossiers=_CostDossiers(dossiers, tool_base),
                                       events=events, cancel_check=cancel_check,
-                                      services=services, profile_id=profile_id)
+                                      services=services, profile_id=profile_id,
+                                      session_id=session_id, user_text=user_text)
                 if spec is None:
                     tool_error = f"工具未注册: {step['action']}"
                 else:
@@ -1279,9 +1341,11 @@ class AssistantLoop:
                 result["claim_answer"] = claim_answer
             card = out.get("card")
             if isinstance(card, dict) and card:
+                # 工具可用 out.card_type 覆盖映射：collect_research 自动接力后产 composite 卡。
+                card_type = str(out.get("card_type") or _CARD_TYPE.get(str(step["action"]),
+                                                                      "conclusion"))
                 self._emit_card(events, sessions, session_id,
-                                _CARD_TYPE.get(str(step["action"]), "conclusion"),
-                                card, run_id, role=profile_role,
+                                card_type, card, run_id, role=profile_role,
                                 claim_answer=claim_answer if isinstance(claim_answer, dict) else None)
                 result["card"] = card
             cost["requests"] += int(run_cost.get("requests", 0))

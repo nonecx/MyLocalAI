@@ -111,7 +111,8 @@ class SettingsUiStructureTest(unittest.TestCase):
 
         nav = html.split('id="settingsNav"', 1)[1].split("</nav>", 1)[0]
         tabs = re.findall(r'data-settings-tab="([a-z]+)"', nav)
-        self.assertEqual(tabs, ["models", "privacy"], "左栏导航应为「模型」+「隐私与授权」")
+        self.assertEqual(tabs, ["models", "skills", "privacy"],
+                         "左栏导航应为「模型」+「技能」+「隐私与授权」")
         models_btn = re.search(r'<button[^>]*data-settings-tab="models"[^>]*>', nav)
         self.assertIsNotNone(models_btn)
         self.assertIn("active", models_btn.group(0), "「模型」应默认选中")
@@ -247,7 +248,7 @@ class SettingsApiContractTest(unittest.TestCase):
         expected_keys = {
             "models", "providers", "provider", "providerSecret", "providerActivate",
             "providerDiscover", "providerModels", "providerModel",
-            "providerModelsRestore", "privacyPreferences",
+            "providerModelsRestore", "privacyPreferences", "skillsPreferences",
         }
         self.assertEqual(set(self.api), expected_keys, f"SETTINGS_API 键集合不一致：{sorted(self.api)}")
         self.assertEqual(self.api["models"], "/api/models")
@@ -257,7 +258,7 @@ class SettingsApiContractTest(unittest.TestCase):
         shapes = {_shape(path) for path in self.backend_routes}
         self.assertTrue(shapes, "models_api.py 里解析不到任何路由：装饰器写法可能变了")
         for name, template in self.api.items():
-            if name == "privacyPreferences":
+            if name in ("privacyPreferences", "skillsPreferences"):
                 continue
             self.assertIn(_shape(template), shapes,
                           f"SETTINGS_API.{name} = {template} 不在后端路由表里：{sorted(shapes)}")
@@ -269,6 +270,15 @@ class SettingsApiContractTest(unittest.TestCase):
             self.skipTest("privacy_api.py 不存在，跳过隐私路径断言")
         shapes = {_shape(path) for path in _parse_router_paths(_read(PRIVACY_API), "/api/privacy")}
         self.assertIn(_shape(self.api["privacyPreferences"]), shapes)
+
+    def test_skills_path_exists_in_skills_api(self):
+        """技能页的 /api/skills/preferences 确实由 skills_api.py 提供。"""
+        self.assertIn("skillsPreferences", self.api)
+        skills_api = WEB_DIR / "skills_api.py"
+        if not skills_api.is_file():
+            self.skipTest("skills_api.py 不存在，跳过技能路径断言")
+        shapes = {_shape(path) for path in _parse_router_paths(_read(skills_api), "/api/skills")}
+        self.assertIn(_shape(self.api["skillsPreferences"]), shapes)
 
     def test_http_methods_match_contract_table(self):
         """(HTTP 方法, 路径模板) 与规格 §3.2 表格逐条对应，多一条少一条都算不一致。"""
@@ -283,6 +293,8 @@ class SettingsApiContractTest(unittest.TestCase):
             ("POST", "providerModels"),
             ("DELETE", "providerModel"),
             ("POST", "providerModelsRestore"),
+            ("GET", "skillsPreferences"),
+            ("PUT", "skillsPreferences"),
         }
         found = set(re.findall(
             r'request\(\s*"(GET|POST|PUT|DELETE)"\s*,\s*apiPath\(\s*SETTINGS_API\.(\w+)', self.js))
@@ -296,6 +308,9 @@ class SettingsApiContractTest(unittest.TestCase):
         self.assertIn("models_api", app_source, "app.py 没有引用 web/models_api.py")
         self.assertRegex(app_source, r"include_router\([^)]*models",
                          "app.py 没有把 models 路由 include 进 FastAPI app")
+        self.assertIn("skills_api", app_source, "app.py 没有引用 web/skills_api.py")
+        self.assertRegex(app_source, r"include_router\([^)]*skills",
+                         "app.py 没有把 skills 路由 include 进 FastAPI app")
 
 
 class SettingsApiLiveRoutesTest(unittest.TestCase):
@@ -352,6 +367,8 @@ class SettingsConsumedFieldsTest(unittest.TestCase):
         "display_name", "base_url", "protocol_runtime_supported", "runtime_supported",
         "key_env", "api_key", "api_key_set", "api_key_source", "api_key_masked", "is_active",
         "default_models", "context_window", "active_tier", "api_value", "owned_by",
+        # 技能页（2026-11-21）：/api/skills/preferences 的字段
+        "workflow_mode", "auto_verify_findings",
     }
 
     @classmethod

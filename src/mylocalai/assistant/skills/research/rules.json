@@ -1,0 +1,20 @@
+{
+  "_comment": "资料收集技能额度（契约 §6.1）。改这里不改代码：键名锁定，数值由 load_research_rules 逐键回退并夹到安全区间；坏值只让“这次查得少一点”，不会让运行崩掉。",
+  "max_input_chars": 500,
+  "max_sub_questions": 4,
+  "max_searches": 10,
+  "max_pages": 10,
+  "max_pages_per_domain": 2,
+  "max_llm_calls": 16,
+  "max_followup_rounds": 1,
+  "total_deadline_s": 90,
+  "io_timeout_s": 10,
+  "max_page_bytes": 1500000,
+  "max_text_chars": 20000,
+  "max_redirect_hops": 3,
+  "max_quote_chars": 300,
+  "max_candidates": 12,
+  "max_findings": 6,
+  "max_leads": 8,
+  "agent_max_steps": 8
+}

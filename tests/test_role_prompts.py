@@ -35,7 +35,7 @@ from mylocalai.dossier.store import DossierStore  # noqa: E402
 PROMPTS_PATH = ROOT / "src" / "mylocalai" / "assistant" / "prompts.json"
 CAPS_DIR = ROOT / "src" / "mylocalai" / "assistant" / "capabilities"
 
-#: 六个用户能力（目录名 ↔ 能力 id 的连字符形式）
+#: 八个用户能力（目录名 ↔ 能力 id 的连字符形式）
 EXPECTED_CAPS = {
     "claim_checking": "claim-checking",
     "evidence_research": "evidence-research",
@@ -43,6 +43,8 @@ EXPECTED_CAPS = {
     "speech_understanding": "speech-understanding",
     "material_analysis": "material-analysis",
     "domain_monitoring": "domain-monitoring",
+    "information_collection": "information-collection",
+    "authority_verification": "authority-verification",
 }
 
 #: SKILL.md 头注释必备字段与正文必备章节
@@ -245,8 +247,8 @@ class TestLoopRolePrompts(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestCapabilitySkillDocs(unittest.TestCase):
-    def test_six_capability_docs_exist_with_header_and_sections(self):
-        """六个能力目录各有一份 SKILL.md：头字段齐全、必备章节齐全。"""
+    def test_eight_capability_docs_exist_with_header_and_sections(self):
+        """八个能力目录各有一份 SKILL.md：头字段齐全、必备章节齐全。"""
         dirs = {p.name for p in CAPS_DIR.iterdir()
                 if p.is_dir() and p.name != "__pycache__"}
         self.assertEqual(dirs, set(EXPECTED_CAPS), f"能力目录集合漂移: {dirs}")

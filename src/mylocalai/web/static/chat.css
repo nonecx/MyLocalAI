@@ -1348,3 +1348,259 @@
 @media (max-width: 900px) {
   .chat-monitor-list { max-height: 240px; }
 }
+
+/* ============================================================
+   资料收集 / 权威核验 / 复合卡
+   （cards.js 的 renderResearch / renderAuthority / renderComposite 三类正文）
+   口径与全站一致：只复用 style.css :root 的设计令牌，不另起配色；
+   长文本一律 overflow-wrap/word-break，窄屏不撑破卡片。
+   ============================================================ */
+.chat-card-research,
+.chat-card-authority,
+.chat-card-composite { font-size: 12.5px; line-height: 1.8; }
+
+/* 复合卡的两段子卡：只用左侧细线做层级，不再画第二层边框（避免"卡中卡"） */
+.chat-card-sub {
+  margin-top: 12px;
+  padding-left: 10px;
+  border-left: 2px solid var(--primary-border);
+  min-width: 0;
+}
+
+.chat-card-sub-research,
+.chat-card-sub-authority { word-break: break-word; }
+
+.chat-card-subtitle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--primary-dark);
+  margin-bottom: 4px;
+}
+
+.chat-card-submeta { font-size: 11.5px; font-weight: 400; color: var(--warn); }
+
+/* 信源分块标题：已核验信源 / 未核验来源两块各自成节（不并排、不混排） */
+.chat-src-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  margin: 10px 0 4px;
+}
+
+/* 逐字引文：复用 .chat-ev-quote 的左侧强调线，这里只补换行与字体口径
+   （引文来自外部正文，不改写、不截断，长串必须能折行不溢出） */
+.chat-quote-verbatim {
+  font-style: normal;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* 运行审计 / 执行信息一行 */
+.chat-run-audit,
+.chat-run-exec { font-size: 11.5px; margin: 8px 0 0; }
+
+/* 自动接力被跳过的原因 */
+.chat-research-handoff {
+  font-size: 11.5px;
+  margin: 8px 0 0;
+  border-left: 2px solid var(--warn);
+  padding-left: 8px;
+  overflow-wrap: anywhere;
+}
+
+/* 资料收集：研究范围 */
+.chat-research-scope {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: var(--primary-soft);
+  border-radius: 8px;
+}
+
+.chat-research-basis { font-size: 11.5px; margin-top: 4px; overflow-wrap: anywhere; }
+
+/* 各小节标题（子问题 / 关键发现 / 待核线索 / 证据 / 时间线 / 冲突 / 追问） */
+.chat-research-sq-title,
+.chat-research-find-title,
+.chat-research-lead-title,
+.chat-research-ev-title,
+.chat-research-tl-title,
+.chat-research-conflict-title,
+.chat-research-followup-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  margin: 10px 0 4px;
+}
+
+/* 子问题清单 */
+.chat-research-sqs,
+.chat-research-leads,
+.chat-research-conflicts,
+.chat-research-followups {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.chat-research-sq {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  padding-bottom: 5px;
+  border-bottom: 1px dashed var(--border);
+}
+
+.chat-research-sq:last-child { border-bottom: none; }
+.chat-research-sq-text { font-weight: 600; overflow-wrap: anywhere; }
+
+/* 关键发现：编号列表 + 逐字引文 */
+.chat-research-findings {
+  margin: 0 0 0 18px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.chat-research-finding { overflow-wrap: anywhere; }
+.chat-research-finding-text { display: block; font-weight: 600; }
+
+/* 待核线索（没有逐字引文支撑的内容只能停在这一层） */
+.chat-research-lead {
+  padding-bottom: 5px;
+  border-bottom: 1px dashed var(--border);
+  overflow-wrap: anywhere;
+}
+
+.chat-research-lead:last-child { border-bottom: none; }
+.chat-research-lead-text { font-weight: 600; }
+.chat-research-lead-reason { font-size: 11.5px; margin-top: 2px; }
+
+/* 证据本 */
+.chat-research-evidence { margin-top: 4px; }
+.chat-research-ev { overflow-wrap: anywhere; }
+
+/* 时间线：日期列固定宽度，事件列可折行 */
+.chat-research-timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.chat-research-timeline li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px dashed var(--border);
+}
+
+.chat-research-timeline li:last-child { border-bottom: none; }
+.chat-research-tl-date {
+  flex: 0 0 auto;
+  font-size: 11.5px;
+  color: var(--primary-dark);
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-research-tl-event { flex: 1 1 180px; min-width: 0; overflow-wrap: anywhere; }
+
+/* 冲突块 */
+.chat-research-conflicts li { overflow-wrap: anywhere; }
+
+/* 分析块（研究卡与权威卡共用；label 固定为"基于资料的整理/推断"一类口径） */
+.chat-analysis {
+  margin-top: 10px;
+  padding: 8px 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--primary);
+  border-radius: 8px;
+}
+
+.chat-analysis-label {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--primary-dark);
+  margin-bottom: 3px;
+}
+
+.chat-analysis-text { margin: 0; overflow-wrap: anywhere; }
+
+.chat-analysis-list {
+  margin: 4px 0 0 16px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-wrap: anywhere;
+}
+
+/* 权威核验：逐主张分组 */
+.chat-auth-claim {
+  margin: 10px 0 0;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+  overflow-wrap: anywhere;
+}
+
+.chat-auth-claim:first-child { border-top: none; padding-top: 0; }
+
+.chat-auth-claim-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
+.chat-auth-claim-head > b { color: var(--primary-dark); }
+.chat-auth-claim-text { font-weight: 600; min-width: 0; }
+
+/* 结论句由后端模板逐字生成：单独成行，不与徽章混排 */
+.chat-auth-conclusion {
+  margin: 6px 0 0;
+  padding: 6px 10px;
+  background: var(--primary-soft);
+  border-radius: 8px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.chat-auth-basis { font-size: 11.5px; margin-top: 4px; color: var(--muted); overflow-wrap: anywhere; }
+.chat-auth-ev { overflow-wrap: anywhere; }
+
+.chat-auth-orphan-title,
+.chat-auth-limits-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  margin: 10px 0 4px;
+}
+
+/* 复合卡：一句话摘要（后端总结两段结果，前端逐字展示） */
+.chat-composite-summary {
+  margin: 6px 0 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- 窄屏补充：三类新卡不横向溢出 ---------- */
+@media (max-width: 900px) {
+  .chat-card-sub { padding-left: 8px; }
+  .chat-research-sq,
+  .chat-research-timeline li,
+  .chat-auth-claim-head {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
+  }
+  .chat-research-findings { margin-left: 16px; }
+  .chat-analysis-list { margin-left: 14px; }
+}

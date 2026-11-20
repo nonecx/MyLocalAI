@@ -389,16 +389,18 @@ class TestChatFrontendConsistency(unittest.TestCase):
         self.assertEqual(missing, [], f"chat.css 缺少定义：{missing}")
 
     def test_cards_renderers_and_honesty_markers(self):
-        """cards.js 四个渲染器齐全（含单页化的 renderInsights），as_of / 降级 / 代理 / verdict_basis 口径都在。"""
+        """渲染器齐全（含单页化 insights 与 T6 三张新卡），as_of / 降级 / 代理 / verdict_basis 口径都在。"""
         for fn in ("renderConclusion", "renderSpeech", "renderHeat", "renderInsights",
+                   "renderEvidence", "renderResearch", "renderAuthority", "renderComposite",
                    "renderCard"):
             self.assertIn(f"function {fn}", self.cards_js, f"cards.js 缺少 {fn}")
         self.assertIn("window.ChatCards", self.cards_js)
         for marker in ("as_of", "降级", "代理", "verdict_basis", "置信度",
                        "evidence_sufficiency", "recheck_conditions"):
             self.assertIn(marker, self.cards_js, f"cards.js 缺少口径元素：{marker}")
-        # 三个渲染器都会输出 as_of 行（口径诚实：数字旁必须展示 as_of）
-        self.assertGreaterEqual(self.cards_js.count("asOfLine("), 4)
+        # 每张卡都会输出 as_of 行（口径诚实：数字旁必须展示 as_of）；
+        # 7 张既有卡 + 3 张新卡（research/authority/composite）+ asOfLine 定义 = 11
+        self.assertGreaterEqual(self.cards_js.count("asOfLine("), 11)
 
     def test_claim_answer_renderer_contract(self):
         """新答案先于 legacy score card；未验证时不展示旧风险数值。"""

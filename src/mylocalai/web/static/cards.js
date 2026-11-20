@@ -779,6 +779,529 @@
       </div>`;
   }
 
+  /* ============================================================
+     8~10. 信息收集 / 权威核验 / 复合卡（契约 .tmp/info-skills-contract.md §5.1/§6.2）
+     三张卡的共同口径：
+       - 只述证据，不替用户下结论；不展示任何数值评分/置信度；
+       - 引文逐字（只做 HTML 转义，不截断、不改写）；
+       - 未核验来源与已核验信源分块，前者只作线索；
+       - 六种执行状态如实映射中文（取消/预算用尽必须带"保留已取得资料"）；
+       - 空结果是合法输出：没有的块整块不显示，不硬凑"0 条"。
+     ============================================================ */
+
+  /* §2 统一运行外壳六态：与证据研究卡共用同一份中文映射（同一状态只能有一种说法）。 */
+  const RUN_STATUS = EVIDENCE_STATUS;
+
+  /* 统一状态徽章：status / task_status / 增量补查基线（缺省字段不显示）。 */
+  function runBadges(c) {
+    c = c || {};
+    const statusText = RUN_STATUS[String(c.status || "")] || String(c.status || "未知");
+    /* task_status 只在"没主张/待补充"这类需要用户知道的结论上单独成徽章；
+       completed 与 status 的"已完成"重复，不重复展示。 */
+    const taskKey = String(c.task_status || "");
+    const taskText = (taskKey === "no_factual_claim" || taskKey === "needs_clarification")
+      ? (EVIDENCE_TASK[taskKey] || "") : "";
+    const incremental = c.incremental
+      ? `<span class="badge amber">增量补查 · 基线 ${escapeHtml(String(c.base_as_of || "未知"))}</span>`
+      : "";
+    return `<span class="badge gray">${escapeHtml(statusText)}</span>`
+      + (taskText ? `<span class="badge gray">${escapeHtml(taskText)}</span>` : "")
+      + incremental;
+  }
+
+  /* 引文逐字展示：只转义，不截断/改写（后端保证 quote 锚定已读正文）。 */
+  function verbatimQuote(quote) {
+    const text = String(quote || "");
+    if (!text) return "";
+    return `<blockquote class="chat-ev-quote chat-quote-verbatim">${escapeHtml(text)}</blockquote>`;
+  }
+
+  /* id 串（证据 id / 子问题 id）：机器串，逐字转义后顿号连排。 */
+  function idLine(ids, label) {
+    const list = Array.isArray(ids) ? ids.filter((x) => String(x || "").trim()) : [];
+    if (!list.length) return "";
+    return `<div class="chat-ev-url">${escapeHtml(label)}：${list.map((x) => escapeHtml(String(x))).join("、")}</div>`;
+  }
+
+  /* 时间戳一行：发布/读取分开写，缺哪个就少哪个。 */
+  function timeLine(published, fetched) {
+    const bits = [];
+    if (published) bits.push(`发布 ${escapeHtml(String(published))}`);
+    if (fetched) bits.push(`读取 ${escapeHtml(String(fetched))}`);
+    return bits.length ? `<div class="chat-ev-url">${bits.join(" · ")}</div>` : "";
+  }
+
+  /* 信源一行元信息：名称 / 域名 / 核验方式（都不存在就整行不显示）。 */
+  function sourceMetaLine(name, domain, verify) {
+    const bits = [];
+    if (name) bits.push(escapeHtml(String(name)));
+    if (domain) bits.push(escapeHtml(String(domain)));
+    if (verify) bits.push(escapeHtml(String(verify)));
+    return bits.length ? `<div class="chat-ev-url">${bits.join(" · ")}</div>` : "";
+  }
+
+  /* 核验方式（SourcePolicy.verification 的封闭枚举，§4）。 */
+  const AUTHORITY_VERIFY = {
+    registry_anchor: "目录锚点",
+    verified_site_link: "已核验站点链接",
+    session_verified: "会话内动态核验",
+    unverified: "未核验",
+  };
+
+  /* 权威类别（authority/authorities.json 的 authority_class 封闭枚举，§8）。 */
+  const AUTHORITY_CLASS = {
+    official: "官方权威",
+    international_org: "国际组织",
+    academic: "学术机构",
+    standards: "标准机构",
+    factcheck: "事实核查",
+    media: "媒体",
+    unverified: "未核验来源",
+  };
+
+  function sourceList(list) {
+    if (!Array.isArray(list) || !list.length) return "";
+    return `<ul class="chat-ev-list">${list.map((s) => {
+      s = s || {};
+      const tier = s.tier ? `<span class="chat-ev-stance">${escapeHtml(String(s.tier))}</span>` : "";
+      const verify = AUTHORITY_VERIFY[String(s.verification || "")] || "";
+      return `<li>${tier}${escapeHtml(String(s.name || s.domain || "（未命名信源）"))}`
+        + sourceMetaLine("", s.domain, verify) + "</li>";
+    }).join("")}</ul>`;
+  }
+
+  /* 信源两级：已核验 / 未核验候选永远分块呈现（来源不自我认证）。 */
+  function sourceGroups(sources) {
+    const box = (sources && typeof sources === "object") ? sources : {};
+    const verified = Array.isArray(box.verified) ? box.verified : [];
+    const unverified = Array.isArray(box.unverified) ? box.unverified : [];
+    if (!verified.length && !unverified.length) return "";
+    let html = "";
+    if (verified.length) {
+      html += `<div class="chat-src-title">已核验信源（${verified.length}）</div>${sourceList(verified)}`;
+    }
+    if (unverified.length) {
+      html += `<div class="chat-src-title">未核验来源（${unverified.length}）</div>`
+        + '<p class="chat-insight-note muted">未核验来源只作线索，不进入关键发现与权威判断。</p>'
+        + sourceList(unverified);
+    }
+    return html;
+  }
+
+  /* 缺口 / 错误折叠：没有就整块不显示（空结果是合法输出）。 */
+  function issuesFold(gaps, errors) {
+    const gl = Array.isArray(gaps) ? gaps : [];
+    const el = Array.isArray(errors) ? errors : [];
+    if (!gl.length && !el.length) return "";
+    return `
+        <details class="chat-evidence-fold">
+          <summary>缺口 ${gl.length} 条 · 错误 ${el.length} 条</summary>
+          ${gl.length ? `<ul class="chat-ev-list">${gl.map((g) => `<li>${escapeHtml(String(g))}</li>`).join("")}</ul>` : ""}
+          ${el.length ? `<ul class="chat-ev-list">${el.map((e) => {
+            e = e || {};
+            return `<li>${escapeHtml(String(e.stage || ""))} · ${escapeHtml(String(e.category || ""))}：${escapeHtml(String(e.detail || ""))}</li>`;
+          }).join("")}</ul>` : ""}
+        </details>`;
+  }
+
+  /* 运行审计：只写"跑了多少次"，不是评价分；三个键都没有就整行不显示。
+     研究卡 / 权威卡 / 复合卡共用（计数键同属 §2 audit 口径）。 */
+  function auditLine(counts) {
+    const box = (counts && typeof counts === "object") ? counts : {};
+    const bits = [];
+    if (box.searches !== undefined) bits.push(`搜索 ${Number(box.searches) || 0} 次`);
+    if (box.pages !== undefined) bits.push(`读页 ${Number(box.pages) || 0} 次`);
+    if (box.llm_calls !== undefined) bits.push(`模型调用 ${Number(box.llm_calls) || 0} 次`);
+    return bits.length
+      ? `<p class="chat-insight-note muted chat-run-audit">已执行 ${bits.join(" · ")}。</p>` : "";
+  }
+
+  /* 执行模式 / 步数 / 停止原因：后端 execution 三件套，缺省不显示。 */
+  function executionLine(exec) {
+    const e = (exec && typeof exec === "object") ? exec : null;
+    if (!e) return "";
+    const bits = [];
+    if (e.mode) {
+      const mode = String(e.mode) === "agent"
+        ? "受限 Agent 循环"
+        : `固定流水线（${escapeHtml(String(e.mode))}）`;
+      bits.push(`执行模式：${mode}`);
+    }
+    if (Number(e.steps)) bits.push(`步数：${Number(e.steps)}`);
+    if (e.stop_reason) bits.push(`停止原因：${escapeHtml(String(e.stop_reason))}`);
+    if (!bits.length) return "";
+    return `<p class="chat-insight-note muted chat-run-exec">${bits.join(" · ")}</p>`;
+  }
+
+  /* 冲突块：研究卡与权威卡共用（summary 逐字转义，证据 id 另起一行）。 */
+  function conflictsBlock(conflicts) {
+    if (!Array.isArray(conflicts) || !conflicts.length) return "";
+    return `
+        <div class="chat-research-conflict-title">证据冲突（${conflicts.length}）</div>
+        <ul class="chat-research-conflicts">${conflicts.map((x) => {
+          x = x || {};
+          return `<li><span>${escapeHtml(String(x.summary || ""))}</span>`
+            + idLine(x.evidence_ids, "涉及证据") + "</li>";
+        }).join("")}</ul>`;
+  }
+
+  /* ---------- 8. 资料收集卡（collect_research：信息收集技能） ----------
+     由后端 collect_research 工具产出：card = {card_type:"research", status,
+     task_status, as_of, degraded, topic, scope, sub_questions, key_findings,
+     leads, evidence, sources{verified,unverified}, timeline, conflicts, analysis,
+     gaps, errors, counts, execution, incremental, base_as_of, handoff_skipped}
+     （形状见契约 §5.1）。关键发现必须带逐字 source_quote；没有引文的内容只能进
+     leads（待核线索）——前端照后端给的层级展示，不把线索升格成发现。 */
+  const SQ_STATUS = {
+    covered: { text: "已覆盖", cls: "green" },
+    partial: { text: "部分覆盖", cls: "amber" },
+    uncovered: { text: "未覆盖", cls: "gray" },
+  };
+  const ROLE_TEXT = { fact: "事实", context: "背景", conflict: "冲突" };
+
+  /* 分析块：label 由后端固定（"基于资料的整理/推断"），前端不自行改写。 */
+  function analysisBlock(analysis) {
+    if (!analysis || typeof analysis !== "object") return "";
+    const text = String(analysis.text || "").trim();
+    if (!text) return "";
+    return `
+        <div class="chat-analysis">
+          <div class="chat-analysis-label">${escapeHtml(String(analysis.label || "基于资料的整理/推断"))}</div>
+          <p class="chat-analysis-text">${escapeHtml(text)}</p>
+          ${idLine(analysis.evidence_ids, "引用证据")}
+        </div>`;
+  }
+
+  /* 资料收集卡正文（复合卡的 research 子卡复用同一份渲染，避免嵌套重复标题）。 */
+  function researchBody(c) {
+    c = c || {};
+    const scope = (c.scope && typeof c.scope === "object") ? c.scope : {};
+    const subQuestions = Array.isArray(c.sub_questions) ? c.sub_questions : [];
+    const findings = Array.isArray(c.key_findings) ? c.key_findings : [];
+    const leads = Array.isArray(c.leads) ? c.leads : [];
+    const evidence = Array.isArray(c.evidence) ? c.evidence : [];
+    const timeline = Array.isArray(c.timeline) ? c.timeline : [];
+    const followups = Array.isArray(c.followups) ? c.followups : [];
+
+    /* 范围：题目/时间窗/地域分开写；没有就不显示该行，不替用户猜范围。 */
+    const scopeRows = [];
+    if (scope.question) {
+      scopeRows.push(`<div class="dim-row"><span class="k">研究问题</span><span class="v">${escapeHtml(String(scope.question))}</span></div>`);
+    }
+    if (scope.time_window) {
+      scopeRows.push(`<div class="dim-row"><span class="k">时间范围</span><span class="v">${escapeHtml(String(scope.time_window))}</span></div>`);
+    }
+    if (scope.region) {
+      scopeRows.push(`<div class="dim-row"><span class="k">地域</span><span class="v">${escapeHtml(String(scope.region))}</span></div>`);
+    }
+    const basis = Array.isArray(scope.basis) ? scope.basis : [];
+    if (basis.length) {
+      scopeRows.push(`<div class="chat-research-basis muted">范围依据：${basis.map((b) => escapeHtml(String(b))).join(" · ")}</div>`);
+    }
+    const scopeHtml = scopeRows.length ? `<div class="chat-research-scope">${scopeRows.join("")}</div>` : "";
+
+    /* 子问题：covered/partial/uncovered 封闭枚举；未知状态原样转义展示。 */
+    const sqHtml = subQuestions.length ? `
+        <div class="chat-research-sq-title">子问题（${subQuestions.length}）</div>
+        <ul class="chat-research-sqs">${subQuestions.map((q) => {
+          q = q || {};
+          const meta = SQ_STATUS[String(q.status || "")];
+          const statusText = meta ? meta.text : String(q.status || "未标注");
+          const statusCls = meta ? meta.cls : "gray";
+          const evCount = (q.evidence_count === undefined || q.evidence_count === null)
+            ? "" : `<span class="chat-ev-url">证据 ${Number(q.evidence_count) || 0} 条</span>`;
+          return `<li class="chat-research-sq">
+            <span class="chat-ev-stance">${escapeHtml(String(q.sq_id || ""))}</span>
+            <span class="chat-research-sq-text">${escapeHtml(String(q.text || ""))}</span>
+            <span class="badge ${statusCls}">${escapeHtml(statusText)}</span>${evCount}
+          </li>`;
+        }).join("")}</ul>` : "";
+
+    /* 关键发现：statement + 逐字 source_quote + evidence_ids；checkable=false 明说。 */
+    const findingHtml = findings.length ? `
+        <div class="chat-research-find-title">关键发现（${findings.length}）</div>
+        <ol class="chat-research-findings">${findings.map((f) => {
+          f = f || {};
+          const meta = [];
+          if (f.finding_id) meta.push(`<span class="chat-ev-stance">${escapeHtml(String(f.finding_id))}</span>`);
+          if (f.support_level) meta.push(`<span class="chat-ev-stance">${escapeHtml(String(f.support_level))}</span>`);
+          if (f.checkable === false) meta.push('<span class="chat-ev-stance">不可核查</span>');
+          return `<li class="chat-research-finding">
+            ${meta.join("")}<span class="chat-research-finding-text">${escapeHtml(String(f.statement || ""))}</span>
+            ${idLine(f.sq_ids, "对应子问题")}
+            ${idLine(f.evidence_ids, "依据证据")}
+            ${verbatimQuote(f.source_quote)}
+          </li>`;
+        }).join("")}</ol>` : "";
+
+    /* 待核线索：没有逐字引文支撑的内容只能在这里（不得进关键发现）。 */
+    const leadHtml = leads.length ? `
+        <div class="chat-research-lead-title">待核线索（${leads.length}）</div>
+        <ul class="chat-research-leads">${leads.map((l) => {
+          l = l || {};
+          return `<li class="chat-research-lead">
+            <span class="chat-ev-stance">${escapeHtml(String(l.lead_id || ""))}</span>
+            <span class="chat-research-lead-text">${escapeHtml(String(l.statement || ""))}</span>
+            ${l.reason ? `<div class="chat-research-lead-reason muted">${escapeHtml(String(l.reason))}</div>` : ""}
+            ${idLine(l.evidence_ids, "关联证据")}
+          </li>`;
+        }).join("")}</ul>` : "";
+
+    /* 证据本：外部内容（title/url/quote），url 只放行 http(s)，引文逐字。 */
+    const evidenceHtml = evidence.length ? `
+        <div class="chat-research-ev-title">证据（${evidence.length}）</div>
+        <ul class="chat-ev-list chat-research-evidence">${evidence.map((ev) => {
+          ev = ev || {};
+          const role = ROLE_TEXT[String(ev.role || "")] || "";
+          const url = safeUrl(ev.url);
+          const title = escapeHtml(String(ev.title || ev.url || "（无标题）"));
+          const link = url
+            ? `<a href="${url}" target="_blank" rel="noopener nofollow">${title}</a>`
+            : title;
+          const meta = [];
+          if (ev.evidence_id) meta.push(`<span class="chat-ev-stance">${escapeHtml(String(ev.evidence_id))}</span>`);
+          if (role) meta.push(`<span class="chat-ev-stance">${escapeHtml(role)}</span>`);
+          if (ev.tier) meta.push(`<span class="chat-ev-stance">${escapeHtml(String(ev.tier))}</span>`);
+          const verify = AUTHORITY_VERIFY[String(ev.verification || "")] || "";
+          const limits = Array.isArray(ev.limitations) ? ev.limitations : [];
+          const limitsHtml = limits.length
+            ? `<ul class="chat-ev-list">${limits.map((x) => `<li>${escapeHtml(String(x))}</li>`).join("")}</ul>`
+            : "";
+          return `<li class="chat-research-ev">${meta.join("")}${link}`
+            + sourceMetaLine(ev.name, ev.domain, verify)
+            + verbatimQuote(ev.quote)
+            + timeLine(ev.published_at, ev.fetched_at)
+            + limitsHtml + "</li>";
+        }).join("")}</ul>` : "";
+
+    const timelineHtml = timeline.length ? `
+        <div class="chat-research-tl-title">时间线（${timeline.length}）</div>
+        <ul class="chat-research-timeline">${timeline.map((t) => {
+          t = t || {};
+          return `<li><span class="chat-research-tl-date">${escapeHtml(String(t.date || "—"))}</span>
+            <span class="chat-research-tl-event">${escapeHtml(String(t.event || ""))}</span>
+            ${idLine(t.evidence_ids, "证据")}</li>`;
+        }).join("")}</ul>` : "";
+
+    const followupHtml = followups.length ? `
+        <div class="chat-research-followup-title">可以继续追问</div>
+        <ul class="chat-research-followups">${followups.map((x) => `<li>${escapeHtml(String(x))}</li>`).join("")}</ul>` : "";
+
+    /* 自动接力被跳过时如实说明原因（不是静默省略）。 */
+    const handoffHtml = c.handoff_skipped
+      ? `<p class="chat-research-handoff muted">未自动核验：${escapeHtml(String(c.handoff_skipped))}</p>` : "";
+
+    return scopeHtml + sqHtml + findingHtml + leadHtml + evidenceHtml + timelineHtml
+      + conflictsBlock(c.conflicts) + analysisBlock(c.analysis) + followupHtml
+      + sourceGroups(c.sources) + issuesFold(c.gaps, c.errors) + auditLine(c.counts)
+      + executionLine(c.execution) + handoffHtml;
+  }
+
+  function renderResearch(c) {
+    c = c || {};
+    return `
+      <div class="chat-card chat-card-research">
+        <div class="chat-card-title">📚 资料收集<span class="badge gray">只述证据 · 不判结论</span>${degradedBadge(c)}</div>
+        <div class="chat-card-label">${escapeHtml(String(c.topic || "（未命名主题）"))}</div>
+        <div class="chat-badges">${runBadges(c)}</div>
+        ${researchBody(c)}
+        ${asOfLine(c.as_of)}
+      </div>`;
+  }
+
+  /* ---------- 9. 权威核验卡（verify_authority：权威核验技能） ----------
+     由后端 verify_authority 工具产出：card = {card_type:"authority", status,
+     task_status, as_of, degraded, claims, evidence, sources{verified,unverified},
+     conflicts, analysis, limitations, gaps, errors, counts, execution, incremental,
+     base_as_of}（形状见契约 §6.2）。
+     口径：balance 由代码计算，前端只用封闭枚举中文徽章；lean 单独标"证据倾向"
+     （全部可靠证据的倾向，不等于权威判断）；conclusion 由后端模板逐字给出；
+     引文逐字；不显示任何数值评分；未核验来源与已核验信源分开。 */
+  const BALANCE_META = {
+    supported: { text: "权威证据支持", cls: "green" },
+    refuted: { text: "权威证据反驳", cls: "red" },
+    contested: { text: "权威证据冲突", cls: "amber" },
+    insufficient: { text: "权威证据不足", cls: "gray" },
+    not_checkable: { text: "不可核查", cls: "gray" },
+  };
+  const LEAN_TEXT = { supports: "倾向支持", refutes: "倾向反驳", mixed: "混杂", none: "无" };
+  const ORIGIN_TEXT = {
+    user: "用户提出",
+    auto_from_research: "研究卡自动接力",
+    user_link: "用户提供链接",
+  };
+
+  /* balance 徽章只认封闭枚举；后端 balance_label 落在枚举里才采信，其余一律"未标注"。 */
+  function balanceBadge(cl) {
+    cl = cl || {};
+    const meta = BALANCE_META[String(cl.balance || "")];
+    if (meta) return `<span class="badge ${meta.cls}">${meta.text}</span>`;
+    const label = String(cl.balance_label || "");
+    const key = Object.keys(BALANCE_META).filter((k) => BALANCE_META[k].text === label)[0];
+    if (key) return `<span class="badge ${BALANCE_META[key].cls}">${BALANCE_META[key].text}</span>`;
+    return '<span class="badge gray">未标注</span>';
+  }
+
+  /* 证据倾向：与 balance 分开展示（倾向 ≠ 权威判断）。不可核查时明说"不适用"。 */
+  function leanBadge(cl) {
+    cl = cl || {};
+    const notCheckable = String(cl.balance || "") === "not_checkable"
+      || String(cl.claim_status || "") === "not_checkable";
+    const text = notCheckable ? "不适用" : (LEAN_TEXT[String(cl.lean || "")] || "未标注");
+    return `<span class="badge gray">证据倾向：${escapeHtml(text)}</span>`;
+  }
+
+  /* 单条权威证据：relation / authority_class / verification 三枚封闭枚举徽章 + 逐字引文。 */
+  function renderAuthorityEvidence(ev) {
+    ev = ev || {};
+    const rel = RELATION_META[String(ev.relation || "")] || { cls: "gray", text: "关系不明" };
+    const cls = AUTHORITY_CLASS[String(ev.authority_class || "")] || "";
+    const verify = AUTHORITY_VERIFY[String(ev.verification || "")] || "";
+    const url = safeUrl(ev.url);
+    const title = escapeHtml(String(ev.title || ev.url || "（无标题）"));
+    const link = url
+      ? `<a href="${url}" target="_blank" rel="noopener nofollow">${title}</a>`
+      : title;
+    const meta = [];
+    if (ev.evidence_id) meta.push(`<span class="chat-ev-stance">${escapeHtml(String(ev.evidence_id))}</span>`);
+    meta.push(`<span class="badge ${rel.cls}">${rel.text}</span>`);
+    if (cls) meta.push(`<span class="chat-ev-stance">${escapeHtml(cls)}</span>`);
+    if (verify) meta.push(`<span class="chat-ev-stance">${escapeHtml(verify)}</span>`);
+    const basis = Array.isArray(ev.authority_basis) ? ev.authority_basis : [];
+    const limits = Array.isArray(ev.limitations) ? ev.limitations : [];
+    return `<li class="chat-auth-ev">${meta.join("")}${link}`
+      + sourceMetaLine(ev.name, ev.domain, "")
+      + verbatimQuote(ev.quote)
+      + timeLine(ev.published_at, ev.fetched_at)
+      + (basis.length ? `<div class="chat-auth-basis">权威依据：${basis.map((b) => escapeHtml(String(b))).join(" · ")}</div>` : "")
+      + (limits.length ? `<ul class="chat-ev-list">${limits.map((x) => `<li>${escapeHtml(String(x))}</li>`).join("")}</ul>` : "")
+      + "</li>";
+  }
+
+  /* 权威核验卡正文（复合卡的 authority 子卡复用同一份渲染）。 */
+  function authorityBody(c) {
+    c = c || {};
+    const claims = Array.isArray(c.claims) ? c.claims : [];
+    const evidence = Array.isArray(c.evidence) ? c.evidence : [];
+    const analysis = Array.isArray(c.analysis) ? c.analysis : [];
+    const limitations = Array.isArray(c.limitations) ? c.limitations : [];
+
+    /* 主张 → 证据分组：证据按 claim_ids 归组；挂不上的单独列，不静默丢弃。 */
+    const matched = {};
+    const claimItems = claims.map((cl) => {
+      cl = cl || {};
+      matched[cl.claim_id] = true;
+      const rows = evidence.filter((ev) => Array.isArray((ev || {}).claim_ids)
+        && ev.claim_ids.indexOf(cl.claim_id) >= 0);
+      const origin = ORIGIN_TEXT[String(cl.origin || "")] || "";
+      const basis = Array.isArray(cl.authority_basis) ? cl.authority_basis : [];
+      const claimLimits = Array.isArray(cl.limitations) ? cl.limitations : [];
+      const evHtml = rows.length
+        ? `<ul class="chat-ev-list">${rows.map(renderAuthorityEvidence).join("")}</ul>`
+        : '<p class="chat-insight-sub muted">该主张尚未找到可定位证据。</p>';
+      return `<li class="chat-auth-claim">
+        <div class="chat-auth-claim-head"><b>${escapeHtml(String(cl.claim_id || ""))}</b><span class="chat-auth-claim-text">${escapeHtml(String(cl.text || ""))}</span></div>
+        <div class="chat-badges">${balanceBadge(cl)}${leanBadge(cl)}${origin ? `<span class="badge gray">${escapeHtml(origin)}</span>` : ""}</div>
+        ${cl.conclusion ? `<p class="chat-auth-conclusion">${escapeHtml(String(cl.conclusion))}</p>` : ""}
+        ${idLine(cl.supporting_ids, "支持证据")}
+        ${idLine(cl.refuting_ids, "反驳证据")}
+        ${idLine(cl.context_ids, "背景证据")}
+        ${basis.length ? `<div class="chat-auth-basis">权威依据：${basis.map((b) => escapeHtml(String(b))).join(" · ")}</div>` : ""}
+        ${claimLimits.length ? `<ul class="chat-ev-list">${claimLimits.map((x) => `<li>${escapeHtml(String(x))}</li>`).join("")}</ul>` : ""}
+        ${evHtml}
+      </li>`;
+    }).join("");
+
+    const orphans = evidence.filter((ev) => !Array.isArray((ev || {}).claim_ids)
+      || !ev.claim_ids.some((id) => matched[id]));
+    const orphanHtml = orphans.length
+      ? `<div class="chat-auth-orphan-title">未关联主张的证据</div>`
+        + `<ul class="chat-ev-list">${orphans.map(renderAuthorityEvidence).join("")}</ul>`
+      : "";
+
+    const analysisHtml = analysis.length ? `
+        <div class="chat-analysis">
+          <div class="chat-analysis-label">分析（只引用已列出的证据）</div>
+          <ul class="chat-analysis-list">${analysis.map((a) => {
+            a = a || {};
+            const cid = a.claim_id
+              ? `<span class="chat-ev-stance">${escapeHtml(String(a.claim_id))}</span>` : "";
+            return `<li>${cid}${escapeHtml(String(a.text || ""))}${idLine(a.evidence_ids, "引用证据")}</li>`;
+          }).join("")}</ul>
+        </div>` : "";
+
+    const limitsHtml = limitations.length
+      ? `<div class="chat-auth-limits-title">局限说明</div>`
+        + `<ul class="chat-ev-list">${limitations.map((x) => `<li>${escapeHtml(String(x))}</li>`).join("")}</ul>`
+      : "";
+
+    return (claimItems
+      ? `<ul class="chat-ev-claims">${claimItems}</ul>`
+      : '<p class="chat-insight-sub muted">本轮没有拆出可核查主张。</p>')
+      + orphanHtml + analysisHtml + conflictsBlock(c.conflicts) + limitsHtml
+      + sourceGroups(c.sources) + issuesFold(c.gaps, c.errors)
+      + auditLine(c.counts) + executionLine(c.execution);
+  }
+
+  function renderAuthority(c) {
+    c = c || {};
+    const claims = Array.isArray(c.claims) ? c.claims : [];
+    const evidence = Array.isArray(c.evidence) ? c.evidence : [];
+    const counts = (c.counts && typeof c.counts === "object") ? c.counts : {};
+    const verifiedCount = counts.verified_sources === undefined
+      ? "" : `<span class="badge gray">已核验信源 ${Number(counts.verified_sources) || 0}</span>`;
+    return `
+      <div class="chat-card chat-card-authority">
+        <div class="chat-card-title">🛡️ 权威核验<span class="badge gray">只列证据 · 按来源分级</span>${degradedBadge(c)}</div>
+        <div class="chat-badges">${runBadges(c)}<span class="badge gray">主张 ${claims.length} · 证据 ${evidence.length}</span>${verifiedCount}</div>
+        ${authorityBody(c)}
+        ${asOfLine(c.as_of)}
+      </div>`;
+  }
+
+  /* ---------- 10. 复合卡（collect_and_verify：资料收集 + 权威核验） ----------
+     card = {card_type:"composite", status, task_status, as_of, degraded, research,
+     authority, summary, gaps, errors, counts, execution, incremental, base_as_of}。
+     复合卡只做两段结果的并列展示：正文复用 researchBody / authorityBody，
+     不再套一层卡片标题（避免嵌套重复标题）；两段互不吞并，缺哪段就如实说没有。 */
+  function subAsOf(sub) {
+    const asOf = (sub && typeof sub === "object") ? sub.as_of : "";
+    return `<span class="chat-card-submeta">子卡证据截至 ${escapeHtml(String(asOf || "未知"))}</span>`;
+  }
+
+  /* 子卡状态徽章：复合卡的两段各自带自己的六态（一段 partial 一段 completed 时看得见）。 */
+  function subStatus(sub) {
+    if (!sub || typeof sub !== "object") return "";
+    const text = RUN_STATUS[String(sub.status || "")] || String(sub.status || "未知");
+    return `<span class="badge gray">${escapeHtml(text)}</span>`;
+  }
+
+  function renderComposite(c) {
+    c = c || {};
+    const research = (c.research && typeof c.research === "object") ? c.research : null;
+    const authority = (c.authority && typeof c.authority === "object") ? c.authority : null;
+    const summary = String(c.summary || "").trim();
+    const topic = research ? String(research.topic || "") : "";
+    return `
+      <div class="chat-card chat-card-composite">
+        <div class="chat-card-title">🧭 复合核验<span class="badge gray">资料收集 + 权威核验</span>${degradedBadge(c)}</div>
+        <div class="chat-card-label">${escapeHtml(topic || "资料收集 + 权威核验")}</div>
+        <div class="chat-badges">${runBadges(c)}</div>
+        ${summary ? `<p class="chat-composite-summary">${escapeHtml(summary)}</p>` : ""}
+        <div class="chat-card-sub chat-card-sub-research">
+          <div class="chat-card-subtitle">📚 资料收集${research ? subStatus(research) + subAsOf(research) : ""}</div>
+          ${research ? researchBody(research) : '<p class="chat-insight-note muted">本次没有生成资料收集结果。</p>'}
+        </div>
+        <div class="chat-card-sub chat-card-sub-authority">
+          <div class="chat-card-subtitle">🛡️ 权威核验${authority ? subStatus(authority) + subAsOf(authority) : ""}</div>
+          ${authority ? authorityBody(authority) : '<p class="chat-insight-note muted">本次没有生成权威核验结果。</p>'}
+        </div>
+        ${issuesFold(c.gaps, c.errors)}
+        ${auditLine(c.counts)}
+        ${asOfLine(c.as_of)}
+      </div>`;
+  }
+
   /* ---------- 分发：优先 claim_answer，其次保留既有业务卡片兼容 ---------- */
   function renderCard(payload) {
     if (!payload || typeof payload !== "object") return "";
@@ -790,10 +1313,30 @@
     if (type === "evidence") return renderEvidence(payload);
     if (type === "batch_summary") return renderBatchSummary(payload);
     if (type === "monitor_change") return renderMonitorChange(payload);
+    /* 信息收集 / 权威核验 / 复合（card_type 由后端 loop._CARD_TYPE 与工具层给出；
+       历史回放走整包 payload，card_type 在顶层，按它分发） */
+    if (type === "research" || type === "collect_research") return renderResearch(payload);
+    if (type === "authority" || type === "verify_authority") return renderAuthority(payload);
+    if (type === "composite" || type === "collect_and_verify") return renderComposite(payload);
     if (type === "conclusion") return renderConclusion(payload);
     if (type === "speech" || type === "classic") return renderSpeech(payload);
     if (type === "heat" || type === "attention") return renderHeat(payload);
-    /* 无 card_type 时按字段形态识别（各渲染器互不混淆的判据） */
+    /* 无 card_type 时按字段形态识别（各渲染器互不混淆的判据）。
+       实时路径 chat.js 的 onCard 会把 d.card 解出来再交给 renderCard，而 card_type
+       只挂在事件顶层——这三张卡必须能只靠字段形态认出来，否则实时与回放不一致。 */
+    if (payload.research !== undefined && payload.authority !== undefined) {
+      return renderComposite(payload);
+    }
+    if (payload.key_findings !== undefined || payload.sub_questions !== undefined
+        || payload.timeline !== undefined || payload.leads !== undefined) {
+      return renderResearch(payload);
+    }
+    if (Array.isArray(payload.claims)
+        && (payload.limitations !== undefined
+            || payload.claims.some((cl) => cl && typeof cl === "object"
+                && cl.balance !== undefined))) {
+      return renderAuthority(payload);
+    }
     if (payload.score !== undefined || payload.e_score !== undefined) return renderHeat(payload);
     if (payload.emotion || payload.attack || payload.logic) return renderSpeech(payload);
     /* insights 卡即使没带 card_type，也能按聚合字段名识别出来 */
@@ -820,6 +1363,7 @@
   window.ChatCards = {
     renderCard, renderClaimAnswer, renderConclusion, renderSpeech, renderHeat,
     renderInsights, renderEvidence, renderBatchSummary, renderMonitorChange,
+    renderResearch, renderAuthority, renderComposite,
     mountCard, escapeHtml,
   };
 })();

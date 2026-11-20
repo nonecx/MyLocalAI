@@ -33,6 +33,7 @@
     providerModel: "/api/models/providers/{pid}/models/{model_id}",
     providerModelsRestore: "/api/models/providers/{pid}/models/restore",
     privacyPreferences: "/api/privacy/preferences",
+    skillsPreferences: "/api/skills/preferences",
   };
 
   /* HTTP 状态码 → 中文动作说明：具体原因由后端 detail 原文补充，这里只说"哪一步失败了" */
@@ -180,6 +181,7 @@
     creating: false,   // true = 正在填「新建提供方」表单（此时 selectedPid 为 null）
     models: [],        // 当前提供方的模型草稿（含新增未保存的卡）
     discover: null,    // 最近一次 /discover 结果 { pid, baseUrl, count, error, models[] }
+    skills: null,      // GET /api/skills/preferences 的响应（技能页）
     busy: false,       // 有请求在跑：挡住重复点击
     lastFocus: null,   // 打开弹层前的焦点，关闭时还回去
   };
@@ -323,10 +325,21 @@
       }
       syncModelsFromData();
       renderPane();
+      loadSkills();                            // 技能页独立配置：与模型配置并行拉取
     } catch (err) {
       showStatus("error", err.message);
       renderPane();                            // 仍然渲染骨架（含"载入失败"提示）
+      loadSkills();
     }
+  }
+
+  async function loadSkills() {
+    try {
+      state.skills = await request("GET", SETTINGS_API.skillsPreferences);
+    } catch (err) {
+      if (state.tab === "skills") showStatus("error", "技能配置读取失败：" + err.message);
+    }
+    if (state.tab === "skills") renderPane();
   }
 
   /* ============================================================
@@ -392,6 +405,10 @@
     const pane = $("#settingsPane");
     if (!pane) return;
     pane.textContent = "";
+    if (state.tab === "skills") {
+      pane.appendChild(buildSkillsPane());
+      return;
+    }
     if (state.tab === "privacy") {
       pane.appendChild(buildPrivacyPane());
       return;
@@ -941,6 +958,109 @@
     return section;
   }
 
+  /* ---------- 技能工作流页 ---------- */
+  function skillModeCard(title, hint, radioName, current) {
+    const card = el("section", "settings-skill-card");
+    card.appendChild(el("h4", null, title));
+    card.appendChild(el("p", "settings-hint", hint));
+    const row = el("div", "settings-radio-row");
+    [["pipeline", "固定流水线（阶段固定、预算固定）"],
+     ["agent", "受限 Agent 循环（候选池内自选检索/读页/摘录）"]].forEach((pair) => {
+      const label = el("label", "settings-radio-label");
+      const input = el("input", "settings-radio");
+      input.type = "radio";
+      input.name = radioName;
+      input.value = pair[0];
+      input.checked = String(current || "pipeline") === pair[0];
+      label.appendChild(input);
+      label.appendChild(el("span", null, pair[1]));
+      row.appendChild(label);
+    });
+    card.appendChild(row);
+    return card;
+  }
+
+  function buildSkillsPane() {
+    const wrap = el("div", "settings-skills");
+    const section = el("section", "settings-section");
+    section.appendChild(el("h3", null, "技能工作流"));
+    section.appendChild(el("p", "settings-hint",
+      "只影响「资料收集」「权威核验」两个新技能；事实核查/证据研究不受影响。"
+      + "固定流水线阶段不可增删；受限 Agent 循环只允许模型在代码给的候选池内决定下一步，"
+      + "预算/死线/取消/结论判定仍由代码掌握。"));
+    if (!state.skills) {
+      section.appendChild(el("p", "settings-empty", "正在载入技能配置…"));
+      wrap.appendChild(section);
+      return wrap;
+    }
+    const cfg = state.skills;
+    const research = cfg.research || {};
+    const authority = cfg.authority || {};
+    const composite = cfg.composite || {};
+    section.appendChild(skillModeCard("资料收集", "按主题主动拆子问题、多轮检索、读页摘录，产出带逐字引文的资料简报。",
+      "settingsResearchMode", research.workflow_mode));
+    section.appendChild(skillModeCard("权威核验", "拆主张、找权威源、锚定引文，给证据倾向；权威证据充分时才允许明确证明/反驳。",
+      "settingsAuthorityMode", authority.workflow_mode));
+
+    const coop = el("section", "settings-skill-card");
+    coop.appendChild(el("h4", null, "协同与自动接力"));
+    const compositeLabel = el("label", "settings-check-label");
+    const compositeBox = checkboxInput(composite.enabled !== false);
+    compositeBox.id = "settingsCompositeEnabled";
+    compositeLabel.appendChild(compositeBox);
+    compositeLabel.appendChild(el("span", null, "允许一句话同时收集资料 + 核验某说法（复合能力）"));
+    coop.appendChild(compositeLabel);
+
+    const autoLabel = el("label", "settings-check-label");
+    const autoBox = checkboxInput(research.auto_verify_findings !== false);
+    autoBox.id = "settingsAutoVerify";
+    autoBox.disabled = composite.enabled === false;
+    autoLabel.appendChild(autoBox);
+    autoLabel.appendChild(el("span", null, "研究卡产出后，对其中原文直接引文自动做权威核验（不核验综述句）"));
+    coop.appendChild(autoLabel);
+    compositeBox.addEventListener("change", () => {
+      autoBox.disabled = !compositeBox.checked;
+      if (!compositeBox.checked) autoBox.checked = false;
+    });
+    coop.appendChild(el("p", "settings-hint",
+      "自动接力只取 key_findings 里的 source_quote（原文直接引文），最多 2 条；"
+      + "没有可核验引文时只出资料卡并说明原因。"));
+    section.appendChild(coop);
+
+    const actions = el("div", "settings-actions");
+    actions.appendChild(button("保存技能设置", "btn-primary settings-btn-sm", saveSkills, "保存技能设置"));
+    section.appendChild(actions);
+    wrap.appendChild(section);
+    return wrap;
+  }
+
+  async function saveSkills() {
+    if (state.busy) return;
+    const researchMode = $('input[name="settingsResearchMode"]:checked');
+    const authorityMode = $('input[name="settingsAuthorityMode"]:checked');
+    const compositeBox = $("#settingsCompositeEnabled");
+    const autoBox = $("#settingsAutoVerify");
+    const body = {
+      schema_version: 1,
+      research: {
+        workflow_mode: researchMode ? researchMode.value : "pipeline",
+        auto_verify_findings: !!(autoBox && autoBox.checked),
+      },
+      authority: { workflow_mode: authorityMode ? authorityMode.value : "pipeline" },
+      composite: { enabled: !!(compositeBox && compositeBox.checked) },
+    };
+    setBusy(true);
+    try {
+      state.skills = await request("PUT", SETTINGS_API.skillsPreferences, body);
+      showStatus("ok", "技能设置已保存（下一轮生效）。");
+      renderPane();
+    } catch (err) {
+      showStatus("error", err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   /* ---------- 隐私说明页 ---------- */
   function buildPrivacyPane() {
     const wrap = el("div", "settings-privacy");
@@ -955,8 +1075,9 @@
     link.rel = "noopener noreferrer";
     section.appendChild(link);
     section.appendChild(el("p", "settings-hint",
-      "本弹层只做说明与跳转：修改隐私偏好需要 PUT " + SETTINGS_API.privacyPreferences
-      + "（后续版本的隐私面板再做），本期不在这里写隐私配置。"));
+      "使用「资料收集」「权威核验」需要授权 public-search（检索）与 public-web（读页）；"
+      + "未授权时两个技能会明确失败，不会伪装成“没查到”。修改隐私偏好需要 PUT "
+      + SETTINGS_API.privacyPreferences + "（本期不在这里写隐私配置）。"));
     wrap.appendChild(section);
     return wrap;
   }
