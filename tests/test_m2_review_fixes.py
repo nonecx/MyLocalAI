@@ -461,11 +461,12 @@ from tests.test_import_rules import FORBIDDEN, _violations  # noqa: E402
 
 class TestImportRulesExtended(unittest.TestCase):
     """FORBIDDEN 补三行（§4.1 依赖方向）：assistant 禁 web、dossier 禁 web+assistant、
-    web 为顶层无上游可禁（空集）。2026-11-20 平台包（platform）落地后再补一行：
-    上游各包禁 platform、platform 自身禁 web+assistant。"""
+    web 为顶层无上游可禁（空集）。2026-11-20 平台包（platform）落地：上游各包禁
+    platform、platform 自身禁 web+assistant；assistant 允许消费 platform
+    （platform_feed 只读工具），故 assistant 仍只禁 web。"""
 
     def test_new_forbidden_entries(self):
-        self.assertEqual(FORBIDDEN["mylocalai.assistant"], {"web", "platform"})
+        self.assertEqual(FORBIDDEN["mylocalai.assistant"], {"web"})
         self.assertEqual(FORBIDDEN["mylocalai.dossier"], {"web", "assistant", "platform"})
         self.assertEqual(FORBIDDEN["mylocalai.platform"], {"web", "assistant"})
         self.assertEqual(FORBIDDEN["mylocalai.web"], set())

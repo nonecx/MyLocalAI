@@ -539,6 +539,62 @@
       `<div class="chat-asof">核查时间：${escapeHtml(answer.checked_at || "未知")}</div></section>`;
   }
 
+  /* ---------- 监测平台卡（platform_feed 工具：预警/信息流/巡检记录） ----------
+     由后端 tools_platform 产出：card = {card_type:"platform", kind, as_of,
+     warnings|feed|scans}。口径：传播风险分级只描述传播风险、不判定真假；
+     热度是代理/估计值；只读零 LLM。放在画像区之外（test_insights_api 的
+     渲染区切片以「新事实核查答案」为界，平台卡字段不该混进画像自洽断言）。 */
+  const PLATFORM_LEVEL_CLS = { notice: "gray", suspect: "amber", high: "red", urgent: "red" };
+
+  function renderPlatformEntry(e) {
+    e = e || {};
+    const cls = PLATFORM_LEVEL_CLS[e.risk_level] || "gray";
+    const eVal = (e.e_score === null || e.e_score === undefined) ? "E=?" : `E=${Number(e.e_score).toFixed(1)}`;
+    const verdict = e.verdict_label
+      ? `${escapeHtml(e.verdict_label)}${e.risk_score !== null && e.risk_score !== undefined ? `（${Number(e.risk_score)}）` : ""}`
+      : "未深查";
+    const reasons = Array.isArray(e.risk_reasons) ? e.risk_reasons : [];
+    const dossier = e.dossier_id ? `<span class="badge gray">档案 #${Number(e.dossier_id)}</span>` : "";
+    return `<li class="chat-platform-entry">
+      <div class="chat-platform-entry-head">
+        <span class="badge ${cls}">${escapeHtml(e.risk_label || e.risk_level || "?")}</span>
+        <span class="chat-platform-entry-title">${escapeHtml(String(e.title || "").slice(0, 60))}</span>
+        ${dossier}
+      </div>
+      <div class="chat-platform-entry-meta">${eVal}（代理/估计） · 结论：${verdict}</div>
+      ${reasons.length ? `<div class="chat-platform-entry-reasons">${reasons.map(escapeHtml).join("；")}</div>` : ""}
+    </li>`;
+  }
+
+  function renderPlatform(card) {
+    card = card || {};
+    const kind = String(card.kind || "");
+    const titles = { warnings: "监测平台 · 传播风险预警", feed: "监测平台 · 信息流", scans: "监测平台 · 巡检记录" };
+    const title = titles[kind] || "监测平台";
+    let body = "";
+    if (kind === "scans") {
+      const scans = Array.isArray(card.scans) ? card.scans : [];
+      body = scans.length
+        ? `<ul class="chat-platform-list">${scans.map((s) => `
+          <li><span class="badge gray">${escapeHtml(s.status || "?")}</span>
+          <span class="chat-platform-entry-meta">${escapeHtml(String(s.started_at || "").replace("T", " ").slice(0, 19))}</span>
+          <span class="chat-platform-entry-meta">候选 ${Number(s.candidates) || 0} · 深查 ${Number(s.verified) || 0} · 降级 ${Number(s.degraded) || 0}</span>
+          ${s.error ? `<div class="chat-platform-entry-reasons">${escapeHtml(s.error)}</div>` : ""}</li>`).join("")}</ul>`
+        : '<p class="chat-insight-empty">暂无巡检记录</p>';
+    } else {
+      const rows = Array.isArray(card[kind]) ? card[kind] : [];
+      body = rows.length
+        ? `<ul class="chat-platform-list">${rows.map(renderPlatformEntry).join("")}</ul>`
+        : `<p class="chat-insight-empty">${kind === "warnings" ? "暂无预警（没有高危/紧急档信息）" : "暂无信息"}</p>`;
+    }
+    return `
+      <div class="chat-card chat-card-platform">
+        <div class="chat-card-title">${escapeHtml(title)}<span class="badge gray">只读 · 零 LLM</span>${degradedBadge(card)}</div>
+        ${body}
+        ${asOfLine(card.as_of)}
+      </div>`;
+  }
+
   /* ---------- 分发：优先 claim_answer，其次保留既有业务卡片兼容 ---------- */
   function renderCard(payload) {
     if (!payload || typeof payload !== "object") return "";
@@ -548,6 +604,7 @@
     const type = String(payload.card_type || payload.type || "").toLowerCase();
     if (type === "insights") return renderInsights(payload);
     if (type === "evidence") return renderEvidence(payload);
+    if (type === "platform") return renderPlatform(payload);
     if (type === "conclusion") return renderConclusion(payload);
     if (type === "speech" || type === "classic") return renderSpeech(payload);
     if (type === "heat" || type === "attention") return renderHeat(payload);
@@ -563,6 +620,6 @@
   /* 供 chat.js 调用的唯一入口（不污染全局命名空间） */
   window.ChatCards = {
     renderCard, renderClaimAnswer, renderConclusion, renderSpeech, renderHeat,
-    renderInsights, renderEvidence, escapeHtml,
+    renderInsights, renderEvidence, renderPlatform, escapeHtml,
   };
 })();

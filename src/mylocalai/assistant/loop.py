@@ -40,7 +40,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from mylocalai.llm import llm_cache
 from mylocalai.assistant import router as router_mod
 from mylocalai.assistant import (tools_chapters, tools_heat, tools_insights, tools_memory,
-                                 tools_verify)
+                                 tools_platform, tools_verify)
 from mylocalai.assistant.context import build_context
 from mylocalai.assistant.events import EventStream
 from mylocalai.assistant.fingerprint import DEFAULT_SHINGLE_SIZE
@@ -70,6 +70,8 @@ _CARD_TYPE = {
     "check_heat": "heat", "compute_heat": "heat",
     # L4 参谋：一张卡三种子视图（kind=patterns/sources/weekly 由卡片字段自带）
     "insights": "insights",
+    # 监测平台只读工具（platform_feed）：platform 卡，前端 cards.js renderPlatform
+    "platform_feed": "platform",
 }
 
 _ARGS_PREVIEW_WIDTH = 60
@@ -539,6 +541,9 @@ class AssistantLoop:
             # L4 参谋工具（insights）：只读零 LLM 的画像/周报视图，路由枚举与
             # allowlist 同步补 "insights"。
             tools_insights.register_all(reg, None)
+            # 监测平台只读工具（platform_feed）：预警/信息流/巡检记录，零 LLM。
+            # 路由枚举与 allowlist 同步补 "platform_feed"。
+            tools_platform.register_all(reg, None)
             self._registry = reg
         return self._registry
 

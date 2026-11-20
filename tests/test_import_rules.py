@@ -25,7 +25,8 @@ SRC = ROOT / "src" / "mylocalai"
 # 因此 assistant 只禁 web、dossier 禁 {web, assistant}、web 是顶层无上游可禁（{}）。
 # 2026-11-20 平台包（platform）：与 dossier/assistant 同层，消费
 # {core, llm, config, util, retrieval, classic, rumor, attention, dossier}，
-# 被 web/cli/assistant 消费；上游各包一律禁 platform（防反向依赖）。
+# 被 web/cli/assistant 消费（assistant 的 platform_feed 工具即助手→平台）；
+# 上游各包一律禁 platform（防反向依赖），platform 自身禁 web/assistant（不成环）。
 FORBIDDEN = {
     "mylocalai.core": {"classic", "rumor", "attention", "retrieval", "web", "llm", "platform"},
     "mylocalai.config": {"classic", "rumor", "attention", "retrieval", "web", "llm", "core", "util", "platform"},
@@ -36,7 +37,7 @@ FORBIDDEN = {
     "mylocalai.rumor": {"classic", "attention", "platform"},
     "mylocalai.attention": {"classic", "rumor", "platform"},
     "mylocalai.dossier": {"web", "assistant", "platform"},
-    "mylocalai.assistant": {"web", "platform"},
+    "mylocalai.assistant": {"web"},
     "mylocalai.platform": {"web", "assistant"},
     "mylocalai.web": set(),
 }

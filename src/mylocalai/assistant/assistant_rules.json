@@ -34,7 +34,8 @@
   "tool_allowlist": [
     "verify_claim", "analyze_speech", "check_heat", "compute_heat",
     "list_dossiers", "get_dossier", "recheck_dossier", "export_card",
-    "search_web", "read_opinions", "deep_read", "insights", "chitchat", "clarify", "refuse"
+    "search_web", "read_opinions", "deep_read", "insights", "platform_feed",
+    "chitchat", "clarify", "refuse"
   ],
   "refusal_triggers": [
     "帮我编造谣言", "编写假消息", "伪装成真实消息", "批量生成谣言",

@@ -298,3 +298,46 @@
 .platform-scan-counters { color: #475467; }
 
 .platform-scan-error { color: var(--danger); }
+
+/* ---------- 对话里的平台卡（cards.js renderPlatform；样式随本文件全局生效） ---------- */
+.chat-platform-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.chat-platform-entry {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+
+.chat-platform-entry-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.chat-platform-entry-title {
+  font-size: 13px;
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-platform-entry-meta {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.chat-platform-entry-reasons {
+  font-size: 12px;
+  color: #475467;
+  background: #f8fafc;
+  border-radius: 6px;
+  padding: 5px 8px;
+  margin-top: 4px;
+  line-height: 1.6;
+}
