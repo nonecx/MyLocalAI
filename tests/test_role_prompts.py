@@ -1,11 +1,11 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """角色提示词层与能力 Skill 文档测试（v6 角色扩展，2026-11-20）。
 
 覆盖：
   一、_prompts_for_role 合并规则（addon 追加 / 覆盖 / full 逐位不变 / 未知角色回落）；
   二、loop 集成：三角色会话的 router/narrate system 按角色不同，full 与基座逐位一致；
   三、导流口径：analyst/monitor 的路由附加段包含面板导流与"不拼工具"指令；
-  四、SKILL.md 结构 lint（6 份能力文档的头字段与必备章节）；
+  四、SKILL.md 结构 lint（8 份能力文档的头字段与必备章节）；
   五、对拍：prompts.json 的 roles 键 ↔ dossier/profiles.py 的 ROLES；
      SKILL.md 的能力 id ↔ capabilities 目录名。
 
@@ -35,7 +35,7 @@ from mylocalai.dossier.store import DossierStore  # noqa: E402
 PROMPTS_PATH = ROOT / "src" / "mylocalai" / "assistant" / "prompts.json"
 CAPS_DIR = ROOT / "src" / "mylocalai" / "assistant" / "capabilities"
 
-#: 六个用户能力（目录名 ↔ 能力 id 的连字符形式）
+#: 八个用户能力（目录名 ↔ 能力 id 的连字符形式）
 EXPECTED_CAPS = {
     "claim_checking": "claim-checking",
     "evidence_research": "evidence-research",
@@ -43,6 +43,8 @@ EXPECTED_CAPS = {
     "speech_understanding": "speech-understanding",
     "material_analysis": "material-analysis",
     "domain_monitoring": "domain-monitoring",
+    "information_collection": "information-collection",
+    "authority_verification": "authority-verification",
 }
 
 #: SKILL.md 头注释必备字段与正文必备章节
@@ -245,8 +247,8 @@ class TestLoopRolePrompts(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestCapabilitySkillDocs(unittest.TestCase):
-    def test_six_capability_docs_exist_with_header_and_sections(self):
-        """六个能力目录各有一份 SKILL.md：头字段齐全、必备章节齐全。"""
+    def test_eight_capability_docs_exist_with_header_and_sections(self):
+        """八个能力目录各有一份 SKILL.md：头字段齐全、必备章节齐全。"""
         dirs = {p.name for p in CAPS_DIR.iterdir()
                 if p.is_dir() and p.name != "__pycache__"}
         self.assertEqual(dirs, set(EXPECTED_CAPS), f"能力目录集合漂移: {dirs}")

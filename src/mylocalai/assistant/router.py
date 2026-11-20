@@ -35,9 +35,12 @@ META_ACTIONS = ("chitchat", "clarify", "refuse")
 #: M3 追加章节类两项（与 tools_chapters.register_all 的注册名一致，§5.2 M3-3/M3-5）。
 #: L4 追加参谋类 insights（tools_insights：三类只读画像视图，kind 为封闭枚举）。
 #: 第二波追加 collect_evidence（取证三技能流水线，只读：不建档、不出真假分）。
+#: 第三波追加 collect_research / verify_authority（资料收集 / 权威核验，均只读：
+#: 不建档、无分数、不出真假结论；与既有能力的分流见 prompts.json router_system）。
 TOOL_ACTIONS = ("verify_claim", "analyze_speech", "check_heat", "compute_heat",
                 "list_dossiers", "get_dossier", "recheck_dossier", "export_card",
-                "search_web", "read_opinions", "deep_read", "insights", "collect_evidence")
+                "search_web", "read_opinions", "deep_read", "insights", "collect_evidence",
+                "collect_research", "verify_authority")
 
 #: 带 id 参数的工具：缺 id 时允许"本会话最近档案"的确定性兜底（§5.4 ②）。
 #: 章节类两项同规：用户说"看看刚才那条的观点"没带档案号，用会话最近档案补。
