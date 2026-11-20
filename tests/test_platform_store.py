@@ -80,6 +80,14 @@ class TestWatchQueries(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.add_watch_query("   ")
 
+    def test_ensure_watch_query_idempotent(self):
+        """ensure：首调创建、再调返回同一 id（巡检按文本定位 query_id）。"""
+        qid = self.store.ensure_watch_query("话题A")
+        self.assertEqual(self.store.ensure_watch_query("话题A"), qid)
+        self.assertEqual(len(self.store.list_watch_queries()), 1)
+        with self.assertRaises(ValueError):
+            self.store.ensure_watch_query("")
+
     def test_enable_missing_id_returns_false(self):
         self.assertFalse(self.store.set_watch_query_enabled(999, True))
         self.assertFalse(self.store.delete_watch_query(999))
@@ -148,6 +156,15 @@ class TestFeedEntries(unittest.TestCase):
         rows = self.store.warnings()
         self.assertEqual([r["id"] for r in rows], [e2, e1])        # urgent 在前
 
+    def test_latest_e_for_query(self):
+        """环比基准：同查询词最近一次 E；无记录/他查询词 → None。"""
+        other = self.store.add_watch_query("别的词")
+        self.assertIsNone(self.store.latest_e_for_query(self.qid))
+        e1 = self._add(url="https://a.example.com/1", e_score=30.0)
+        self.assertIsNone(self.store.latest_e_for_query(other))     # 他查询词不受影响
+        e2 = self._add(url="https://b.example.com/2", e_score=55.0)
+        self.assertEqual(self.store.latest_e_for_query(self.qid), 55.0)   # 取最新
+
     def test_purge_expired_feed(self):
         eid = self._add()
         row = self.store.get_feed_entry(eid)
@@ -206,7 +223,7 @@ class TestScanRuns(unittest.TestCase):
         self.assertEqual(set(FEED_STATUSES), {"new", "screened", "verified",
                                               "verify_failed", "deduped"})
         self.assertEqual(set(SCAN_STATUSES), {"running", "completed", "partial",
-                                              "failed", "skipped"})
+                                              "failed", "skipped", "cancelled"})
 
 
 if __name__ == "__main__":

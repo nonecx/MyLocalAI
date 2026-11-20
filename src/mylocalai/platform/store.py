@@ -35,7 +35,7 @@ WARNING_LEVELS = ("high", "urgent")
 FEED_STATUSES = ("new", "screened", "verified", "verify_failed", "deduped")
 
 #: scan 状态封闭集合。
-SCAN_STATUSES = ("running", "completed", "partial", "failed", "skipped")
+SCAN_STATUSES = ("running", "completed", "partial", "failed", "skipped", "cancelled")
 
 
 def _now() -> str:
@@ -86,6 +86,19 @@ class PlatformStore:
             except sqlite3.IntegrityError:
                 return None
             return int(cur.lastrowid)
+
+    def ensure_watch_query(self, query: str, note: str = "") -> int:
+        """有则返回现有 id，无则创建（巡检按监控词文本定位 query_id 的入口）。"""
+        q = str(query or "").strip()
+        if not q:
+            raise ValueError("监控词不能为空")
+        existing = self.add_watch_query(q, note)
+        if existing is not None:
+            return existing
+        for row in self.list_watch_queries():
+            if row["query"] == q:
+                return int(row["id"])
+        raise RuntimeError(f"监控词并发创建冲突: {q}")   # 理论不可达（单写者）
 
     def list_watch_queries(self, enabled_only: bool = False) -> List[Dict[str, Any]]:
         sql = "SELECT * FROM watch_queries"
@@ -214,6 +227,14 @@ class PlatformStore:
                 " ORDER BY CASE risk_level WHEN 'urgent' THEN 0 ELSE 1 END, id DESC"
                 " LIMIT ?", (*WARNING_LEVELS, max(1, int(limit)))).fetchall()
         return [self._feed_row(r) for r in rows]
+
+    def latest_e_for_query(self, query_id: int) -> Optional[float]:
+        """同监控词最近一次记录的热度 E（环比基准）；从无记录返回 None。"""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT e_score FROM feed_entries WHERE query_id = ?"
+                " AND e_score IS NOT NULL ORDER BY id DESC LIMIT 1", (int(query_id),)).fetchone()
+        return float(row["e_score"]) if row else None
 
     def purge_expired_feed(self, *, now: Optional[str] = None) -> int:
         """清理过期的 feed 条目（results 类别）；返回删除行数。幂等。"""
