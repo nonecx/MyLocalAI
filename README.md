@@ -255,11 +255,12 @@ python -m mylocalai.cli --attention-online "某段待分析的文本"
 通栏 Tab「对话 ｜ 监测平台」（单页双视图，默认落在对话视图）
 ├── 状态摘要条：状态点三态（未授权 / 调度运行 / 默认灰）+ 「N 个话题 · 最近巡检 · 高风险 N 条」
 ├── 筛选 chips：全部 / 预警（high,urgent）/ 疑似 / 关注
-├── 热榜信息流：发现条目 + 热度 E（代理徽章）+ 深查结论 + 风险档位（关注/疑似/高危/紧急）；
+├── 热榜信息流：发现条目 + 热度 E（代理徽章）+ 深查结论 + 领域徽章 + 风险档位（关注/疑似/高危/紧急）；
 │   点卡展开传播风险理由与原文链接，high/urgent 条目左侧加风险色条
 ├── 空态双引导：无监控词 →「去添加」；有词无信息 →「立即巡检一次」
 └── 管理抽屉（右侧，「管理」按钮开合；Esc / 点遮罩 / 关闭按钮均可关）
-    ├── 监控词管理：增删查；按调度间隔自动巡检（默认关闭，platform_rules.json 的 enabled）
+    ├── 信息源管理：用户自建 RSS/网页源，全局或按词绑定，可停用、可「试一下」单源试跑
+    ├── 监控词管理：增删查 + 领域下拉（自动推断/手设 12 领域）；点行进编辑态改领域
     ├── 巡检记录：每次 scan 的候选/深查/降级计数与失败原因
     └── 未授权引导卡：说明外发口径，链到设置弹层授权（fail-closed）
 ```
@@ -270,6 +271,18 @@ python -m mylocalai.cli --attention-online "某段待分析的文本"
   （变异测试锁定 LLM 进不了分级链）。
 - 两阶段成本控制：不过热度门槛且无话术命中的候选只登记不深查；深查有
   候选数/条数/总时限三重封顶（`platform_rules.json`）。
+- **信息源管理**（抽屉「信息源」区）：除搜索引擎与规则里的 RSS 源，还可自建
+  `rss`（RSS/Atom 供给）与 `page`（网页链接——列表页锚文本粗糖匹配，不抓正文、
+  不渲染 JS，反爬如实降级）两类源；**不选绑定 = 全局源**（对所有监控词生效），
+  选了就是只对选中词可见的窄授权；可停用（不删绑定）、可删除；「试一下」对该源
+  单独跑一次发现（`POST /api/platform/sources/{id}/test`，返回匹配数与前 3 条
+  标题），保存前也能先试。
+- **领域**（`platform/domains.py` + `platform_domains.json`，12 项，与助手 taxonomy
+  对齐）：监控词下拉可留空「自动推断」或手设固定领域；自动推断走
+  「文本 → TTL 缓存 → LLM 封闭枚举判定 → 历史分布 → 不猜」链，**LLM 不可用就不猜**
+  （绝不按关键词拍一个）；领域只在信息流条目上以徽章呈现——手设/监控词手设是实色
+  淡底，自动推断是描边 + 「推」角标，未判定不画徽章。领域的检索提示（裸 host）会
+  注入 rumor 深查的一轮 `site:` 定向补搜，提示不是权威认定。
 - CLI（可挂 Windows 计划任务）：`python -m mylocalai.platform --once`
   （`--query` 指定词 / `--status` 看状态 / `--serve` 前台循环 / `--json`）；
   web 启动时按规则开关自动起后台巡检线程（多 worker 不启）。
@@ -277,8 +290,12 @@ python -m mylocalai.cli --attention-online "某段待分析的文本"
   结果保存关闭 → 只进当次返回不落库。
 - REST：`GET /api/platform/{status,feed,warnings,watch,scans}`、
   `POST /api/platform/{watch,scan}`、`DELETE /api/platform/watch/{id}`；
+  v7 新增：`GET /api/platform/domains`（领域表）、
+  `GET/POST /api/platform/sources`、`PUT/DELETE /api/platform/sources/{id}`、
+  `POST /api/platform/sources/{id}/test`（单源试运行）、
+  `PUT /api/platform/watch/{id}`（监控词领域手设，空串=恢复自动推断）；
   对话里问「最近有什么预警」走只读工具 `platform_feed`（零 LLM），出的平台卡是
-  轻量化的：档位徽章 + 标题 + 单行 meta，要看细节回平台页。
+  轻量化的：档位徽章 + 标题 + 单行 meta（有条目领域时追加领域 id），要看细节回平台页。
 - 完整口径（架构/数据模型/算法/降级矩阵/测试）：`docs/监测平台规格-2026-11-20.md`。
 
 ## 判定口径可配置
@@ -351,7 +368,7 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 1476 个用例（unittest discover 全量，2026-11-20 平台只读工具与文档落地后实测；**M4 起由
+离线套件共 1598 个用例（unittest discover 全量，2026-11-21 信息源/领域端点与界面落地后实测；**M4 起由
 `tests.test_readme_counts` 自动校验此数字与 mock 闸门条数，改动后须同步回写**）：
 M1-M3 的全部回归（详见 git 历史），加上 M4 新增模块：
 **成本真实计数**（llm_client 进程级计数器：真实上游调用数 + usage tokens，缓存命中/
@@ -374,7 +391,7 @@ source_profile 注入：空画像逐位不变守卫、抬分端到端、装配�
 真假判定）、**collect_evidence 工具与研究助手接线**（`tests.test_research_assistant`
 22 例：工具注册与校验、取消与绝对死线透传、六种状态保真、路由与 allowlist、
 上下文不伪造档案号、报告引用逐字保留）。
-加上监测平台新增模块（tests/ 下 test_platform_ 前缀共十个）：**规则加载**（默认值/坏配置
+加上监测平台新增模块（tests/ 下 test_platform_ 前缀共十一个）：**规则加载**（默认值/坏配置
  降级/权重校验）、**平台域存储**（v6 迁移/三表 CRUD/URL 唯一去重/保留期清理/
  外键冲突不伪装去重）、**发现源**（搜索授权门、RSS/Atom 解析与过滤、DOCTYPE/ENTITY、
  SSRF、超限）、**候选去重**（URL 去重键、标题指纹近似）、**热度估计**（零额外检索、

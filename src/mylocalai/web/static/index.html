@@ -248,9 +248,36 @@
       <h3>监控词</h3>
       <div class="platform-watch-add">
         <input id="platformWatchInput" type="text" maxlength="200" placeholder="输入监控词（话题/事件关键词）" />
+        <!-- 领域下拉：第一项 value="" = 自动推断（LLM 判定 → 历史分布 → 不猜），
+             其余 12 项由 GET /api/platform/domains 运行时填充（平台唯一数据源） -->
+        <select id="platformWatchDomain" class="platform-watch-domain-select"
+          title="监控词领域：留空=自动推断，也可手设固定领域">
+          <option value="">自动推断</option>
+        </select>
         <button id="platformWatchAddBtn" class="btn-primary" type="button">添加</button>
+        <!-- 编辑态：点监控词行进入（回填 input + 领域下拉），保存走 PUT watch/{id} -->
+        <button id="platformWatchSaveBtn" class="btn-primary hidden" type="button">保存修改</button>
+        <button id="platformWatchCancelEditBtn" class="btn-ghost hidden" type="button">取消</button>
       </div>
       <ul class="platform-watch-list" id="platformWatchList"><li class="empty">加载中…</li></ul>
+    </section>
+    <section class="platform-drawer-section">
+      <h3>信息源</h3>
+      <div class="platform-source-add">
+        <input id="platformSourceName" type="text" maxlength="60" placeholder="来源名称" />
+        <input id="platformSourceUrl" type="text" maxlength="500"
+          placeholder="https://…（RSS feed 或网页 URL）" />
+        <select id="platformSourceKind" title="rss=RSS/Atom 供给；page=网页链接（列表页锚文本粗糖匹配）">
+          <option value="rss">RSS/Atom 供给</option>
+          <option value="page">网页链接</option>
+        </select>
+        <!-- 多选绑定监控词：不选 = 全局源（对所有监控词生效）；选项运行时由监控词列表填充 -->
+        <select id="platformSourceBindings" class="platform-source-bindings" multiple size="3"
+          title="绑定监控词（Ctrl/⌘ 多选）：不选 = 全局（对所有监控词生效）"></select>
+        <button id="platformSourceAddBtn" class="btn-primary" type="button">添加来源</button>
+      </div>
+      <p class="platform-source-hint" id="platformSourceHint"></p>
+      <ul class="platform-source-list" id="platformSourceList"><li class="empty">加载中…</li></ul>
     </section>
     <section class="platform-drawer-section">
       <h3>巡检记录</h3>

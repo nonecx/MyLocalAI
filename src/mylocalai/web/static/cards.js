@@ -556,12 +556,17 @@
       ? `${escapeHtml(e.verdict_label)}${e.risk_score !== null && e.risk_score !== undefined ? `（${Number(e.risk_score)}）` : ""}`
       : "未深查";
     const when = String(e.discovered_at || "").replace("T", " ").slice(0, 19) || "未知";
+    /* 领域（v7）：feed_entries 的领域列叫 topic_domain（domain 是 URL 主机域）。
+       只有带领域值的条目才在 meta 行末追加，保持对话卡轻量；中文名映射在平台页
+       platform.js（领域表唯一数据源是 GET /api/platform/domains），这里不重复一张表。 */
+    const domainLabel = String(e.topic_domain || "").trim();
+    const domainPart = domainLabel ? ` · 领域：${escapeHtml(domainLabel)}` : "";
     return `<li class="chat-platform-entry">
       <div class="chat-platform-entry-head">
         <span class="badge ${cls}">${escapeHtml(e.risk_label || e.risk_level || "?")}</span>
         <span class="chat-platform-entry-title">${escapeHtml(String(e.title || "").slice(0, 60))}</span>
       </div>
-      <div class="chat-platform-entry-meta">${eVal} · 结论：${verdict} · ${escapeHtml(when)}</div>
+      <div class="chat-platform-entry-meta">${eVal} · 结论：${verdict} · ${escapeHtml(when)}${domainPart}</div>
     </li>`;
   }
 

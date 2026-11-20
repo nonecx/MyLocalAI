@@ -246,6 +246,40 @@
 
 .platform-feed-dossier { color: var(--primary); }
 
+/* 信息流条目领域徽章（读 e.topic_domain / e.topic_domain_source）：
+   user=用户手设/监控词手设领域 → 实色淡底；
+   inferred_text/inferred_history=自动推断 → 1px 描边透明底 + 「推」字角标；
+   none/空 → 不渲染（不画空徽章） */
+.platform-feed-domain-user {
+  background: var(--primary-soft);
+  border: 1px solid var(--primary-border);
+  color: var(--primary);
+  font-size: 11px;
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+.platform-feed-domain-inferred {
+  background: transparent;
+  border: 1px dashed var(--border);
+  color: var(--muted);
+  font-size: 11px;
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+/* 「推」字角标：标注本领域是推断而非手设 */
+.platform-feed-domain-infer-mark {
+  font-style: normal;
+  font-size: 10px;
+  line-height: 1;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 3px;
+  margin-left: 4px;
+  color: var(--muted);
+}
+
 /* ---------- ⑦ 空态（按钮复用 style.css .btn-primary） ---------- */
 .platform-empty {
   text-align: center;
@@ -367,6 +401,153 @@
 .platform-watch-del:hover {
   border-color: var(--danger);
   background: #fdeeec;
+}
+
+/* ---- 抽屉内信息源管理（v7：用户自建 rss/page 源；page=列表页锚文本粗糖匹配） ---- */
+.platform-source-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.platform-source-add input {
+  flex: 1 1 150px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+.platform-source-add input:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+/* 监控词领域下拉与信息源类型/绑定下拉同款（抽屉里的紧凑 select） */
+.platform-source-add select,
+.platform-watch-add select {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  color: var(--muted);
+  max-width: 100%;
+}
+
+.platform-watch-domain-select {
+  flex: 0 0 auto;
+  max-width: 40%;
+}
+
+/* 绑定多选：不选=全局（对所有监控词生效），size=3 一眼看全 */
+.platform-source-bindings {
+  flex: 1 1 100%;
+  min-height: 58px;
+}
+
+/* 试运行/增删反馈行：占位高度固定，有无提示都不跳布局 */
+.platform-source-hint {
+  font-size: 12.5px;
+  color: var(--primary);
+  margin: 0 0 8px;
+  min-height: 16px;
+  word-break: break-all;
+}
+.platform-source-hint-error { color: var(--danger); }
+
+.platform-source-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.platform-source-list li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
+.platform-source-list li.empty {
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  padding: 18px 12px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12.5px;
+  cursor: default;
+}
+
+/* 停用的源整行淡出（启停开关的视觉反馈，不删行） */
+.platform-source-list li.platform-source-off { opacity: 0.55; }
+
+.platform-source-name { font-weight: 600; }
+
+.platform-source-url {
+  color: var(--muted);
+  font-size: 12px;
+  word-break: break-all;
+  flex: 1 1 100%;
+}
+
+/* 右侧操作组：启停 / 试一下 / 删除（小按钮，视觉对齐 .platform-watch-del） */
+.platform-source-op {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+.platform-source-op button {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  border-radius: 6px;
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.platform-source-op button:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+.platform-source-op button[data-op="del"] { color: var(--danger); }
+.platform-source-op button[data-op="del"]:hover {
+  border-color: var(--danger);
+  background: #fdeeec;
+}
+
+/* 监控词行的领域徽章（小）：用户手设=主色淡底；自动推断=虚线描边 */
+.platform-watch-domain {
+  border: 1px solid var(--primary-border);
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-size: 11px;
+  border-radius: 999px;
+  padding: 1px 8px;
+  flex: 0 0 auto;
+}
+.platform-watch-domain-inferred {
+  border-style: dashed;
+  background: transparent;
+  color: var(--muted);
+}
+
+/* 编辑态显隐统一走 .hidden 通用类（style.css .hidden{display:none!important}），
+   此处不重定义：添加/保存/取消三按钮同址切换，行点击即回填表单 */
+
+/* 正在编辑的监控词行：主色描边 + 淡底，一眼看出改的是哪一行 */
+.platform-watch-list li.platform-watch-editing {
+  border-color: var(--primary);
+  background: var(--primary-soft);
 }
 
 /* ---- 抽屉内巡检记录时间线（自旧版搬移） ---- */

@@ -68,7 +68,11 @@ def _now_iso() -> str:
 
 
 def _entry_view(entry: Dict[str, Any]) -> Dict[str, Any]:
-    """信息流条目 → 卡片视图（档位中文名 + 风险理由 +  verdict 摘要）。"""
+    """信息流条目 → 卡片视图（档位中文名 + 风险理由 +  verdict 摘要 + 领域）。
+
+    topic_domain/topic_domain_source 是平台 v7 的领域列（feed_entries.domain 是
+    主机域，勿混）；对话卡按 topic_domain 有值才渲染「领域」，无值不加。
+    """
     level = str(entry.get("risk_level") or "notice")
     verdict = str(entry.get("verdict_label") or "")
     score = entry.get("risk_score")
@@ -86,6 +90,8 @@ def _entry_view(entry: Dict[str, Any]) -> Dict[str, Any]:
         "status": str(entry.get("status") or ""),
         "dossier_id": entry.get("dossier_id"),
         "discovered_at": str(entry.get("discovered_at") or ""),
+        "topic_domain": str(entry.get("topic_domain") or ""),
+        "topic_domain_source": str(entry.get("topic_domain_source") or ""),
     }
 
 
