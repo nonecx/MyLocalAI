@@ -26,7 +26,7 @@ from typing import Any, Dict, Iterable, List, Optional
 __all__ = ["SCHEMA_VERSION", "DEFAULT_DB_PATH", "connect", "migrate",
            "DossierStore", "default_db_path"]
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 #: 顺序迁移：索引 i 的脚本把库从版本 i 升到 i+1。永不修改已发布的条目，只允许追加。
 MIGRATIONS: List[str] = [
@@ -226,6 +226,48 @@ MIGRATIONS: List[str] = [
     ALTER TABLE dossiers ADD COLUMN profile_id INTEGER;
     CREATE INDEX IF NOT EXISTS idx_sessions_profile ON sessions(profile_id);
     CREATE INDEX IF NOT EXISTS idx_dossiers_profile ON dossiers(profile_id);
+    """,
+    # v7：材料批次（专业用户 A · 材料分析，2026-11-20）。一个批次挂 N 条材料，
+    # 每条材料一次独立核查并自动建档（dossier_id 可空：未建档/失败即空）。
+    # group_id 是"疑似同源"分组号（0=无组）：同组说法各自判定，汇总层合并呈现，
+    # 不擅自把不同材料当成同一条谣言。status 语义：
+    #   pending/running/ok/error/blocked/not_run（blocked=未授权抓取、not_run=预算用尽）
+    """
+    CREATE TABLE IF NOT EXISTS batches (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        profile_id   INTEGER,
+        title        TEXT NOT NULL DEFAULT '',
+        source       TEXT NOT NULL DEFAULT 'text'
+                     CHECK (source IN ('text', 'file', 'urls')),
+        item_count   INTEGER NOT NULL DEFAULT 0,
+        ok_count     INTEGER NOT NULL DEFAULT 0,
+        failed_count INTEGER NOT NULL DEFAULT 0,
+        not_run_count INTEGER NOT NULL DEFAULT 0,
+        status       TEXT NOT NULL DEFAULT 'running'
+                     CHECK (status IN ('running', 'done', 'partial', 'failed', 'cancelled')),
+        summary      TEXT NOT NULL DEFAULT '{}',
+        error        TEXT NOT NULL DEFAULT '',
+        created_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_batches_profile ON batches(profile_id, created_at);
+    CREATE TABLE IF NOT EXISTS batch_items (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        batch_id   INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+        position   INTEGER NOT NULL,
+        raw_text   TEXT NOT NULL DEFAULT '',
+        url        TEXT NOT NULL DEFAULT '',
+        dossier_id INTEGER REFERENCES dossiers(id) ON DELETE SET NULL,
+        status     TEXT NOT NULL DEFAULT 'pending'
+                   CHECK (status IN ('pending', 'running', 'ok', 'error', 'blocked', 'not_run')),
+        label      TEXT NOT NULL DEFAULT '',
+        risk_score REAL,
+        error      TEXT NOT NULL DEFAULT '',
+        group_id   INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_batch_items_batch ON batch_items(batch_id, position);
     """,
 ]
 

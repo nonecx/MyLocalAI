@@ -31,6 +31,16 @@
   "source_profile": {
     "min_refutes": 2
   },
+  "batch": {
+    "_comment": "材料批次（专业用户 A，阶段 2）：条目上限/总量/双预算/同源判定阈值",
+    "max_items": 8,
+    "max_total_chars": 64000,
+    "max_item_chars": 8000,
+    "item_deadline_s": 90,
+    "deadline_s": 900,
+    "similarity_threshold": 0.72,
+    "max_concurrent": 2
+  },
   "tool_allowlist": [
     "verify_claim", "analyze_speech", "check_heat", "compute_heat",
     "list_dossiers", "get_dossier", "recheck_dossier", "export_card",

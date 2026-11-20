@@ -159,6 +159,49 @@
         <p class="chat-dossier-hint muted">点开档案查看六章节：结论版本对比 · 证据批次 · 言论土壤 · 热度趋势 · 观点光谱 · 背景解读；可导出 Markdown。</p>
       </section>
 
+      <!-- 材料批次（专业用户 · 材料分析）：多条材料一次丢进去批量核查，看进度与汇总卡。
+           面板初始 hidden，由 batch.js 按当前档案角色显隐（active.role === "analyst" 才显示，
+           snapshot 为空时隐藏）；三种输入模式 text/file/urls，file 模式选中即上传解析。
+           所有 id 由 batch.js 接线，本文件只放骨架（同 settings 弹层的分工）。 -->
+      <section class="panel chat-batch-panel hidden" id="chatBatchPanel">
+        <div class="panel-head">
+          <h2>材料批次</h2>
+          <span class="count-chip">专业用户</span>
+        </div>
+        <div class="chat-batch-modes" role="group" aria-label="输入模式">
+          <button class="chat-batch-mode-btn active" type="button" data-batch-mode="text"
+            aria-pressed="true">文本</button>
+          <button class="chat-batch-mode-btn" type="button" data-batch-mode="file"
+            aria-pressed="false">文件</button>
+          <button class="chat-batch-mode-btn" type="button" data-batch-mode="urls"
+            aria-pressed="false">链接</button>
+        </div>
+        <div class="chat-batch-pane" data-batch-pane="text">
+          <textarea id="batchTextInput" class="chat-batch-textarea" rows="5"
+            placeholder="每行一条材料（空行自动忽略）；提交后按行拆成条目逐条核查，最后出汇总卡。"></textarea>
+        </div>
+        <div class="chat-batch-pane hidden" data-batch-pane="file">
+          <input type="file" id="batchFileInput" class="chat-batch-file-input"
+            accept=".txt,.md,.csv,.json" />
+          <p id="batchFileHint" class="muted chat-batch-file-hint">尚未选择文件（支持 .txt / .md / .csv / .json，选中即解析）。</p>
+        </div>
+        <div class="chat-batch-pane hidden" data-batch-pane="urls">
+          <textarea id="batchUrlInput" class="chat-batch-textarea" rows="5"
+            placeholder="每行一个 URL（仅 http/https，空行自动忽略）；提交后按行拆成条目逐条核查，最后出汇总卡。"></textarea>
+        </div>
+        <p id="batchError" class="chat-batch-error hidden" role="alert"></p>
+        <div class="chat-batch-actions">
+          <button id="batchStartBtn" class="btn-primary chat-batch-start" type="button">开始分析</button>
+          <button id="batchStopBtn" class="btn-ghost chat-batch-stop hidden" type="button">停止</button>
+        </div>
+        <div id="batchProgress" class="chat-batch-progress hidden" role="status" aria-live="polite">
+          <div class="chat-batch-progress-text"></div>
+          <div class="chat-batch-progress-bar"><i></i></div>
+        </div>
+        <ul id="batchList" class="chat-batch-list"></ul>
+        <div id="batchDetail" class="chat-batch-detail hidden"></div>
+      </section>
+
       <!-- 我的画像（L4）：三块只读聚合不再单开 Tab，点击即在消息流里出一张 insights 卡。
            数据全部来自你自己的档案史（零 LLM），空数据显示「暂无数据」。 -->
       <section class="panel chat-insights-panel" id="chatInsights">
@@ -249,5 +292,9 @@
   <!-- 档案工作区（多 Profile 分家）：切换器 + 管理弹层；chat.js 监听
        mylocalai:profile-changed 事件重载左栏（两者经 DOM 事件解耦，不互相 import） -->
   <script src="static/profiles.js"></script>
+  <!-- 材料批次面板（专业用户·材料分析）：晚于 profiles.js 加载，显隐依赖
+       window.ProfilesPanel.snapshot()；chat.js 只在 DOMContentLoaded 调一次
+       window.BatchPanel?.init()，其余经 mylocalai:profile-changed 事件驱动。 -->
+  <script src="static/batch.js"></script>
 </body>
 </html>

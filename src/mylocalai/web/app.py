@@ -50,6 +50,8 @@ from mylocalai.util.console_io import force_utf8_stdio  # noqa: E402
 from mylocalai.util.text_safety import has_surrogates, sanitize_text  # noqa: E402
 from mylocalai.web.privacy_api import router as privacy_router  # noqa: E402
 from mylocalai.web.profiles_api import router as profiles_router  # noqa: E402
+from mylocalai.web.batch_api import router as batch_router  # noqa: E402
+from mylocalai.web.materials_api import router as materials_router  # noqa: E402
 
 # 非 UTF-8 控制台（英文 Windows 的 cp1252 等）下，日志里的中文会抛 UnicodeEncodeError。
 force_utf8_stdio()
@@ -102,6 +104,8 @@ app = FastAPI(
 )
 app.include_router(privacy_router)
 app.include_router(profiles_router)
+app.include_router(batch_router)
+app.include_router(materials_router)
 
 
 def _active_profile_id() -> Optional[int]:

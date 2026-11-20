@@ -118,16 +118,17 @@ class SettingsUiStructureTest(unittest.TestCase):
         self.assertIn("模型", nav)
 
     def test_index_loads_settings_assets_in_order(self):
-        """settings.css / settings.js 被引入，且脚本顺序 shell → settings → cards → chat → profiles。"""
+        """settings.css / settings.js 被引入，且脚本顺序 shell → settings → cards → chat → profiles → batch。"""
         html = self.index
         self.assertIn('href="static/settings.css"', html)
         self.assertIn('src="static/settings.js"', html)
         self.assertLess(html.index('href="static/chat.css"'), html.index('href="static/settings.css"'),
                         "settings.css 应在 chat.css 之后引入（覆盖顺序稳定）")
         order = [html.index(f'src="static/{name}"')
-                 for name in ("shell.js", "settings.js", "cards.js", "chat.js", "profiles.js")]
+                 for name in ("shell.js", "settings.js", "cards.js", "chat.js",
+                              "profiles.js", "batch.js")]
         self.assertEqual(order, sorted(order),
-                         "脚本顺序应为 shell → settings → cards → chat → profiles")
+                         "脚本顺序应为 shell → settings → cards → chat → profiles → batch")
 
     def test_shell_only_binds_the_dialog(self):
         """shell.js 只做绑定：按钮 / 关闭按钮 / 点遮罩 / Esc 都接到 SettingsPanel。"""

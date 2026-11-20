@@ -45,8 +45,10 @@
 │   │   ├── attn_rules.json / deep_read_rules.json / society_issues.json / prompts.json
 │   │   └── README.md           关注度与深读的完整说明（公式、触发、护栏、隔离）
 │   ├── dossier/                档案库（SQLite 单文件 + WAL）
-│   │   ├── store.py            连接工厂、schema_version 顺序迁移（v4 含指纹表+话术标记表、v6 含 Profile 工作区）、档案域七表 + 会话域三表
+│   │   ├── store.py            连接工厂、schema_version 顺序迁移（v4 指纹表+话术标记表、v6 Profile 工作区、v7 材料批次）、档案域七表 + 会话域三表
 │   │   ├── profiles.py         Profile 工作区（多档案数据分家 + 角色，v6）
+│   │   ├── batches.py          材料批次存储（v7）
+│   │   ├── batch_summary.py    批次汇总纯函数（零 LLM，永不抛）
 │   │   ├── service.py          建档编排：结论卡片化落库、证据批次、recheck 版本化、六章节聚合与导出、初扫 markers 沉淀
 │   │   └── insights.py         参谋三聚合纯函数：话术模式库 / 信源画像 / 周报（零 LLM，永不抛）
 │   ├── assistant/              智能助手核心（对话 → 路由 → 工具 → 叙述 → 落库）
@@ -54,6 +56,7 @@
 │   │   ├── router.py           意图路由（chat_json + 封闭枚举 + 四层防护链，绝不猜）
 │   │   ├── registry.py         工具注册表（schema 校验、权限分级、成本/延迟元数据）
 │   │   ├── tools_verify.py / tools_heat.py / tools_memory.py / tools_chapters.py
+│   │   ├── tools_batch.py      材料批次编排（阶段 2：同源分组 + 逐条核查 + 双预算）
 │   │   ├── fingerprint.py      话术指纹纯函数（归一化/shingle/Jaccard——谣言库秒回的地基）
 │   │   ├── reminders.py        被动提醒纯函数（档案年龄/热度变化 → 一行提示）
 │   │   ├── context.py          上下文窗口构建器（12k 字符预算、裁剪与摘要）
@@ -63,9 +66,13 @@
 │   │   ├── prompts.json        人设与固定话术——改这里而非改代码
 │   │   └── assistant_rules.json  路由模型/上限/预算/指纹阈值/信源画像阈值/拒绝词表——改这里而非改代码
 │   ├── web/                    FastAPI 网站 + static/（src/mylocalai/web/app.py）
+│   │   ├── app.py              REST API 全貌（分析/关注度/对话/会话/档案/画像/Profile/批次）
+│   │   ├── profiles_api.py     Profile 工作区 CRUD + 激活（v6）
+│   │   ├── batch_api.py        材料批次 API + SSE 进度（v7）
+│   │   ├── materials_api.py    上传文件内存解析（txt/md/csv/json，不落盘）
 │   │   └── static/             单一对话页的全部界面：index.html + shell.js（file:// 引导/服务状态）
 │   │                           + chat.js/cards.js（会话、档案库、事件流与全部卡片渲染）+ chat.css
-│   │                           （单页化后 app.js 与 insights.js 已删除：工具模式、参谋 Tab 下线）
+│   │                           + profiles.js（档案切换器）+ batch.js（材料批次面板）
 │   ├── util/                   text_safety（代理项规整）/ console_io（stdio 规整）
 │   └── cli.py                  命令行入口（python -m mylocalai.cli）
 ├── my_website/                 启动器（start.bat / start.sh）与说明，实际代码在 src/mylocalai/web/
@@ -314,7 +321,7 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 1237 个用例（unittest discover 全量，2026-11-20 角色扩展阶段 1 后实测；
+离线套件共 1261 个用例（unittest discover 全量，2026-11-20 角色扩展阶段 2 后实测；
 **M4 起由 `tests.test_readme_counts` 自动校验此数字与 mock 闸门条数，改动后须同步回写**）：
 M1-M3 的全部回归（详见 git 历史），加上 M4 新增模块：
 **成本真实计数**（llm_client 进程级计数器：真实上游调用数 + usage tokens，缓存命中/
@@ -331,7 +338,11 @@ source_profile 注入：空画像逐位不变守卫、抬分端到端、装配�
 （结论卡 evidence_preview 前 5 条、言论土壤卡 report 完整报告）；
 加上角色扩展阶段 1 新增模块：**Profile 工作区**（v6 迁移与存量回填、CRUD/激活/删除
 保护、会话/档案/指纹/画像按 profile_id 分家、跨工作区 404 防护、layperson 结论卡
-简化、/api/profiles 与前端切换器前后端自洽）。
+简化、/api/profiles 与前端切换器前后端自洽）；
+加上角色扩展阶段 2 新增模块：**材料批次**（v7 batches/batch_items 存储、同源分组
+（assistant 层指纹，保守不并组）、逐条 RumorAgent 核查 + 自动建档、双预算与取消的
+诚实降级、汇总纯函数与 batch_summary 卡、/api/batch CRUD + SSE 进度 + 并发信号量、
+上传内存解析四格式、前端材料批次面板与前后端自洽）。
 另有 `tests/run_module_tests.py`（12 条内置用例全模块跑一遍并落盘）、
 `tests/smoke_api.py`（配置自检 + 连通性）。
 
@@ -485,6 +496,21 @@ DOSSIER_DB_PATH 可覆盖）。测试：`tests.test_mcp_assistant`（同核对�
   隐私 fail-closed 授权、路由四层防护链均不随角色放宽。
 - 测试：`tests.test_profiles`（迁移回填 / CRUD / 分家 / 跨区防护 / layperson 卡片 /
   Web API 全链）。
+
+### 专业用户 A · 材料批量分析（阶段 2）
+
+`analyst` 档案工作区左栏「材料批次」面板：多行文本（每行一条）/ 文件上传
+（txt/md/csv/json，内存解析不落盘）/ URL 列表（受控抓取，未授权记 blocked）三种输入，
+一次最多 8 条、双预算（条目 90s + 整批 900s）。逐条走 RumorAgent 全链路并自动建档；
+同源材料（指纹 Jaccard ≥ 0.72）分组呈现但**各自判定**；单条失败不阻断，预算用尽或
+取消的条目标 `not_run`（不把"没跑"显示成"没发现"）。
+
+- **接口**：`POST /api/batch`（202 + 后台跑）、`GET /api/batch`、`GET /api/batch/{id}`、
+  `GET /api/batch/{id}/stream`（SSE 进度）、`POST /api/materials/upload`；
+- **汇总卡**（`batch_summary`，零 LLM 纯函数）：状态计数 / 结论分布 / 疑似同源组 /
+  逐条结论与档案链接 / 降级清单；
+- **schema v7**：`batches` + `batch_items`（group_id 同源分组、status 六态）；
+- 测试：`tests.test_batch`（存储 / 分组 / 汇总 / 编排八场景 / Web API / 上传解析）。
 
 ## 参谋与洞察（2026-10-31，L4）
 
