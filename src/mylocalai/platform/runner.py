@@ -18,6 +18,8 @@
 
 依赖方向：platform → {retrieval, attention, rumor, dossier, core}；引擎与档案
 服务一律经构造函数注入（测试可换 stub），本模块自身不 import web/assistant。
+领域线程（platform.domains：监控词 → 领域判定与检索提示）同样可注入、缺省
+惰性 import；模块缺失/解析失败 → 无领域模式（domain=""）继续巡检，不静默。
 """
 
 from __future__ import annotations
@@ -39,6 +41,10 @@ __all__ = ["PlatformRunner", "AGENT_MAX_CHARS"]
 #: 深查喂给 RumorAgent 的文本上限（标题+摘要，4000 足够，别烧配额）。
 AGENT_MAX_CHARS = 4000
 
+#: domains 注入点"未设置"哨兵（None 是合法注入值=显式不要领域模式，
+#: 用哨兵区分"没传"与"传了 None"）。
+_DOMAINS_UNSET = object()
+
 
 class PlatformRunner:
     """一次巡检的编排门面。所有重依赖可注入；缺省惰性装配真实引擎。"""
@@ -48,7 +54,8 @@ class PlatformRunner:
                  privacy: Optional[PrivacyPreferences] = None,
                  dossiers: Optional[DossierService] = None,
                  providers: Optional[List[Any]] = None,
-                 agent: Any = None) -> None:
+                 agent: Any = None,
+                 domains: Any = None) -> None:
         from mylocalai.platform.rules import load_rules
         self.store = store or PlatformStore()
         loaded, self.rule_warnings = load_rules()
@@ -56,13 +63,30 @@ class PlatformRunner:
         self.privacy = privacy or load_preferences()
         self.dossiers = dossiers or DossierService(privacy=self.privacy)
         self._agent = agent
+        # 领域线程（platform.domains）：注入优先；未注入走惰性 import property。
+        self._domains = _DOMAINS_UNSET if domains is None else domains
+        # store 是否已收 topic_domain 落库字段（数据层 v7 落地前的过渡检测：
+        # 未落地时不传该字段，巡检其余流程不变；落地后自动带上）。
+        self._feed_topic_domain = _feed_store_supports_topic_domain(self.store)
         if providers is not None:
             self.providers = list(providers)
         else:
-            self.providers, w = build_providers(self.rules)
+            self.providers, w = build_providers(self.rules, store=self.store)
             self.rule_warnings.extend(w)
 
     # ---- 引擎惰性装配（与 web 层 get_rumor_agent 同口径）----
+
+    @property
+    def domains(self) -> Any:
+        """领域模块（platform.domains）：None 时惰性 import 并缓存；
+        import 失败 → None，runner 降级为无领域模式（不重试、不抛）。"""
+        if self._domains is _DOMAINS_UNSET:
+            try:
+                from mylocalai.platform import domains as d
+                self._domains = d
+            except Exception:  # noqa: BLE001  领域模块缺失/损坏 → 无领域模式
+                self._domains = None
+        return self._domains
 
     def _get_agent(self) -> Any:
         if self._agent is None:
@@ -76,6 +100,17 @@ class PlatformRunner:
                 },
             )
         return self._agent
+
+    def _domain_hints(self, domain: str) -> Optional[List[str]]:
+        """领域 → 检索提示（权威站点清单，喂 RumorAgent 的 domain_hints）。
+        无领域/领域模块不可用/取提示失败/提示为空 → None（不追加定向检索轮）。"""
+        if not domain or self.domains is None:
+            return None
+        try:
+            hints = self.domains.domain_hints(domain)
+        except Exception:  # noqa: BLE001  提示缺失不该让深查失败
+            return None
+        return list(hints) if hints else None
 
     # ---- 监控词解析 ----
 
@@ -181,9 +216,13 @@ class PlatformRunner:
                     cancel_check: Optional[Callable[[], bool]]) -> bool:
         """处理一条监控词。返回 True 表示处理途中被取消（已完成的条目已保留）。"""
         k = max(1, int(self.rules.get("max_candidates_per_query", 8)))
+        # 领域解析在候选循环前：读监控词整行（用户手设领域 + 推断缓存），
+        # 经 domains.resolve_domain 走「user > 缓存(TTL) > 文本分类 > 历史 > none」链。
+        row = self._watch_query_row(query_id)
+        domain, domain_source = self._resolve_domain(query, row, summary)
         raw: List[FeedCandidate] = []
         for provider in self.providers:
-            res = provider.discover(query, k)
+            res = provider.discover(query, k, query_id=query_id)
             if res.degraded:
                 summary["counters"]["degraded"] += 1
                 summary["warnings"].append(
@@ -206,7 +245,9 @@ class PlatformRunner:
         breadth = _breadth_stats(kept)
         summary["queries"].append({"id": query_id, "query": query, "e": e_score,
                                    "quality": heat.get("quality", "missing"),
-                                   "candidates": len(kept)})
+                                   "candidates": len(kept),
+                                   "domain": domain,
+                                   "domain_source": domain_source})
 
         screen_e = float(self.rules.get("screen", {}).get("heat_screen_e", 40))
         for cand in kept:
@@ -220,20 +261,61 @@ class PlatformRunner:
                     f"监控词「{query[:40]}」在巡检中途被删除，其余候选已跳过")
                 return False
             self._process_candidate(query_id, cand, summary, persist, e_score,
-                                    e_prev, growth, breadth, screen_e, state)
+                                    e_prev, growth, breadth, screen_e, state,
+                                    domain, domain_source)
         return False
+
+    def _watch_query_row(self, query_id: int) -> Optional[Dict[str, Any]]:
+        """读监控词整行（用户手设领域 + 推断缓存）。store 无该方法/读失败 → None
+        （按"无领域信息"继续，领域链自然落到后续环节）。"""
+        try:
+            getter = getattr(self.store, "get_watch_query", None)
+            if getter is None:
+                return None
+            row = getter(int(query_id))
+            return dict(row) if isinstance(row, dict) else None
+        except Exception:  # noqa: BLE001  读行失败不拖垮巡检
+            return None
+
+    def _resolve_domain(self, query: str, row: Optional[Dict[str, Any]],
+                        summary: Dict[str, Any]) -> Tuple[str, str]:
+        """监控词 → (领域, 来源)。领域模块不可用/解析失败 → ("", "none")，
+        runner 降级为无领域模式继续巡检（不静默：失败留 warning）。"""
+        d = self.domains
+        if d is None:
+            return "", "none"
+        try:
+            domain_rules = self.rules.get("domain") or {}
+            out = d.resolve_domain(
+                str((row or {}).get("domain") or ""), query, row or {}, self.store,
+                None,
+                now_iso=_now_iso(),
+                ttl_days=float(domain_rules.get("infer_ttl_days", 30)),
+                history_min=int(domain_rules.get("history_min", 2)))
+            if not (isinstance(out, tuple) and len(out) == 2):
+                return "", "none"
+            return str(out[0] or ""), str(out[1] or "none")
+        except Exception as exc:  # noqa: BLE001  领域解析失败 → 无领域模式
+            summary["warnings"].append(
+                f"领域解析失败（{query[:40]}）：{type(exc).__name__}: {exc}")
+            return "", "none"
 
     def _process_candidate(self, query_id: int, cand: FeedCandidate,
                            summary: Dict[str, Any], persist: bool,
                            e_score: Optional[float], e_prev: Optional[float],
                            growth: float, breadth: Dict[str, int], screen_e: float,
-                           state: Dict[str, int]) -> None:
+                           state: Dict[str, int], domain: str = "",
+                           domain_source: str = "") -> None:
         entry_id: Optional[int] = None
         if persist:
+            topic_kwargs: Dict[str, Any] = {}
+            if self._feed_topic_domain:
+                topic_kwargs = {"topic_domain": domain,
+                                "topic_domain_source": domain_source}
             entry_id = self.store.add_feed_entry(
                 query_id=query_id, title=cand.title, url=cand.url,
                 snippet=cand.snippet, domain=cand.domain, domain_tier=cand.domain_tier,
-                discovered_at=cand.published_at, e_score=e_score)
+                discovered_at=cand.published_at, e_score=e_score, **topic_kwargs)
             if entry_id is None:
                 summary["counters"]["deduped"] += 1     # URL 已在库：跨巡检去重
                 return
@@ -248,7 +330,7 @@ class PlatformRunner:
         rumor: Optional[Dict[str, Any]] = None
         status = "screened"
         if needs_deep and state["verify_left"] > 0 and _deadline_left() > 0:
-            status, rumor = self._deep_verify(cand, summary, state)
+            status, rumor = self._deep_verify(cand, summary, state, domain)
 
         risk = assess_spread_risk(
             heat=e_score if e_score is not None else 0.0,
@@ -257,6 +339,7 @@ class PlatformRunner:
 
         entry = {"query_id": query_id, "title": cand.title, "url": cand.url,
                  "domain": cand.domain, "domain_tier": cand.domain_tier,
+                 "topic_domain": domain, "topic_domain_source": domain_source,
                  "discovered_at": cand.published_at, "e_score": e_score,
                  "e_prev": e_prev, "risk_level": risk["level"],
                  "risk_reasons": risk["reasons"], "status": status,
@@ -268,18 +351,21 @@ class PlatformRunner:
                 entry_id, status=status, risk_level=risk["level"],
                 risk_reasons=risk["reasons"],
                 verdict_label=entry["verdict_label"],
-                risk_score=entry["risk_score"], e_prev=e_prev)
+                risk_score=entry["risk_score"], e_prev=e_prev,
+                topic_domain=domain, topic_domain_source=domain_source)
             entry["id"] = entry_id
         summary["entries"].append(entry)
 
     def _deep_verify(self, cand: FeedCandidate, summary: Dict[str, Any],
-                     state: Dict[str, int]) -> Tuple[str, Optional[Dict[str, Any]]]:
+                     state: Dict[str, int],
+                     domain: str = "") -> Tuple[str, Optional[Dict[str, Any]]]:
         """阶段二：RumorAgent 全链路 + 建档。失败降级不抛，不编 verdict。"""
         state["verify_left"] = max(0, state["verify_left"] - 1)   # 预算先扣后跑
         text = f"{cand.title}\n{cand.snippet}".strip()[:AGENT_MAX_CHARS]
+        hints = self._domain_hints(domain)
         t0 = time.perf_counter()
         try:
-            result = self._get_agent().analyze(text)
+            result = self._get_agent().analyze(text, domain_hints=hints)
         except Exception as exc:  # noqa: BLE001  引擎异常 → 候选保留、状态如实
             summary["counters"]["degraded"] += 1
             summary["warnings"].append(
@@ -331,6 +417,24 @@ class PlatformRunner:
 
 
 # ---- 模块级纯助手 ----
+
+
+def _now_iso() -> str:
+    """本地时间戳（ISO 秒级、带偏移；与 store._now 同时格式）。
+    供领域解析 now_iso 用：T2 的 TTL 比较吃 fromisoformat，带偏移本地/UTC 皆可。"""
+    from datetime import datetime
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _feed_store_supports_topic_domain(store: Any) -> bool:
+    """store.add_feed_entry 是否已收 topic_domain 参数（数据层 v7 落地检测）。
+    未落地时不传该字段、巡检其余流程不变；落地后自动带上（并行集成过渡用）。"""
+    try:
+        import inspect
+        params = inspect.signature(store.add_feed_entry).parameters
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return "topic_domain" in params
 
 
 def _lazy(module_path: str, attr: str) -> Callable[..., Any]:
