@@ -324,7 +324,8 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 1354 个用例（unittest discover 全量，2026-11-20 角色扩展 + 取证三技能合并后实测；
+离线套件共 1365 个用例（unittest discover 全量，2026-11-20 角色扩展第二轮（Skill 体系与
+提示词分层）后实测；
 **M4 起由 `tests.test_readme_counts` 自动校验此数字与 mock 闸门条数，改动后须同步回写**）：
 M1-M3 的全部回归（详见 git 历史），加上 M4 新增模块：
 **成本真实计数**（llm_client 进程级计数器：真实上游调用数 + usage tokens，缓存命中/
@@ -342,6 +343,10 @@ source_profile 注入：空画像逐位不变守卫、抬分端到端、装配�
 加上角色扩展阶段 1 新增模块：**Profile 工作区**（v6 迁移与存量回填、CRUD/激活/删除
 保护、会话/档案/指纹/画像按 profile_id 分家、跨工作区 404 防护、layperson 结论卡
 简化、/api/profiles 与前端切换器前后端自洽）；
+加上角色扩展第二轮新增模块：**Skill 体系与提示词分层**（四个旧能力 SKILL 的角色化
+升级与悬空引用治理、material_analysis/domain_monitoring 两份复合能力 SKILL、
+prompts.json roles 段与 loop._prompts_for_role 合并注入、full 逐位不变守卫、
+角色↔能力↔Skill 映射对拍，`tests.test_role_prompts` 11 例）；
 加上角色扩展阶段 2 新增模块：**材料批次**（v7 batches/batch_items 存储、同源分组
 （assistant 层指纹，保守不并组）、逐条 RumorAgent 核查 + 自动建档、双预算与取消的
 诚实降级、汇总纯函数与 batch_summary 卡、/api/batch CRUD + SSE 进度 + 并发信号量、
@@ -453,6 +458,16 @@ CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
    注意：读网页需要"外部取页"授权（`data/privacy_preferences.json` 的
    `external_processing_providers`）；只开检索授权时选站与检索仍可用，读页会如实标注
    未授权而不是假装搜过。
+- **角色 Skill 体系与提示词分层**（2026-11-20 角色扩展第二轮）：四个旧能力 SKILL 升级
+  适配三角色现状（各加「角色与工作区」一节，19 处悬空《总览》引用改写为库内文档路径），
+  并按复合能力规格（§3.2）新增两份能力 SKILL：**material_analysis（材料分析）** 与
+  **domain_monitoring（领域监测）**——分别是 claim-checking 的批量复合与
+  topic-understanding 的持续复合，都不占对话路由枚举，通道是面板 + REST。
+  提示词按角色分层注入（`assistant/prompts.json` 的 `roles` 段 + `loop._prompts_for_role`）：
+  `*_addon` 键追加到 router/narrate 的基座提示词，`full`/未知角色逐位不变；
+  **判定语义与角色无关**（RumorAgent 引擎提示词保持共享，同一说法在任何工作区同结论）。
+  角色 ↔ 能力 ↔ Skill ↔ 通道的映射总表与防漂移测试见
+  `docs/用户角色与Profile规格-v1.0.md` §8 与 `tests/test_role_prompts.py`。
 - **MCP 同期交付**：见下节。
 
 ## 记忆与完整性（2026-10-31，M3）

@@ -105,7 +105,52 @@ dossiers.profile_id INTEGER         -- v6 新增列 + 索引
 | 6 | /api/profiles 与前端切换器前后端自洽 | test_website_chat TestProfilesFrontendConsistency |
 | 7 | 全量离线套件 + CI 绿（除既知存量失败外无新增） | scripts\ci.cmd |
 
-## 8. 已知取舍
+## 8. Skill 与提示词分层（2026-11-20 角色扩展第二轮）
+
+### 8.1 合并记录
+
+2026-11-20 将并行分支的取证三技能（`collect_evidence` 只读取证流水线）合并进本分支
+（合并提交 56f80f8）：冲突仅 README.md 与 cards.js 两处（均为“两边各加各的”，取并集）；
+loop.py 自动合并且经 review——角色扩展的 `_session_profile`/`_present_for_role` 与
+取证三技能的 `mixed_choice` 闸/collect_evidence 接线互不冲突。合并后既知存量失败
+（test_insights_api 的卡片字段契约）因对方补齐 API 字段而自然修复。
+
+### 8.2 角色 ↔ 能力 ↔ Skill ↔ 通道 映射总表
+
+本表是"角色体系"的事实总览（替代此前不在库内的《项目工作流与 Skill 总览》引用；
+四个旧能力 SKILL 的悬空引用已改写为库内文档路径，由 test_role_prompts 守护）。
+
+| 角色 | 主能力（capability id） | 能力 SKILL（capabilities/） | 提示词 posture（prompts.json roles 段） | 通道 |
+| --- | --- | --- | --- | --- |
+| layperson 普通用户 | claim-checking（**呈现档位**：简化卡、无数值） | claim_checking/SKILL.md | roles.layperson（router 偏向 verify_claim；narrate 人话结论禁数值） | 对话 |
+| analyst 专业·材料分析 | material-analysis（claim-checking 批量复合）+ evidence-research | material_analysis/SKILL.md、evidence_research/SKILL.md | roles.analyst（识别"批量/我收集的材料"→ 导流面板，不拼工具） | 材料批次面板 + REST |
+| monitor 专业·领域监测 | domain-monitoring（topic-understanding 持续复合） | domain_monitoring/SKILL.md、topic_understanding/SKILL.md | roles.monitor（识别"盯着某领域"→ 导流面板；只述变化） | 领域监测面板 + REST + 调度 |
+| full 全部能力 | 四能力全量 | 四份既有 SKILL | 不合并（roles.full = {}） | 对话 |
+
+横向能力（speech-understanding 言论理解）与对话跟进机制不按角色裁剪，全部工作区可用。
+
+### 8.3 提示词分层注入规则（loop._prompts_for_role）
+
+- `roles.<role>` 段中 `*_addon` 键 → **追加**到基座同名键之后；其余键 → 覆盖；
+  `label`/`mission` 等新键直接可读；`full` 与未知角色 → 返回基座**原对象**（逐位不变）。
+- 注入面只有两处：**router system**（路由偏向 + 面板导流）与 **narrate system**
+  （叙述 posture）。`RumorAgent` 引擎 SYSTEM_PROMPT 保持共享——**判定语义与角色
+  无关**（同一说法在任何工作区同结论，项目铁律）。
+- addon 长度 ≤200 字（test_role_prompts 锁定上限，防提示词膨胀）。
+
+### 8.4 防漂移测试（tests/test_role_prompts.py）
+
+1. 合并规则：addon 追加/覆盖/full 逐位不变/未知角色回落/roles 段缺失；
+2. loop 集成：三角色 router/narrate system 各含自家导流与 posture；full 与未知
+   角色逐位一致且 narrate 与基座相等；
+3. 导流口径：analyst/monitor 附加段含"材料批次/领域监测"面板导流与"不拼工具/
+   不新开 action"指令；
+4. SKILL.md lint：六份能力文档头字段（能力 id/版本/一句话目标/文档性质）与必备
+   章节齐全、能力 id 与目录名一致、**无悬空《总览》引用**；
+5. 对拍：prompts.json 的 roles 键 ⊆ `dossier/profiles.py` 的 ROLES（`_` 开头为
+   注释键）；capabilities 目录集合 == 六个预期能力。
+
+## 9. 已知取舍
 
 - **信源画像抬分（evidence lift）暂按全库聚合**：verify 服务在 `_ServiceBox`
   装配、无会话上下文，且测试 stub 的 services 签名已锁定。单用户前提下可接受；
