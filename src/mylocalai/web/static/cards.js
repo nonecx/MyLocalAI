@@ -544,8 +544,10 @@
      warnings|feed|scans}。口径：传播风险分级只描述传播风险、不判定真假；
      热度是代理/估计值；只读零 LLM。放在画像区之外（test_insights_api 的
      渲染区切片以「新事实核查答案」为界，平台卡字段不该混进画像自洽断言）。 */
-  const PLATFORM_LEVEL_CLS = { notice: "gray", suspect: "amber", high: "red", urgent: "red" };
+  const PLATFORM_LEVEL_CLS = { notice: "gray", suspect: "amber", high: "red", urgent: "critical" };
 
+  /* 方案 G 轻量化：条目只有「档位徽章 + 标题 + 单行 meta（E / 结论 / 发现时间）」。
+     风险理由链与档案号属于重信息，不进对话卡（要看细节回平台页）。 */
   function renderPlatformEntry(e) {
     e = e || {};
     const cls = PLATFORM_LEVEL_CLS[e.risk_level] || "gray";
@@ -553,16 +555,13 @@
     const verdict = e.verdict_label
       ? `${escapeHtml(e.verdict_label)}${e.risk_score !== null && e.risk_score !== undefined ? `（${Number(e.risk_score)}）` : ""}`
       : "未深查";
-    const reasons = Array.isArray(e.risk_reasons) ? e.risk_reasons : [];
-    const dossier = e.dossier_id ? `<span class="badge gray">档案 #${Number(e.dossier_id)}</span>` : "";
+    const when = String(e.discovered_at || "").replace("T", " ").slice(0, 19) || "未知";
     return `<li class="chat-platform-entry">
       <div class="chat-platform-entry-head">
         <span class="badge ${cls}">${escapeHtml(e.risk_label || e.risk_level || "?")}</span>
         <span class="chat-platform-entry-title">${escapeHtml(String(e.title || "").slice(0, 60))}</span>
-        ${dossier}
       </div>
-      <div class="chat-platform-entry-meta">${eVal}（代理/估计） · 结论：${verdict}</div>
-      ${reasons.length ? `<div class="chat-platform-entry-reasons">${reasons.map(escapeHtml).join("；")}</div>` : ""}
+      <div class="chat-platform-entry-meta">${eVal} · 结论：${verdict} · ${escapeHtml(when)}</div>
     </li>`;
   }
 
@@ -579,7 +578,7 @@
           <li><span class="badge gray">${escapeHtml(s.status || "?")}</span>
           <span class="chat-platform-entry-meta">${escapeHtml(String(s.started_at || "").replace("T", " ").slice(0, 19))}</span>
           <span class="chat-platform-entry-meta">候选 ${Number(s.candidates) || 0} · 深查 ${Number(s.verified) || 0} · 降级 ${Number(s.degraded) || 0}</span>
-          ${s.error ? `<div class="chat-platform-entry-reasons">${escapeHtml(s.error)}</div>` : ""}</li>`).join("")}</ul>`
+          ${s.error ? `<div class="chat-platform-entry-meta">${escapeHtml(s.error)}</div>` : ""}</li>`).join("")}</ul>`
         : '<p class="chat-insight-empty">暂无巡检记录</p>';
     } else {
       const rows = Array.isArray(card[kind]) ? card[kind] : [];
