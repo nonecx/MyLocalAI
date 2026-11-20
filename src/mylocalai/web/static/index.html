@@ -6,6 +6,8 @@
   <title>网络言论智能分析系统</title>
   <link rel="stylesheet" href="static/style.css" />
   <link rel="stylesheet" href="static/chat.css" />
+  <!-- 设置弹层（模型管理）样式：只新增 settings-* 类，复用 style.css 的 :root 令牌 -->
+  <link rel="stylesheet" href="static/settings.css" />
 </head>
 <body>
   <header class="site-header">
@@ -24,6 +26,9 @@
     </div>
     <div class="header-actions">
       <span id="apiStatus" class="status-chip checking">服务检查中…</span>
+      <!-- 设置入口：放在「关于」左边（规格 §4.1）；弹层开合由 shell.js 绑定到 SettingsPanel -->
+      <button id="settingsBtn" class="btn-ghost settings-open-btn" type="button"
+        aria-haspopup="dialog" aria-controls="settingsDialog" aria-expanded="false">设置</button>
       <button id="aboutBtn" class="btn-ghost about-open-btn" type="button"
         aria-haspopup="dialog" aria-controls="aboutDialog">关于</button>
     </div>
@@ -48,6 +53,36 @@
         <li>「我的画像」与「算热度」都是零成本只读/纯公式计算，不调用大模型</li>
         <li>接口文档：<a href="/docs" target="_blank" rel="noopener noreferrer">/docs</a></li>
       </ul>
+    </div>
+  </div>
+
+  <!-- 设置弹层（模型管理）：骨架只放容器，内容由 settings.js 渲染；
+       关闭途径三条（关闭按钮 / 点遮罩 / Esc）与焦点进出在 shell.js + settings.js 里。
+       左栏导航默认选中「模型」；「隐私与授权」本期只给说明与跳转。 -->
+  <div id="settingsDialog" class="settings-dialog hidden" role="dialog" aria-modal="true"
+    aria-labelledby="settingsTitle">
+    <div class="settings-dialog-card">
+      <div class="settings-head">
+        <div>
+          <h2 id="settingsTitle">设置</h2>
+          <p>模型与提供方配置写在 <code>data/models.json</code>，密钥单独存本机文件，接口不回明文。</p>
+        </div>
+        <button id="settingsCloseBtn" class="btn-ghost settings-close-btn" type="button"
+          aria-label="关闭设置">关闭</button>
+      </div>
+      <div class="settings-body">
+        <nav id="settingsNav" class="settings-nav" aria-label="设置分组">
+          <p class="settings-nav-title">设置分组</p>
+          <button class="settings-nav-item active" type="button" data-settings-tab="models"
+            aria-current="page">模型</button>
+          <button class="settings-nav-item" type="button" data-settings-tab="privacy">隐私与授权</button>
+        </nav>
+        <div class="settings-main">
+          <!-- 状态区：写操作结果与后端 detail 原文都显示在这里（aria-live 让读屏器播报） -->
+          <div id="settingsStatus" class="settings-status hidden" role="status" aria-live="polite"></div>
+          <div id="settingsPane" class="settings-pane"></div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -160,6 +195,8 @@
   </footer>
 
   <script src="static/shell.js"></script>
+  <!-- 设置弹层：紧接 shell.js（外壳只做开合绑定，面板逻辑与渲染全在 settings.js） -->
+  <script src="static/settings.js"></script>
   <script src="static/cards.js"></script>
   <script src="static/chat.js"></script>
 </body>

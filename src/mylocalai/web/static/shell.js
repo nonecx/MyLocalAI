@@ -3,8 +3,9 @@
    原 app.js 只保留两件与"页面能不能用"有关的事：
      1) file:// 双击打开时的启动引导（否则用户看到的是一片无数据的裸页面）；
      2) GET /api/health 点亮顶栏服务状态 chip（id=apiStatus）。
-   另外承担顶栏「关于」弹层的开合——它属于页面外壳交互，不属于对话业务，
-   因此不塞进 chat.js（chat.js 只处理消息流与 SSE）。
+   另外承担顶栏「关于」与「设置」两个弹层的开合——它们属于页面外壳交互，
+   不属于对话业务，因此不塞进 chat.js（chat.js 只处理消息流与 SSE）；
+   设置面板的内容与状态在 settings.js（window.SettingsPanel），这里只做绑定。
    工具模式（分析页）与参谋 Tab 已合并进对话单页，相关逻辑随之删除。
    ============================================================ */
 "use strict";
@@ -82,8 +83,48 @@
     });
   }
 
+  /* ---------- 顶栏「设置」弹层 ----------
+     设置面板的内容、渲染与开合状态都属于 settings.js（它才知道面板里画了什么），
+     这里只照 bindAbout 的写法把三条关闭途径和顶栏按钮接上去：
+     按钮 / 关闭按钮 / 点遮罩 / Esc。故意不在这里碰 #settingsPane，
+     免得"外壳"和"面板"两处同时维护同一份状态。 */
+  function bindSettings() {
+    const btn = $("#settingsBtn");
+    const dialog = $("#settingsDialog");
+    const close = $("#settingsCloseBtn");
+    if (!btn || !dialog) return;
+    /* 每次都从 window 上取：脚本顺序变化时不会绑到一个还不存在的对象 */
+    const panel = () => window.SettingsPanel;
+    btn.setAttribute("aria-expanded", "false");
+
+    btn.addEventListener("click", () => {
+      const api = panel();
+      if (!api) return;
+      if (api.isOpen()) api.close();
+      else api.open();
+    });
+    if (close) {
+      close.addEventListener("click", () => {
+        const api = panel();
+        if (api) api.close();
+      });
+    }
+    /* 点遮罩空白处关闭（点卡片本体不关），与 aboutDialog 一致 */
+    dialog.addEventListener("click", (e) => {
+      if (e.target !== dialog) return;
+      const api = panel();
+      if (api) api.close();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape") return;
+      const api = panel();
+      if (api && api.isOpen()) api.close();
+    });
+  }
+
   document.addEventListener("DOMContentLoaded", () => {
     checkHealth();
     bindAbout();
+    bindSettings();
   });
 })();
