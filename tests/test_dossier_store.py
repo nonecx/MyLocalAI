@@ -244,11 +244,11 @@ class TestMarkersStore(unittest.TestCase):
     def test_fresh_migrate_reaches_current_schema_with_markers_table(self):
         """全新库 migrate：应用全部迁移段、schema_migrations 记到当前版本、
         dossier_markers 表与唯一索引都在（v4 建表，v5 追加保留期列，v6 建平台域
-        三表，当前 6）。"""
+        三表，v7 加信息源/领域列，当前 7）。"""
         conn = connect(self.db)
         try:
             self.assertEqual(migrate(conn), SCHEMA_VERSION)
-            self.assertEqual(SCHEMA_VERSION, 6)
+            self.assertEqual(SCHEMA_VERSION, 7)
             self.assertEqual(
                 conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0],
                 SCHEMA_VERSION)
@@ -263,7 +263,7 @@ class TestMarkersStore(unittest.TestCase):
 
     def test_upgrade_from_v3_keeps_history(self):
         """v3 老库升级路径：手工只跑 MIGRATIONS[0:3] 建库、登记版本 1-3（真实 v3 库
-        的 schema_migrations 状态）并写入历史数据，再 migrate 补跑 v4+v5+v6 三段——
+        的 schema_migrations 状态）并写入历史数据，再 migrate 补跑 v4+v5+v6+v7 四段——
         历史档案与结论原样保留。"""
         conn = connect(self.db)
         try:
@@ -283,7 +283,7 @@ class TestMarkersStore(unittest.TestCase):
             conn.execute(
                 "INSERT INTO conclusions (dossier_id, version, label, created_at)"
                 " VALUES (?, 1, '疑似谣言', '2026-10-01T08:00:00+08:00')", (did,))
-            self.assertEqual(migrate(conn), 3)      # 补跑 v4 + v5 + v6
+            self.assertEqual(migrate(conn), 4)      # 补跑 v4 + v5 + v6 + v7
             self.assertEqual(
                 conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0],
                 SCHEMA_VERSION)

@@ -1,0 +1,90 @@
+{
+  "_comment": "平台领域表（platform 包）：领域 id 与 src/mylocalai/assistant/skills/taxonomy.json 对齐，便于未来统一；定义/示例同源。search_hints 是「检索提示」，不是权威认定——它只决定定向补搜时优先看哪些站点，某条资料可不可信仍由证据链（来源分级 + 立场判定）负责。编订依据：src/mylocalai/config/sources_registry.json 的 official_sites（cctv.com/xinhuanet.com/news.cn/cnr.cn/people.com.cn/people.cn）＋ 常识性权威域名（nhc.gov.cn 卫健委、chinacdc.cn 疾控、samr.gov.cn 市监、piyao.org.cn 联合辟谣、12377.cn 网信办、moe.gov.cn 教育部、mem.gov.cn 应急部、mee.gov.cn 生态环境部、gov.cn 中央政府网、china.com.cn 中国网、cas.cn 中科院）。other 不给定向提示：拿不准的领域硬给站点只会稀释检索。",
+  "version": 1,
+  "domains": [
+    {
+      "id": "public_health",
+      "name": "公共卫生",
+      "definition": "疾病预防、疫苗接种、医疗服务、公共卫生政策与健康类传言。",
+      "examples": ["疫苗", "传染病", "疫情防控", "医保", "慢性病"],
+      "search_hints": ["nhc.gov.cn", "chinacdc.cn", "piyao.org.cn"]
+    },
+    {
+      "id": "food_safety",
+      "name": "食品安全",
+      "definition": "食品生产、流通、餐饮与食品添加相关的安全传言与监管信息。",
+      "examples": ["食品添加剂", "隔夜菜", "农药残留", "外卖", "保健品", "餐饮门店"],
+      "search_hints": ["samr.gov.cn", "piyao.org.cn", "gov.cn"]
+    },
+    {
+      "id": "technology",
+      "name": "科技",
+      "definition": "数码产品、通信、人工智能、互联网服务与科学常识类传言。",
+      "examples": ["5G", "辐射", "人工智能", "手机", "充电", "基站"],
+      "search_hints": ["cas.cn", "gov.cn", "piyao.org.cn"]
+    },
+    {
+      "id": "finance",
+      "name": "财经",
+      "definition": "金融市场、投资理财、企业经营、税收与价格类信息。",
+      "examples": ["股市", "理财", "加密货币", "汇率", "退税", "理财产品"],
+      "search_hints": ["gov.cn", "cctv.com", "xinhuanet.com"]
+    },
+    {
+      "id": "policy_law",
+      "name": "政策法规",
+      "definition": "法律法规、政府规章、司法案件与公共政策类信息。",
+      "examples": ["新规", "处罚", "拆迁", "社保", "判决", "限行"],
+      "search_hints": ["gov.cn", "people.com.cn", "12377.cn"]
+    },
+    {
+      "id": "education",
+      "name": "教育",
+      "definition": "招生考试、学校管理、教师与学生、教育培训类信息。",
+      "examples": ["高考", "学区", "双减", "研学", "录取", "师德"],
+      "search_hints": ["moe.gov.cn", "gov.cn", "people.com.cn"]
+    },
+    {
+      "id": "social_events",
+      "name": "社会事件",
+      "definition": "突发事件、事故、治安与公共安全类信息。",
+      "examples": ["事故", "火灾", "坠楼", "走失", "冲突", "救援"],
+      "search_hints": ["gov.cn", "cctv.com", "mem.gov.cn"]
+    },
+    {
+      "id": "environment",
+      "name": "环境",
+      "definition": "环境污染、生态保护、气象与自然灾害类信息。",
+      "examples": ["雾霾", "水质", "地震", "洪水", "排污", "高温"],
+      "search_hints": ["mee.gov.cn", "gov.cn", "xinhuanet.com"]
+    },
+    {
+      "id": "history",
+      "name": "历史",
+      "definition": "历史事件、人物、文物与史料考据类信息。",
+      "examples": ["文物", "战役", "古籍", "考古", "史料", "纪念日"],
+      "search_hints": ["people.com.cn", "china.com.cn", "gov.cn"]
+    },
+    {
+      "id": "international",
+      "name": "国际时事",
+      "definition": "国际关系、外国政经、地区冲突与国际组织类信息。",
+      "examples": ["大选", "制裁", "峰会", "停火", "关税", "联合国"],
+      "search_hints": ["xinhuanet.com", "cctv.com", "people.com.cn"]
+    },
+    {
+      "id": "celebrity_entertainment",
+      "name": "名人娱乐",
+      "definition": "公众人物、影视综艺、体育与娱乐产业类信息。",
+      "examples": ["票房", "退役", "恋情", "综艺", "赛事", "代言"],
+      "search_hints": ["people.com.cn", "xinhuanet.com", "piyao.org.cn"]
+    },
+    {
+      "id": "other",
+      "name": "其他",
+      "definition": "无法归入上述任一领域的杂项；模型拿不准时用本项，并说明缺口。",
+      "examples": ["生活常识", "宠物", "天气", "出行", "消费", "民俗"],
+      "search_hints": []
+    }
+  ]
+}

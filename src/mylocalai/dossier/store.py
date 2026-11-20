@@ -26,7 +26,7 @@ from typing import Any, Dict, Iterable, List, Optional
 __all__ = ["SCHEMA_VERSION", "DEFAULT_DB_PATH", "connect", "migrate",
            "DossierStore", "default_db_path"]
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 #: 顺序迁移：索引 i 的脚本把库从版本 i 升到 i+1。永不修改已发布的条目，只允许追加。
 MIGRATIONS: List[str] = [
@@ -251,6 +251,39 @@ MIGRATIONS: List[str] = [
     CREATE INDEX IF NOT EXISTS idx_feed_query ON feed_entries(query_id, id);
     CREATE INDEX IF NOT EXISTS idx_feed_risk ON feed_entries(risk_level, id);
     CREATE INDEX IF NOT EXISTS idx_feed_expiry ON feed_entries(result_expires_at);
+    """,
+    # v7: 平台"用户自建信息源" + 监控词领域 + 信息流领域。
+    # patrol_sources 是用户自建的 RSS/页面源（url 唯一即去重第一道闸，kind 封闭集
+    # 由 CHECK 兜底）；patrol_query_sources 是"源 × 监控词"绑定表（复合主键幂等，
+    # 双外键 CASCADE：删词或删源，绑定行随之消失，不留孤儿）。
+    # watch_queries 增 domain（用户手设领域，空串 = 交给自动推断）与
+    # inferred_domain/inferred_at（自动推断缓存；用户手改 domain 即由平台层清空，
+    # 库里不写触发器，清缓存语义见 platform.store.set_watch_query_domain）。
+    # feed_entries 增 topic_domain/topic_domain_source（信息流所属领域及其来源）。
+    # 命名注意：feed_entries.domain 自 v6 起就是 **URL 主机域**（runner 写
+    # cand.domain），故新领域列另起名 topic_domain，不与该列争名；索引名沿用
+    # idx_feed_domain（建在 topic_domain 上）。
+    """
+    ALTER TABLE watch_queries ADD COLUMN domain TEXT NOT NULL DEFAULT '';
+    ALTER TABLE watch_queries ADD COLUMN inferred_domain TEXT NOT NULL DEFAULT '';
+    ALTER TABLE watch_queries ADD COLUMN inferred_at TEXT NOT NULL DEFAULT '';
+    CREATE TABLE IF NOT EXISTS patrol_sources (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        name       TEXT NOT NULL DEFAULT '',
+        url        TEXT NOT NULL UNIQUE,
+        kind       TEXT NOT NULL DEFAULT 'rss' CHECK (kind IN ('rss', 'page')),
+        enabled    INTEGER NOT NULL DEFAULT 1,
+        note       TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS patrol_query_sources (
+        query_id  INTEGER NOT NULL REFERENCES watch_queries(id) ON DELETE CASCADE,
+        source_id INTEGER NOT NULL REFERENCES patrol_sources(id) ON DELETE CASCADE,
+        PRIMARY KEY (query_id, source_id)
+    );
+    ALTER TABLE feed_entries ADD COLUMN topic_domain TEXT NOT NULL DEFAULT '';
+    ALTER TABLE feed_entries ADD COLUMN topic_domain_source TEXT NOT NULL DEFAULT '';
+    CREATE INDEX IF NOT EXISTS idx_feed_domain ON feed_entries(topic_domain, id);
     """,
 ]
 

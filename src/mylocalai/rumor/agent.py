@@ -244,10 +244,16 @@ class RumorAgent:
 
     # ------------------------------------------------------------------ #
     def analyze(self, text: str,
-                cancel_check: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
+                cancel_check: Optional[Callable[[], bool]] = None,
+                domain_hints: Optional[List[str]] = None) -> Dict[str, Any]:
         """全链路分析。cancel_check（可选，§5.3 协作取消）：分析期间被轮询，命中即
         停止开算新组件并提前收尾——返回已完成组件的降级结论（mode="cancelled"）。
         不传时行为与无此参数时逐位一致。
+
+        domain_hints（可选，平台领域线程）：领域判定的检索提示域名（host 清单），
+        透传给本次分析的 AnalysisState → evidence 组件追加一轮 site: 定向补搜。
+        不传/传 None 时行为与无此参数时逐位不变（tests/test_rumor_domain_hints.py
+        与 tests/test_rumor_agent_offline.py 锁定）。
         """
         t0 = time.perf_counter()
         # 孤立代理项先规整：它进不了缓存键、也发不出去，留着只会让某个组件抛
@@ -258,8 +264,16 @@ class RumorAgent:
         truncated = len(text) > self.max_chars
         text = text[: self.max_chars]
 
-        state = AnalysisState(text, self.funcs, on_component_done=self.on_component_done,
-                              source_profile=self.source_profile)
+        # domain_hints 只在调用方真的给了提示时才多传这一个参数：默认（None）路径
+        # 与加此参数之前逐位一致——连只认旧参数名的 AnalysisState 替身也不会被打破
+        # （tests/test_source_profile_lift.py 的透传守卫正是这个形状）。
+        state_kwargs: Dict[str, Any] = {
+            "on_component_done": self.on_component_done,
+            "source_profile": self.source_profile,
+        }
+        if domain_hints is not None:
+            state_kwargs["domain_hints"] = domain_hints
+        state = AnalysisState(text, self.funcs, **state_kwargs)
         mode, agent_error = "agent", ""
         trace: Dict[str, Any] = {"tools_called": [], "llm_turns": 0, "final_text": ""}
 
