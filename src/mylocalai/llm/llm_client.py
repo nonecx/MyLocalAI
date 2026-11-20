@@ -22,9 +22,16 @@
     LONGCAT_API_KEY / LONGCAT_BASE_URL / LONGCAT_MODEL    提供方自己的三项配置
     LLM_TIMEOUT_S      单次 HTTP 尝试的最长等待秒数（默认 30）
     LLM_MAX_RETRIES    单次调用的重试次数（默认 1，即最多 2 次尝试）
+    MYLOCALAI_MODELS_PATH / MYLOCALAI_MODEL_SECRETS_PATH
+                       模型注册表与密钥文件的位置；设置面板「模型管理」写的就是
+                       这两份（见 docs/模型管理设计规格.md）
 
 设计约定：
   - API 密钥一律放 .env，禁止硬编码进源码。
+  - 模型注册表（设置面板维护的提供方/模型目录/单模型参数）由
+    mylocalai.llm.model_registry 落盘，本模块在 providers() 里把它覆盖进提供方表；
+    没有 data/models.json 时表内容与覆盖前逐字节一致（规格 §0.4 不变量），
+    缓存键因此也不变（tests/test_llm_gateway.py 的金样本锁住这一点）。
   - 所有调用失败都返回错误信息而不抛异常，由调用方决定默认值，
     保证"单模块失败不拖垮整体"的容错策略在各模块一致落地。
 """
@@ -34,10 +41,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 from mylocalai.llm import llm_cache
+# 顶部直接 import 不会成环：model_registry 刻意不 import 本模块（它抄了一份兜底提供方表），
+# 且它只在函数体内惰性 import core.privacy。llm_cache / privacy 的导入顺序保持现状。
+from mylocalai.llm import model_registry
 from mylocalai.util.text_safety import sanitize_text
 
 # ---- 提供方表：key_env / base_url / model 成组绑定 ----
@@ -83,7 +94,13 @@ _LEGACY_KEY_FALLBACK = ("LONGCAT_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY")
 
 
 def providers() -> Dict[str, Dict[str, Any]]:
-    """当前提供方表（进程内缓存；`reset_cache()` 可强制重读）。"""
+    """当前提供方表（进程内缓存；`reset_cache()` 可强制重读）。
+
+    providers.json 是底表；`data/models.json`（设置面板「模型管理」写的那份）里的提供方
+    按规格 §5.1 **覆盖/新增**进来：base_url 用注册表值，model 用注册表当前模型或该提供方
+    目录里第一个启用的模型，key_env 用注册表声明的名字（没声明就合成一个）。
+    没有 models.json 时原样返回底表——"没配模型管理"的既有部署行为零变化。
+    """
     global _PROVIDERS_CACHE
     with _PROVIDERS_LOCK:
         if _PROVIDERS_CACHE is None:
@@ -94,8 +111,107 @@ def providers() -> Dict[str, Dict[str, Any]]:
                 env_full="LLM_PROVIDERS_PATH", env_extra="LLM_PROVIDERS_EXTRA_PATH")
             _PROVIDER_WARNINGS.clear()
             _PROVIDER_WARNINGS.update(warnings)
-            _PROVIDERS_CACHE = data
+            _PROVIDERS_CACHE = _merge_registry_providers(data)
         return _PROVIDERS_CACHE
+
+
+def _merge_registry_providers(base: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """把模型注册表里的提供方覆盖/合并进 providers.json 底表（规格 §5.1）。
+
+    两处刻意保守：
+      - 没有 data/models.json 时**原样返回底表**。这是规格 §0.4 的"默认行为零变化"
+        不变量，金样本缓存键正依赖它——顺带也保住了 LLM_PROVIDERS_PATH 整套替换
+        不被注册表的内置投影覆盖；
+      - 注册表读取一律 fail-soft：读路径不存在、注册表抛任何异常，都只当"没有覆盖"，
+        绝不让模型配置拖垮分析链路（规格 §0.3）。
+    """
+    try:
+        if not model_registry.registry_path().exists():
+            return base
+        overrides = _registry_provider_overrides()
+    except Exception:  # noqa: BLE001  注册表坏掉也不能拖垮提供方表
+        return base
+    if not overrides:
+        return base
+    merged = {pid: dict(spec) for pid, spec in base.items()}
+    for pid, override in overrides.items():
+        spec = dict(merged.get(pid) or {})
+        key_env = (override["key_env"] or str(spec.get("key_env") or "")
+                   or _synthesized_key_env(pid))
+        model_env, base_url_env = _synthesized_env_names(pid, key_env)
+        spec["key_env"] = key_env
+        # 内置三家在 providers.json 里本就带 *_ENV，setdefault 保留原值；
+        # 自定义提供方按 key_env 改名合成（与注册表私有实现同一口径，见 _synthesized_env_names）
+        spec.setdefault("base_url_env", base_url_env)
+        spec.setdefault("model_env", model_env)
+        # 两个键必须落在表里（哪怕注册表给的是空值）：_resolve / provider_spec 都按
+        # spec["model"]、spec["base_url"] 直接取值，缺键会 KeyError 而不是"未配置"
+        spec["base_url"] = override["base_url"] or str(spec.get("base_url") or "")
+        spec["model"] = override["model"] or str(spec.get("model") or "")
+        spec.setdefault("supports_thinking_disable", False)
+        merged[pid] = spec
+    return merged
+
+
+def _registry_provider_overrides() -> Dict[str, Dict[str, str]]:
+    """注册表口径的提供方覆盖表：pid → {base_url, model, key_env}（规格 §5.1）。
+
+    只取 llm_client 用得上的三项。模型取"当前选中的模型"（active.model），其余提供方取
+    目录里第一个启用的模型——与注册表 active() 的解析口径一致，避免两边对"当前模型"
+    给出不同答案（那种不一致会变成"面板显示 A、客户端发 B"的鬼故事）。
+    """
+    data = model_registry.view()
+    active = data.get("active") or {}
+    active_pid = active.get("provider")
+    active_model = active.get("model")
+    overrides: Dict[str, Dict[str, str]] = {}
+    for entry in data.get("providers") or []:
+        pid = str(entry.get("id") or "")
+        if not pid:
+            continue
+        model = ""
+        if pid == active_pid and active_model:
+            model = str(active_model)
+        else:
+            for item in entry.get("models") or []:
+                if item.get("enabled", True):
+                    model = str(item.get("id") or "")
+                    break
+        overrides[pid] = {
+            "base_url": str(entry.get("base_url") or ""),
+            "model": model,
+            "key_env": str(entry.get("key_env") or ""),
+        }
+    return overrides
+
+
+def _env_fragment(pid: str) -> str:
+    """PID 转环境变量片段：非 [A-Z0-9_] 一律换成下划线（acme-2 → ACME_2）。"""
+    return re.sub(r"[^A-Z0-9_]", "_", str(pid).upper())
+
+
+def _synthesized_key_env(pid: str) -> str:
+    """注册表没声明 key_env 时的兜底环境变量名。
+
+    与 model_registry 的私有 `_key_env_name` 保持同一口径：那边不 import 本模块
+    （会成环，它抄了一份兜底提供方表），这边也不 import 它的私有名，于是同样的规则
+    写了两份——改其一必须同步改其二，否则"面板没配、环境变量配了"会互相找不到。
+    """
+    return f"MYLOCALAI_{_env_fragment(pid)}_API_KEY"
+
+
+def _synthesized_env_names(pid: str, key_env: str) -> Tuple[str, str]:
+    """自定义提供方的 (模型名环境变量, 接口地址环境变量)。
+
+    照 key_env 改名最直观（EXAMPLE_API_KEY → EXAMPLE_MODEL / EXAMPLE_BASE_URL），
+    与注册表私有 `_model_env_name` / `_base_url_env_name` 同一口径（同上，两边必须一致）；
+    没声明 key_env 时才按 PID 合成 MYLOCALAI_<PID>_MODEL / _BASE_URL。
+    """
+    if key_env.endswith("_API_KEY") and len(key_env) > len("_API_KEY"):
+        prefix = key_env[:-len("_API_KEY")]
+        return f"{prefix}_MODEL", f"{prefix}_BASE_URL"
+    fragment = _env_fragment(pid)
+    return f"MYLOCALAI_{fragment}_MODEL", f"MYLOCALAI_{fragment}_BASE_URL"
 
 
 def provider_warnings() -> List[str]:
@@ -139,23 +255,43 @@ _CONFIG_ERROR = ""                      # 配置自检失败原因（空串=正�
 _RESOLVED: Optional[Dict[str, str]] = None
 # 提供方是否接受"关闭思维链"参数：key=(base_url, model) -> True/False；未记录=未知
 _THINKING_SUPPORT: Dict[Tuple[str, str], bool] = {}
+# 单模型运行期参数（规格 §5.4）：key=(provider, model) -> {"max_output_tokens": int|None,
+# "reasoning": {"param","api_value"}|None}。为什么不每次现算？provider_view() 每次都会
+# 深拷贝整份注册表配置，而缓存键在每条提示词上都要算一次，现算会把分析链路拖慢；
+# 写接口保存后必调 reset_cache()，这里跟着一起清（口径同 providers.json 底表）。
+_PARAMS_LOCK = threading.Lock()
+_PARAMS_CACHE: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
 
 def reset_cache() -> None:
-    """清掉配置与能力缓存（改环境变量后供测试/长驻进程重新解析）。"""
+    """清掉配置与能力缓存（改环境变量后供测试/长驻进程重新解析）。
+
+    模型注册表（data/models.json）的进程内缓存一并清：设置面板的写接口保存后只调
+    这一个函数，两边必须同时失效，否则会出现"面板显示新模型、客户端还在用旧的"
+    这种最难查的静默不一致。
+    """
     global _RESOLVED, _CONFIG_ERROR, _PROVIDERS_CACHE
     with _CONFIG_LOCK:
         _RESOLVED = None
         _CONFIG_ERROR = ""
         _THINKING_SUPPORT.clear()
+    with _PARAMS_LOCK:
+        _PARAMS_CACHE.clear()
     with _PROVIDERS_LOCK:
         _PROVIDERS_CACHE = None
+    model_registry.reset_cache()
 
 
 def _provider_names() -> List[str]:
-    """主提供方 + 备用链（LLM_FALLBACKS 逗号分隔，取合法名并在前向去重）。"""
+    """主提供方 + 备用链（LLM_FALLBACKS 逗号分隔，取合法名并在前向去重）。
+
+    主提供方的口径（规格 §5.3）：LLM_PROVIDER 环境变量 → 注册表当前提供方 → longcat。
+    没有 models.json 时注册表给的就是内置主提供方，与改动前完全一致。
+    """
     names: List[str] = []
-    primary = (os.environ.get("LLM_PROVIDER") or DEFAULT_PROVIDER).strip().lower()
+    primary = (os.environ.get("LLM_PROVIDER") or "").strip().lower()
+    if not primary:
+        primary = _registry_active_provider() or DEFAULT_PROVIDER
     names.append(primary)
     for raw in (os.environ.get("LLM_FALLBACKS") or "").split(","):
         name = raw.strip().lower()
@@ -164,12 +300,41 @@ def _provider_names() -> List[str]:
     return names
 
 
+def _registry_active_provider() -> str:
+    """注册表里的当前提供方（models.json 口径，不掺环境变量）；读不到时返回空串。"""
+    try:
+        return str(model_registry.active().get("provider") or "").strip()
+    except Exception:  # noqa: BLE001  注册表出问题按"没有配置"处理，退回内置主提供方
+        return ""
+
+
+def _provider_key(pid: str, spec: Dict[str, Any]) -> Tuple[str, str]:
+    """该提供方的 (密钥, 来源 env|stored|none)（规格 §5.2）。
+
+    环境变量优先、注册表密钥文件其次：与仓库既有口径一致（.env 是部署侧的最终裁定），
+    也让"临时换一把钥匙排障"不必先删本地文件。两者都没有就是无密钥，调用方据此给出
+    "未配置 X"的提示——与只有 .env 的年代行为完全相同。
+    """
+    key_env = str(spec.get("key_env") or "")
+    from_env = os.environ.get(key_env, "").strip() if key_env else ""
+    if from_env:
+        return from_env, "env"
+    value, source = model_registry.provider_secret(pid)
+    value = (value or "").strip()
+    if value:
+        return value, source
+    return "", "none"
+
+
 def _resolve() -> Dict[str, str]:
     """解析主提供方的 密钥/地址/模型，并做"密钥与服务商是否匹配"的自检。
 
     自检规则：密钥必须来自当前提供方自己的环境变量；若当前提供方没配密钥、
     却配了别家的密钥，则记下错配原因并拒绝建客户端——这正是
     "只改密钥、地址还指着 LongCat" 那个静默错配的修复点。
+
+    提供方/模型/地址的优先级见 `_provider_names` 与 `providers()`：环境变量 → 注册表 →
+    providers.json 内置表；密钥口径见 `_provider_key`（环境变量 → 注册表密钥文件）。
     """
     global _RESOLVED, _CONFIG_ERROR
     with _CONFIG_LOCK:
@@ -184,7 +349,7 @@ def _resolve() -> Dict[str, str]:
             _RESOLVED = {"provider": primary, "api_key": "", "base_url": "", "model": ""}
             return dict(_RESOLVED)
 
-        api_key = os.environ.get(spec["key_env"], "").strip()
+        api_key, _key_source = _provider_key(primary, spec)
         base_url = os.environ.get(spec["base_url_env"], "").strip() or spec["base_url"]
         model = os.environ.get(spec["model_env"], "").strip() or spec["model"]
 
@@ -272,7 +437,7 @@ def _client_for(provider: str, max_retries: Optional[int] = None):
     spec = providers().get(provider)
     if spec is None:
         return None
-    api_key = os.environ.get(spec["key_env"], "").strip()
+    api_key, _key_source = _provider_key(provider, spec)
     if not api_key:
         return None
     try:
@@ -304,13 +469,14 @@ def first_available_provider() -> Optional[str]:
 
     供 mylocalai.llm.adapter（LangChain 侧）复用"提供方表 + 备用链"的同一个口径，
     避免 Agent 只连主提供方、备用链路对它完全无效（2026-10-15 检验报告发现 3）。
+    密钥口径同 `_provider_key`：注册表密钥文件里配了的提供方也算"有密钥"。
     """
     names = _provider_names()
     for name in names:
         spec = providers().get(name)
         if spec is None:
             continue
-        if os.environ.get(spec["key_env"], "").strip():
+        if _provider_key(name, spec)[0]:
             return name
     return None
 
@@ -320,9 +486,10 @@ def provider_spec(name: str) -> Optional[Dict[str, Any]]:
     spec = providers().get(name)
     if spec is None:
         return None
+    api_key, _key_source = _provider_key(name, spec)
     return {
         "provider": name,
-        "api_key": os.environ.get(spec["key_env"], "").strip(),
+        "api_key": api_key,
         "base_url": os.environ.get(spec["base_url_env"], "").strip() or spec["base_url"],
         "model": os.environ.get(spec["model_env"], "").strip() or spec["model"],
     }
@@ -338,6 +505,93 @@ def thinking_extra_body(base_url: str, model: str) -> Optional[dict]:
 def mark_thinking_unsupported(base_url: str, model: str) -> None:
     """记下"该提供方不接受关闭思维链参数"，后续调用不再白打一次。"""
     _THINKING_SUPPORT[(base_url, model)] = False
+
+
+# ---------------------------------------------------------------------------
+# 单模型运行期参数（规格 §5.4）：max_output_tokens 上限与推理等级档位
+# ---------------------------------------------------------------------------
+# 数据来自模型注册表里"对单个模型设的参数"（设置面板图片三那一屏）。为什么在调用侧
+# 生效而不是改 _resolve() 的返回形状：_resolve() 的四个键是 provider/api_key/base_url/
+# model 的长期契约（tests/test_stability_config.py 等按这个形状断言），参数是"这次请求
+# 怎么发"的事，与"连哪家"是两层，混在一起会让旧调用方莫名其妙多拿到几个键。
+
+def _model_params(provider: str, model: str) -> Dict[str, Any]:
+    """该提供方/模型的运行期参数口径：{"max_output_tokens": int|None, "reasoning": dict|None}。
+
+    注册表里没有这个模型（providers.json 增量加的一家、或根本没有 models.json）时两项
+    都是 None，于是"不下调 max_tokens、不多带参数"——没有 models.json 的部署请求逐字节
+    不变（规格 §0.4）。结果按 (provider, model) 记忆，reset_cache() 一并清。
+    """
+    cache_key = (provider, model or "")
+    with _PARAMS_LOCK:
+        cached = _PARAMS_CACHE.get(cache_key)
+    if cached is not None:
+        return dict(cached)
+    params: Dict[str, Any] = {"max_output_tokens": None, "reasoning": None}
+    try:
+        entry = model_registry.provider_view(provider) or {}
+    except Exception:  # noqa: BLE001  注册表出问题只当"没有声明参数"，照常调用
+        entry = {}
+    for item in entry.get("models") or []:
+        if item.get("id") != model:
+            continue
+        limit = item.get("max_output_tokens")
+        if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0:
+            params["max_output_tokens"] = limit
+        params["reasoning"] = _active_reasoning(item.get("reasoning"))
+        break
+    with _PARAMS_LOCK:
+        _PARAMS_CACHE[cache_key] = params
+    return dict(params)
+
+
+def _active_reasoning(reasoning: Any) -> Optional[Dict[str, str]]:
+    """当前档位真的会发给上游的推理参数 {"param": ..., "api_value": ...}；否则 None。
+
+    只有 enabled 且当前档位 api_value 非空才算数：off 档位（api_value 为 null）的语义
+    就是"不额外发参数"，enabled=false 同理——两者都不该让请求多带一个字节。
+    """
+    data = reasoning if isinstance(reasoning, dict) else {}
+    if not data.get("enabled"):
+        return None
+    active_tier = data.get("active_tier")
+    api_value = None
+    for tier in data.get("tiers") or []:
+        if isinstance(tier, dict) and tier.get("tier") == active_tier:
+            api_value = tier.get("api_value")
+            break
+    if api_value is None or api_value == "":
+        return None
+    param = str(data.get("param") or "").strip()
+    if not param:
+        return None
+    return {"param": param, "api_value": str(api_value)}
+
+
+def _clamp_max_tokens(max_tokens: int, params: Dict[str, Any]) -> int:
+    """把 max_tokens 下调到该模型声明的 max_output_tokens 以内（规格 §5.4）。
+
+    只下调、不放大：调用方要少了就按少的发（放大只会多花钱、还可能被上游拒）；
+    模型没声明上限（None）时原样返回——没有 models.json 的部署一个字节不变。
+    """
+    limit = (params or {}).get("max_output_tokens")
+    if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0:
+        return min(int(max_tokens), limit)
+    return max_tokens
+
+
+def _reasoning_extra_params(params: Dict[str, Any]) -> Dict[str, Any]:
+    """要合进 extra_body 的推理档位参数 {"参数名": "参数值"}；不需要时返回空字典。
+
+    返回空字典而不是 None，是为了让调用方能区分"没有参数"与"显式不带参数"：
+    缓存键只在前者非空时才追加指纹（见 `_cache_key` 的 extra_params）。
+    """
+    reasoning = (params or {}).get("reasoning") or {}
+    param = str(reasoning.get("param") or "").strip()
+    value = reasoning.get("api_value")
+    if not param or value is None or value == "":
+        return {}
+    return {param: value}
 
 
 # ---------------------------------------------------------------------------
@@ -451,11 +705,14 @@ def _chat_raw_once(
     base_url: str,
     model: str,
     make_fallback_client=None,
+    extra_params: Optional[dict] = None,
 ) -> Tuple[str, str]:
     """对单个客户端做一次对话调用，返回 (正文, 错误)。
 
     `make_fallback_client()`：仅在"带参数被拒"时才调用，用来造一个不再内部重试的
     客户端做回落，避免 `(max_retries × 2)` 的叠乘把一次调用放大成 4 个 HTTP。
+    `extra_params`：模型注册表要求这次多带的参数（推理等级档位），与"关闭思维链"
+    参数合进同一个 extra_body；为空表示不多带（没有 models.json 时正是如此）。
     """
     messages = [
         {"role": "system", "content": system_prompt},
@@ -483,7 +740,16 @@ def _chat_raw_once(
         record_usage(requests=1, tokens=_response_total_tokens(resp))
         return resp
 
-    extra = None if enable_thinking else thinking_extra_body(base_url, model)
+    # "关闭思维链"参数发不发由调用方按提供方能力决定（见 _chat_raw_providers 的
+    # use_no_thinking：不认这参数的提供方传 enable_thinking=True 进来）；这里只在
+    # 明确要求关思维链时才带上它
+    no_thinking = None if enable_thinking else thinking_extra_body(base_url, model)
+    # 推理档位参数与"关闭思维链"并存（规格 §5.4）：注册表要求发的合进来，
+    # 两者都没有时 extra 保持 None——请求与没有 models.json 时逐字节相同
+    if extra_params:
+        extra = {**no_thinking, **extra_params} if no_thinking else dict(extra_params)
+    else:
+        extra = no_thinking
     try:
         try:
             resp = _call(extra)
@@ -494,14 +760,18 @@ def _chat_raw_once(
                 raise
             if make_fallback_client is None:
                 raise
-            # 回落：去掉关闭思维链参数再试一次（用不再内部重试的客户端）
+            # 回落：去掉"关闭思维链"参数再试一次（用不再内部重试的客户端）；
+            # 注册表要求的推理档位参数保留——它自己才会被拒时，交给下面 except 原样报错
             try:
-                resp = _call(None, make_fallback_client())
+                resp = _call(extra_params or None, make_fallback_client())
             except _BudgetExhausted:
                 return "", "已超出本次分析的时限预算，未发起调用"
             except Exception:
                 raise exc      # 回落也失败：保留原错误，且不留下"参数不支持"的永久标记
-            mark_thinking_unsupported(base_url, model)
+            # 只有真的发过"关闭思维链"参数才标记不支持：被拒的也可能是推理档位参数，
+            # 那时标记上去会让整进程白白丢掉一个本来有效的参数
+            if no_thinking is not None:
+                mark_thinking_unsupported(base_url, model)
     except Exception as exc:  # noqa: BLE001
         return "", f"API 调用失败: {type(exc).__name__}: {exc}"
 
@@ -518,7 +788,8 @@ def _chat_raw_once(
 
 
 def _cache_key(system_prompt: str, user_text: str, temperature: float, max_tokens: int,
-               enable_thinking: bool, namespace: str = "") -> str:
+               enable_thinking: bool, namespace: str = "",
+               extra_params: Optional[dict] = None) -> str:
     """缓存键：同一段提示词 + 同一批参数 → 同一个键（与提供方无关，换供应商也不会串结果）。
 
     `namespace` 是**缓存分区名**：同一段提示词与参数，分区名不同则键不同。
@@ -527,16 +798,21 @@ def _cache_key(system_prompt: str, user_text: str, temperature: float, max_token
     （`report_generator`，无分区名）。否则一旦两边的提示词与用户文本碰巧相同，
     一边就会读到另一边的缓存，把结论污染过去。
 
+    `extra_params` 是**这次调用真的会多带给上游的参数**（模型注册表里的推理等级档位，
+    规格 §5.4）：同一段提示词，带不带档位是两种不同的请求，缓存必须分开，所以非空时
+    把参数指纹（排序后的 JSON）追加进 blob。为空（默认）时**不往 blob 里加任何东西**，
+    这样既有调用方算出的键与加这个参数之前逐字节相同——加参数不该悄悄换掉全部缓存键，
+    金样本（tests/test_llm_gateway.py）正锁着这一点。
+
     编码前先规整孤立代理项：str 里只有代理项无法按 utf-8 编码，混进文本会让这一行抛
     UnicodeEncodeError（2026-10-15 检验报告发现 12，唯一未通过闸门的成因）。
-
-    注意：分区名为空时**不往 blob 里加任何东西**，这样既有调用方（不传分区名）
-    算出的键与加这个参数之前逐字节相同——加参数不该悄悄换掉全部缓存键。
     """
     blob = [get_provider(), get_base_url(), get_model(), system_prompt, str(user_text),
             temperature, max_tokens, enable_thinking]
     if namespace:
         blob.append(namespace)
+    if extra_params:
+        blob.append(json.dumps(extra_params, ensure_ascii=False, sort_keys=True))
     return hashlib.sha256(sanitize_text(json.dumps(blob, ensure_ascii=False))
                           .encode("utf-8", "replace")).hexdigest()
 
@@ -549,6 +825,7 @@ def _chat_raw(
     enable_thinking: bool = False,
     use_cache: bool = True,
     namespace: str = "",
+    extra_params: Optional[dict] = None,
 ) -> Tuple[str, str]:
     """
     底层对话调用（带缓存与请求级时限），返回 (正文文本, 错误信息)。
@@ -562,23 +839,36 @@ def _chat_raw(
       否则一边会读到另一边的结果（把结论污染过去）。
     时限：若调用方用 llm_cache.deadline_scope() 设了总预算，预算用尽时立即返回错误
       （转降级），不再一轮轮等满超时。
+    `extra_params`：这次要多发给上游的模型参数（推理等级档位，规格 §5.4）。默认 None =
+      按模型注册表即时推导（推导出的 max_tokens 与参数同时进缓存键和真实请求）；
+      显式传空字典表示“调用方已自行处理，不要推导”（测试与调试用）。
     """
     if llm_cache.budget_exhausted():
         return "", "已超出本次分析的时限预算，未发起调用"
     # 孤立代理项在此处统一规整：它既进不了缓存键，也发不出去（json/HTTP 编码都会失败），
     # 而本函数的契约是"任何失败都返回错误信息而不抛异常"（chat_json 的承诺由此成立）。
     user_text = sanitize_text(user_text)
+    # 模型参数在这里一次算清（注册表口径）：max_tokens 先下调到该模型声明的上限，
+    # 推理档位换算成 extra_body 片段。同一个值既进缓存键也进真实请求——否则
+    # "下调后的请求"会挂在"未下调的键"上，换个 max_tokens 就互相串结果。
+    resolved = _resolve()
+    params = _model_params(resolved["provider"], resolved["model"])
+    max_tokens = _clamp_max_tokens(max_tokens, params)
+    if extra_params is None:
+        extra_params = _reasoning_extra_params(params)
     try:
         key = _cache_key(system_prompt, user_text, temperature, max_tokens,
-                         enable_thinking, namespace)
+                         enable_thinking, namespace, extra_params)
     except Exception as exc:  # noqa: BLE001  键只是"复用"的手段，算不出来也应照常调用
         key = ""
     if not key:
-        return _chat_raw_providers(system_prompt, user_text, temperature, max_tokens, enable_thinking)
+        return _chat_raw_providers(system_prompt, user_text, temperature, max_tokens,
+                                   enable_thinking, extra_params=extra_params)
     return llm_cache.call(
         key,
         produce=lambda: _chat_raw_providers(system_prompt, user_text, temperature,
-                                            max_tokens, enable_thinking),
+                                            max_tokens, enable_thinking,
+                                            extra_params=extra_params),
         accept=lambda result: bool(result[0]) and not result[1],
         use_cache=use_cache,
     )
@@ -590,10 +880,15 @@ def _chat_raw_providers(
     temperature: float,
     max_tokens: int,
     enable_thinking: bool = False,
+    extra_params: Optional[dict] = None,
 ) -> Tuple[str, str]:
     """
     真正发起调用的部分：主提供方 → 备用提供方（LLM_FALLBACKS）依次尝试。
     返回 (正文文本, 错误信息)。成功时 error 为空串。
+
+    `extra_params`：这次要多发给上游的模型参数（推理等级档位），空/None = 不多带。
+    由 `_chat_raw` 按**主提供方**推导后整链共用：缓存键钉的就是主提供方，参数口径跟着
+    键走，备用链路换提供方时才不会悄悄换一批请求字节（否则同一个键会对应不同请求）。
     """
     errors: List[str] = []
     for index, name in enumerate(_provider_names()):
@@ -634,7 +929,7 @@ def _chat_raw_providers(
         content, err = _chat_raw_once(
             client, system_prompt, user_text, temperature, max_tokens,
             enable_thinking=(not use_no_thinking), base_url=base_url, model=model,
-            make_fallback_client=make_fb,
+            make_fallback_client=make_fb, extra_params=extra_params,
         )
         if not err:
             return content, ""
