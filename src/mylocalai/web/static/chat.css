@@ -545,7 +545,8 @@
 .chat-card-conclusion,
 .chat-card-speech,
 .chat-card-heat,
-.chat-card-insights { font-size: 13px; line-height: 1.75; }
+.chat-card-insights,
+.chat-card-evresearch { font-size: 13px; line-height: 1.75; }
 
 .chat-card-claim-answer { font-size: 13px; line-height: 1.55; }
 .chat-card-claim-answer > p { margin: 6px 0; }
@@ -736,6 +737,27 @@
 .chat-card-evidence .chat-ev-list a:hover { text-decoration: underline; }
 
 .chat-card-report { margin-top: 10px; }
+
+/* ---------- 证据研究卡（collect_evidence：只读取证三技能） ----------
+   与结论卡内的 .chat-card-evidence（证据本折叠）是两回事，类名刻意分开。
+   排版口径：主张逐条分组、引文逐字 blockquote、信源分已核验/未核验两级。 */
+.chat-card-evresearch { font-size: 12.5px; line-height: 1.8; }
+.chat-ev-claims { list-style: none; margin: 8px 0 0; padding: 0; }
+.chat-ev-claim { margin: 10px 0 0; padding-top: 8px; border-top: 1px dashed var(--border); }
+.chat-ev-claim:first-child { border-top: none; padding-top: 0; }
+.chat-ev-claim > b { color: var(--primary-dark); margin-right: 6px; }
+.chat-ev-claim > span { font-weight: 600; }
+.chat-ev-quote {
+  margin: 5px 0;
+  padding: 5px 10px;
+  border-left: 3px solid var(--primary);
+  background: var(--primary-soft);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.8;
+  word-break: break-word;
+}
+.chat-ev-src-title { font-weight: 600; margin-top: 10px; }
 
 .chat-report-text {
   margin: 6px 0 0;

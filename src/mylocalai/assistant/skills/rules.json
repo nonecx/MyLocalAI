@@ -1,0 +1,20 @@
+{
+  "_comment": "取证三技能预算与上限（总览 §5.6）。改这里不改代码：键名锁定，数值可按部署环境调整；pipeline.load_rules 会做类型与区间校验，越界值被夹到安全范围而不是让运行崩溃。",
+
+  "max_input_chars": 4000,
+  "max_claims": 5,
+  "max_sources": 6,
+  "max_candidates": 8,
+  "max_searches": 12,
+  "max_pages": 12,
+  "max_llm_calls": 20,
+  "per_claim_max_queries": 2,
+  "per_claim_max_pages": 3,
+  "max_followup_rounds": 1,
+  "total_deadline_s": 90,
+  "io_timeout_s": 10,
+  "max_page_bytes": 1500000,
+  "max_text_chars": 20000,
+  "max_redirect_hops": 3,
+  "max_quote_chars": 300
+}

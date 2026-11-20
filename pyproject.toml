@@ -29,4 +29,9 @@ local-inference = ["torch>=2.1.0,<3.0.0", "transformers>=4.40.0,<5.0.0", "models
 where = ["src"]
 
 [tool.setuptools.package-data]
-mylocalai = ["**/*.json"]
+# **/*.json：既有约定（providers/verdict_rules/assistant_rules 等运行时加载）。
+# **/*.md：取证三技能与用户能力的 SKILL.md 也是运行时加载的指令文件
+# （assistant/skills/*/SKILL.md、assistant/capabilities/*/SKILL.md）；可编辑安装下
+# 从源码树解析，非编辑安装（wheel）时靠这里一起打包——缺文件时 pipeline 按
+# "指令缺失"降级而不是崩，但打包带上更诚实。
+mylocalai = ["**/*.json", "**/*.md"]
