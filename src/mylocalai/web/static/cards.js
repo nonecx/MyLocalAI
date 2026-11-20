@@ -357,6 +357,137 @@
       </div>`;
   }
 
+  /* ---------- 5. 证据研究卡（collect_evidence：取证三技能，只读取证） ----------
+     由后端 collect_evidence 工具产出：card = {card_type:"evidence", status, task_status,
+     as_of, degraded, domain, sources{verified,unverified}, claims, evidence, counts,
+     gaps, errors}（形状见 .tmp/skills-contract-wave2.md §2.2，主代理集成时落地）。
+     口径诚实铁律同全文件：引文逐字来自后端"实际读取过的正文"（前端不推断、不补造、
+     不改写），关系用封闭枚举徽章；不展示任何真假判定与数值评分；六种执行状态如实
+     映射中文，"已取消/预算用尽"必须带"保留已取得证据"，不伪装成完整成功。 */
+  const EVIDENCE_STATUS = {
+    completed: "已完成",
+    partial: "部分完成（有缺口/错误）",
+    needs_clarification: "待补充信息",
+    failed: "执行失败",
+    cancelled: "已取消（保留已取得证据）",
+    budget_exhausted: "预算用尽（保留已取得证据）",
+  };
+  const EVIDENCE_TASK = {
+    completed: "已完成",
+    no_factual_claim: "没有可核查事实主张",
+    needs_clarification: "待补充信息",
+  };
+  const RELATION_META = {
+    supports: { cls: "green", text: "支持" },
+    refutes: { cls: "red", text: "反驳" },
+    partial: { cls: "amber", text: "部分" },
+    background: { cls: "gray", text: "背景" },
+    unclear: { cls: "gray", text: "关系不明" },
+  };
+  const VERIFY_META = {
+    catalog_anchor: "目录锚点",
+    verified_site_link: "已核验站点链接",
+    unverified_candidate: "未核验候选",
+  };
+
+  function renderEvidence(c) {
+    c = c || {};
+    const counts = (c.counts && typeof c.counts === "object") ? c.counts : {};
+    const domain = (c.domain && typeof c.domain === "object") ? c.domain : {};
+    const sources = (c.sources && typeof c.sources === "object") ? c.sources : {};
+    const verified = Array.isArray(sources.verified) ? sources.verified : [];
+    const unverified = Array.isArray(sources.unverified) ? sources.unverified : [];
+    const claims = Array.isArray(c.claims) ? c.claims : [];
+    const evidence = Array.isArray(c.evidence) ? c.evidence : [];
+    const gaps = Array.isArray(c.gaps) ? c.gaps : [];
+    const errors = Array.isArray(c.errors) ? c.errors : [];
+    const labels = Array.isArray(domain.labels) ? domain.labels : [];
+
+    /* 信源分两级呈现：已核验（目录锚点/已核验站点链接）与未核验候选分开，
+       后者明确标注"不进入证据检索"——来源不自我认证（总览 §5.4）。 */
+    const srcHtml = (list, title, note) => {
+      if (!list.length) return "";
+      const rows = list.map((s) => {
+        s = s || {};
+        const ver = VERIFY_META[s.verification] || "";
+        return `<li><span class="chat-ev-stance">${escapeHtml(s.tier || "")}</span>` +
+          `${escapeHtml(s.name || s.domain || "（未命名信源）")}` +
+          `<div class="chat-ev-url">${escapeHtml(s.domain || "")}${ver ? " · " + escapeHtml(ver) : ""}</div></li>`;
+      }).join("");
+      return `<div class="chat-ev-src-title">${escapeHtml(title)}</div>` +
+        `<ul class="chat-ev-list">${rows}</ul>` +
+        (note ? `<p class="chat-insight-note muted">${escapeHtml(note)}</p>` : "");
+    };
+
+    /* 主张 → 证据分组：证据按 claim_ids 归组；挂不上已列主张的（理论不出现，
+       真出现时）单独归组展示，不静默丢弃——丢证据比显示异常更糟。 */
+    const matchedIds = {};
+    const claimItems = claims.map((cl) => {
+      cl = cl || {};
+      matchedIds[cl.claim_id] = true;
+      const rows = evidence.filter((ev) => Array.isArray((ev || {}).claim_ids)
+        && ev.claim_ids.indexOf(cl.claim_id) >= 0);
+      const evHtml = rows.length ? `<ul class="chat-ev-list">${rows.map((ev) => {
+        ev = ev || {};
+        const rel = RELATION_META[ev.relation] || { cls: "gray", text: "关系不明" };
+        const url = safeUrl(ev.url);
+        const meta = [];
+        if (ev.evidence_id) meta.push(`<span class="chat-ev-stance">${escapeHtml(ev.evidence_id)}</span>`);
+        meta.push(`<span class="badge ${rel.cls}">${rel.text}</span>`);
+        if (ev.source_id) meta.push(`<span class="chat-ev-stance">${escapeHtml(ev.source_id)}</span>`);
+        const title = escapeHtml(ev.title || ev.url || "（无标题）");
+        const link = url
+          ? `<a href="${url}" target="_blank" rel="noopener nofollow">${title}</a>`
+          : title;
+        return `<li>${meta.join("")}${link}` +
+          (ev.quote ? `<blockquote class="chat-ev-quote">${escapeHtml(ev.quote)}</blockquote>` : "") +
+          (ev.fetched_at ? `<div class="chat-ev-url">读取于 ${escapeHtml(ev.fetched_at)}</div>` : "") +
+          "</li>";
+      }).join("")}</ul>` : '<p class="chat-insight-sub muted">该主张尚未找到可定位证据。</p>';
+      return `<li class="chat-ev-claim"><b>${escapeHtml(cl.claim_id || "")}</b>` +
+        `<span>${escapeHtml(cl.text || "")}</span>${evHtml}</li>`;
+    }).join("");
+    const orphans = evidence.filter((ev) => !Array.isArray((ev || {}).claim_ids)
+      || !ev.claim_ids.some((id) => matchedIds[id]));
+    if (orphans.length) {
+      claimItems += `<li class="chat-ev-claim"><b>（未关联）</b>` +
+        `<span>以下证据未挂到已列出的主张：</span><ul class="chat-ev-list">` +
+        orphans.map((ev) => `<li>${escapeHtml((ev || {}).evidence_id || "")} ` +
+          `${escapeHtml((ev || {}).title || (ev || {}).url || "")}</li>`).join("") +
+        "</ul></li>";
+    }
+
+    const issueHtml = (gaps.length || errors.length) ? `
+        <details class="chat-evidence-fold">
+          <summary>缺口 ${gaps.length} 条 · 错误 ${errors.length} 条</summary>
+          ${gaps.length ? `<ul class="chat-ev-list">${gaps.map((g) => `<li>${escapeHtml(String(g))}</li>`).join("")}</ul>` : ""}
+          ${errors.length ? `<ul class="chat-ev-list">${errors.map((e) => {
+            e = e || {};
+            return `<li>${escapeHtml(e.stage || "")} · ${escapeHtml(e.category || "")}：${escapeHtml(e.detail || "")}</li>`;
+          }).join("")}</ul>` : ""}
+        </details>` : "";
+
+    const statusText = EVIDENCE_STATUS[c.status] || escapeHtml(String(c.status || "未知"));
+    const taskText = EVIDENCE_TASK[c.task_status] || "";
+    return `
+      <div class="chat-card chat-card-evidence">
+        <div class="chat-card-title">🔎 证据研究<span class="badge gray">只读取证 · 不判真假</span>${degradedBadge(c)}</div>
+        <div class="chat-badges">
+          <span class="badge gray">${escapeHtml(statusText)}</span>
+          ${taskText ? `<span class="badge gray">${escapeHtml(taskText)}</span>` : ""}
+          ${labels.length ? `<span class="badge gray">领域：${escapeHtml(labels.join("、"))}</span>` : ""}
+          <span class="badge gray">主张 ${Number(counts.claims) || 0} · 已核验信源 ${Number(counts.verified_sources) || 0} · 证据 ${Number(counts.evidence) || 0} 条</span>
+        </div>
+        ${srcHtml(verified, "已核验信源", "两类来路：信源目录锚点，或已核验站点页面直接给出的链接。")}
+        ${srcHtml(unverified, "未核验候选", "陌生域名不自我认证：以下候选不进入证据检索。")}
+        ${claimItems ? `<ul class="chat-ev-claims">${claimItems}</ul>`
+          : '<p class="chat-insight-sub muted">本轮没有拆出可核查主张。</p>'}
+        ${issueHtml}
+        <p class="chat-insight-note muted">已执行 ${Number(counts.searches) || 0} 次搜索 · ${Number(counts.pages) || 0} 次读页 · ${Number(counts.llm_calls) || 0} 次模型调用。引文逐字来自实际读取的正文；只述证据，不输出真假结论。</p>
+        ${asOfLine(c.as_of)}
+      </div>`;
+  }
+
   /* ---------- 新事实核查答案（双维、逐 claim、默认不泄露旧评分） ---------- */
   const RUMOR_LABELS = {
     propagation_insufficient: "传播证据不足",
@@ -416,6 +547,7 @@
     }
     const type = String(payload.card_type || payload.type || "").toLowerCase();
     if (type === "insights") return renderInsights(payload);
+    if (type === "evidence") return renderEvidence(payload);
     if (type === "conclusion") return renderConclusion(payload);
     if (type === "speech" || type === "classic") return renderSpeech(payload);
     if (type === "heat" || type === "attention") return renderHeat(payload);
@@ -431,6 +563,6 @@
   /* 供 chat.js 调用的唯一入口（不污染全局命名空间） */
   window.ChatCards = {
     renderCard, renderClaimAnswer, renderConclusion, renderSpeech, renderHeat,
-    renderInsights, escapeHtml,
+    renderInsights, renderEvidence, escapeHtml,
   };
 })();
