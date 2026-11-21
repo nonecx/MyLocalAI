@@ -665,9 +665,10 @@ E 分首末差，不外推）。
   `GET /api/subscriptions/{id}`（详情 + 运行历史 + 最新变化卡）、`GET .../runs`；
 - **授权闸**：每轮运行前查 public-search 外发授权，未过 → `blocked`、订阅暂停并
   写明原因，**零外发**（fail-closed）；
-- **域名限定诚实标注**：`site:` 变体全空兜底时 run.summary 如实记
-  `domain_scope_applied=false` + `scope_degraded=true`（引擎不支持 site: 检索时
-  不谎报"已限定"），面板运行历史以灰徽章呈现；不传 domains 时两键都不出现；
+- **域名限定诚实标注**：run.summary 恒带 `domain_scope_applied`/`scope_degraded`
+  两个布尔——正常限定（true/false）、变体全空兜底（false/true，引擎不支持 site:
+  检索时不谎报"已限定"，面板运行历史以灰徽章呈现）、未配置域名（false/false，
+  不出降级徽章）；
 - **调度**：web lifespan 起 daemon 线程（tick 60s、串行、单 worker 假设 + 启动
   告警）；关服即停，产品口径如实告知；
 - **schema v8**：`subscriptions` + `subscription_runs`（status 含 running 初态，

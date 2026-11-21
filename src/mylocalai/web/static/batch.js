@@ -94,6 +94,7 @@
     batches: [],
     activeBatchId: null,
     controller: null,     // 本轮 SSE 的取消句柄
+    stopRequested: false, // 停止闩：SSE 尚未连上时点停止，等流一连上就立刻断开（触发后端取消）
     running: false,
     itemEls: {},          // position → {status: 徽章元素}，供 progress 事件就地刷新
     profilesPoll: null,
@@ -349,6 +350,7 @@
     if (error) { showError(error); return; }
 
     setRunning(true);
+    state.stopRequested = false;
     hideProgress();
     try {
       const resp = await fetch(API.batches, {
@@ -387,7 +389,17 @@
     if (state.controller) {
       state.controller.abort();
       state.controller = null;
+    } else if (state.running) {
+      /* 竞态窗口：POST /api/batch 已 202 但 SSE 还没连上（controller 未建）——
+         此刻没有流可断，记下停止意图，等 consumeStream 连上后立即断开，
+         否则这次"停止"会扑空、批次在后端继续跑完（E2E 走查发现）。 */
+      state.stopRequested = true;
     }
+    /* 停止后延迟刷新一次列表：批次落 cancelled 需要后端收尾一点时间，
+       不刷的话列表徽章会停在"进行中"（E2E 走查发现）。 */
+    setTimeout(() => {
+      if (isAnalyst() && !state.running) reload();
+    }, 2500);
   }
 
   /* ---------- SSE 消费（POST/GET + ReadableStream；读流/拆帧实现收口到
@@ -404,6 +416,14 @@
         if (j && j.detail) detail = j.detail;
       } catch (e) { /* 非 JSON 错误体 */ }
       throw new Error(detail);
+    }
+    /* 流刚连上就发现停止闩已被按下（停止点击落在 POST 202 与连接建立之间）：
+       立即断开——服务端 _drain 检测到断开即 request_cancel，批次照常落 cancelled。 */
+    if (state.stopRequested) {
+      state.stopRequested = false;
+      state.controller.abort();
+      state.controller = null;
+      return;
     }
     await readSseStream(resp, {
       meta: onStreamMeta,
