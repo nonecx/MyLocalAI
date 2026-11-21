@@ -21,6 +21,12 @@
   /* file:// 双击打开时 shell.js 已给出启动引导，这里静默退出 */
   if (location.protocol === "file:") return;
 
+  /* 公共小工具（escapeHtml / apiPath / readSseStream）全部来自 cards.js 的
+     window.ChatCards（U0 收口的唯一归属，本文件不再自留副本；parseFrame 由
+     readSseStream 内部使用，本文件不直接引用）；脚本顺序 cards → chat 由
+     测试锁定，加载期解构是安全的。 */
+  const { escapeHtml, apiPath, readSseStream } = window.ChatCards;
+
   const $ = (sel) => document.querySelector(sel);
 
   /* 后端接口清单（与 web/app.py 路由表一一对应，测试做前后端自洽断言） */
@@ -51,16 +57,6 @@
   let currentSessionId = null;   // 当前会话；null = 下一条消息自动新建
   let activeController = null;   // 本轮请求的取消句柄
   let currentTurnEl = null;      // 本轮助手回复的容器（事件往里追加）
-
-  function escapeHtml(s) {
-    return String(s)
-      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-  }
-
-  function apiPath(tpl, id) {
-    return String(tpl).replace(/\{sid\}|\{id\}/g, encodeURIComponent(String(id)));
-  }
 
   /* ---------- 错误与提示 ---------- */
   function chatError(msg) {
@@ -242,43 +238,10 @@
     appendNote(`<span class="badge red">错误${retry}</span> ${escapeHtml(msg)}`, "chat-note-error");
   }
 
-  /* ---------- SSE 帧解析（POST + ReadableStream，EventSource 不支持 POST） ---------- */
-  function parseFrame(frame) {
-    let name = "message";
-    const dataLines = [];
-    frame.split("\n").forEach((line) => {
-      const trimmed = line.replace(/\r$/, "");
-      if (trimmed.startsWith("event:")) name = trimmed.slice(6).trim();
-      else if (trimmed.startsWith("data:")) dataLines.push(trimmed.slice(5).replace(/^ /, ""));
-    });
-    if (!dataLines.length) return null;
-    try {
-      return { event: name, data: JSON.parse(dataLines.join("\n")) };
-    } catch (e) {
-      return null;   // 半截 JSON / 非 JSON 帧直接丢弃，不让整条流崩掉
-    }
-  }
-
-  async function readSseStream(resp) {
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      let idx;
-      while ((idx = buf.indexOf("\n\n")) >= 0) {
-        const frame = buf.slice(0, idx);
-        buf = buf.slice(idx + 2);
-        const evt = parseFrame(frame);
-        if (evt && SSE_HANDLERS[evt.event]) SSE_HANDLERS[evt.event](evt.data);
-      }
-    }
-    /* 流尾残余（正常实现每帧以空行结尾，这里只是兜底） */
-    const tail = parseFrame(buf);
-    if (tail && SSE_HANDLERS[tail.event]) SSE_HANDLERS[tail.event](tail.data);
-  }
+  /* ---------- SSE 帧解析（POST + ReadableStream，EventSource 不支持 POST） ----------
+     parseFrame / readSseStream 已收口进 cards.js 并经 window.ChatCards 导出
+     （U0 收口：SSE 拆帧的唯一归属，batch.js 的重复副本由 U1 换用）；
+     本页的事件处理器映射 SSE_HANDLERS 仍是本文件私有，调用时作为 handlers 传入。 */
 
   /* ---------- 发送 / 取消 ---------- */
   function setSending(sending) {
@@ -350,7 +313,7 @@
         } catch (e) { /* 非 JSON 错误体 */ }
         throw new Error(detail);
       }
-      await readSseStream(resp);
+      await readSseStream(resp, SSE_HANDLERS);
     } catch (err) {
       if (err && err.name === "AbortError") {
         /* abort 已断开连接：后端检测到断开即置 cancelled，协作取消 */
@@ -476,8 +439,32 @@
     window.MonitorPanel?.onProfileChanged();
   }
 
+  /* ---------- 列表加载失败行（浅色文案 + 点击重试） ----------
+     会话列表 / 档案库列表加载抛错时不再静默吞掉：就地渲染一行浅色错误文案，
+     「点击重试」= 再次调用对应加载函数。纯 createElement + textContent，
+     不进 innerHTML（同 settings.js / profiles.js 纪律）；样式见 chat.css 的
+     .chat-list-error（.chat-card-placeholder 同批新增）。 */
+  function renderListError(list, retryFn) {
+    if (!list) return;
+    list.textContent = "";
+    const li = document.createElement("li");
+    li.className = "chat-list-error";
+    const tip = document.createElement("span");
+    tip.textContent = "列表加载失败";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "点击重试";
+    btn.addEventListener("click", () => {
+      if (typeof retryFn === "function") retryFn();
+    });
+    li.appendChild(tip);
+    li.appendChild(btn);
+    list.appendChild(li);
+  }
+
   /* ---------- 会话列表 ---------- */
-  function highlightActiveSession() {    document.querySelectorAll("#chatSessionList li[data-sid]").forEach((li) => {
+  function highlightActiveSession() {
+    document.querySelectorAll("#chatSessionList li[data-sid]").forEach((li) => {
       li.classList.toggle("active", Number(li.dataset.sid) === currentSessionId);
     });
   }
@@ -508,7 +495,11 @@
         li.addEventListener("click", () => selectSession(Number(li.dataset.sid)));
       });
       highlightActiveSession();
-    } catch (e) { /* 会话列表加载失败不阻塞主流程 */ }
+    } catch (e) {
+      /* 会话列表加载失败不阻塞主流程：列表区就地给浅色错误行，
+         「点击重试」= 再次调用 loadSessions（不再静默吞错） */
+      renderListError($("#chatSessionList"), loadSessions);
+    }
   }
 
   async function selectSession(sid) {
@@ -561,9 +552,23 @@
         turnEl().querySelector(".chat-card-slot").innerHTML = window.ChatCards.renderCard(payload);
         return;
       }
+      /* kind=card 但 payload 解析失败 / 不是对象：如实给一行浅色占位提示，
+         不把半截 JSON 当叙述渲染，也不伪造卡片顶替（口径诚实）。 */
+      currentTurnEl = null;
+      turnEl().appendChild(historyBadCardNote());
+      scrollBottom();
+      return;
     }
     currentTurnEl = null;
     turnEl().querySelector(".chat-narrative").textContent = m.content || "";
+  }
+
+  /* 历史坏卡占位行（textContent 写入，无注入面；样式 chat.css .chat-card-placeholder） */
+  function historyBadCardNote() {
+    const note = document.createElement("div");
+    note.className = "chat-card-placeholder";
+    note.textContent = "历史消息数据不完整";
+    return note;
   }
 
   async function newSession() {
@@ -609,7 +614,11 @@
       list.querySelectorAll("li[data-did]").forEach((li) => {
         li.addEventListener("click", () => toggleDossierDetail(Number(li.dataset.did), li));
       });
-    } catch (e) { /* 档案列表加载失败不阻塞主流程 */ }
+    } catch (e) {
+      /* 档案列表加载失败不阻塞主流程：列表区就地给浅色错误行，
+         「点击重试」= 再次调用 loadDossiers（不再静默吞错） */
+      renderListError($("#chatDossierList"), loadDossiers);
+    }
   }
 
   function chapterBlock(title, body) {

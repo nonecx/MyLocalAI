@@ -13,14 +13,20 @@
      - POST /api/batch   JSON {"items":[...] | [{"text","url"}], "title", "source"}
        → 202 {"batch":{"id":N,"status":"running",...}} / 400|503 {"detail":"..."}
      - GET  /api/batch                → {"batches":[{id,title,source,item_count,
-        ok_count,failed_count,status,created_at}, ...]}（当前档案工作区，最新在前）
-     - GET  /api/batch/{id}           → {"batch":{...}, "items":[...], "summary":{...}}（summary 在顶层：纯汇总 dict、不带 card_type，挂载时补路由字段）
+        ok_count,failed_count,blocked_count,not_run_count,status,created_at}, ...]}
+        （当前档案工作区，最新在前；blocked_count/not_run_count 为读侧派生，
+        blocked 已从 failed 分列——W2 R5）
+     - GET  /api/batch/{id}           → {"batch":{... 含读侧派生 blocked_count},
+        "items":[...], "summary":{...}}（summary 在顶层：纯汇总 dict、不带
+        card_type，挂载时补路由字段）
      - GET  /api/batch/{id}/stream    → SSE（LF 帧，与 chat.js 同格式）：
          meta{batch_id} → status{stage} →
         progress{done,total,position,status}* → card{card_type:"batch_summary", ...平铺}
         narrative{delta} → done{cost}；
          异常出口 error{code,message}；已完结批次一次性重放 meta/status/card/done
-     - 停止 = 前端 AbortController 断开 stream（后端协作取消，无 DELETE 端点）
+     - 停止 = 前端 AbortController 断开 stream；后端检测到 SSE 客户端断开后
+       request_cancel，批次落 cancelled、未跑条目标 not_run（W2 已接线，
+       无 DELETE 端点）——「已取消」徽章路径因此真实可达
 
    纪律（同 settings.js / profiles.js）：
      - 纯 vanilla JS、IIFE、"use strict"、无 ES module、无框架；
@@ -51,19 +57,20 @@
   const MODES = ["text", "file", "urls"];
   const DEFAULT_FILE_HINT = "尚未选择文件（支持 .txt / .md / .csv / .json，选中即解析）。";
 
-  /* 条目状态 → 徽章文案与配色（后端封闭枚举的客户端映射；未知值原样显示，不猜） */
-  const ITEM_STATUS = {
-    ok: { text: "完成", cls: "green" },
-    done: { text: "完成", cls: "green" },
-    failed: { text: "失败", cls: "red" },
-    error: { text: "失败", cls: "red" },
-    blocked: { text: "已拦截", cls: "amber" },
-    not_run: { text: "未跑", cls: "amber" },
-    pending: { text: "排队中", cls: "gray" },
-    running: { text: "进行中", cls: "gray" },
-    cancelled: { text: "已取消", cls: "gray" },
-    canceled: { text: "已取消", cls: "gray" },
-  };
+  /* ---------- U0 公共助手收口（cards.js 经 window.ChatCards 导出，本文件不留重复副本） ----------
+     脚本顺序锁（tests/test_models_ui.py）保证 cards.js 先于本文件执行，别名在
+     IIFE 求值时即已就绪；调用点签名与原本地副本逐字一致，调用处零改动。
+     - BATCH_ITEM_STATUS：批次条目状态映射（与原本地映射逐键一致，含
+       cancelled/canceled →「已取消」——真取消链路落地后的徽章即走这里）；
+       未知值原样显示，不猜（statusMeta 兜底）。
+     - apiPath：路径占位符拼装（单值模式替换全部 {...}，兼容 {batch_id}）。
+     - readSseStream：SSE 读流（内含 parseFrame 拆帧，原逐字重复副本已删）。
+     注意：本文件自己的 when 是 textContent 版，与 cards.js 导出的 escape 版
+     语义不同（本文件无 innerHTML），保留本地实现，不混用。 */
+  const cards = window.ChatCards || {};
+  const ITEM_STATUS = cards.BATCH_ITEM_STATUS || {};
+  const apiPath = cards.apiPath;
+  const readSseStream = cards.readSseStream;
 
   /* 批次状态 → 徽章文案与配色（与 dossier/batches.py VALID_BATCH_STATUS 同口径；
       未知值原样显示，不猜） */
@@ -98,10 +105,6 @@
     if (className) node.className = className;
     if (text !== null && text !== undefined) node.textContent = String(text);
     return node;
-  }
-
-  function apiPath(tpl, id) {
-    return String(tpl).replace(/\{batch_id\}/g, encodeURIComponent(String(id)));
   }
 
   function when(s) {
@@ -143,10 +146,23 @@
     box.classList.remove("hidden");
     const line = box.querySelector(".chat-batch-progress-text");
     if (line) line.textContent = text;
-    /* percent 为 null = 只更新文字、不动进度条（避免状态事件把已有进度抹成 0） */
-    const fill = box.querySelector(".chat-batch-progress-bar > i");
-    if (fill && percent !== null && percent !== undefined && Number.isFinite(Number(percent))) {
-      fill.style.width = `${Math.max(0, Math.min(100, Number(percent)))}%`;
+    /* percent 为 null = 只更新文字、不动进度条（避免状态事件把已有进度抹成 0，
+       aria-valuenow 同样保持不动）。
+       进度条可访问性：外层容器骨架在 index.html（role=status），内部进度条的
+       role/aria 由这里接线（index.html / chat.css 不归本文件改）；percent 按
+       已完成条目数/总数现算（调用方传入），aria-valuenow 取 0-100 整数。 */
+    const bar = box.querySelector(".chat-batch-progress-bar");
+    if (bar) {
+      bar.setAttribute("role", "progressbar");
+      bar.setAttribute("aria-valuemin", "0");
+      bar.setAttribute("aria-valuemax", "100");
+    }
+    const percentNum = (percent !== null && percent !== undefined) ? Number(percent) : NaN;
+    if (Number.isFinite(percentNum)) {
+      const pct = Math.max(0, Math.min(100, Math.round(percentNum)));
+      if (bar) bar.setAttribute("aria-valuenow", String(pct));
+      const fill = box.querySelector(".chat-batch-progress-bar > i");
+      if (fill) fill.style.width = `${pct}%`;
     }
   }
 
@@ -197,7 +213,8 @@
     if (visible && !state.visible) reload();   // 首次显示时才拉列表
     state.visible = visible;
     if (!visible) {
-      /* 藏起来时：在跑的批次属于刚切走的档案工作区，如实断开 */
+      /* 藏起来时：在跑的批次属于刚切走的档案工作区，如实断开
+         （断开即触发后端取消链路：批次 cancelled、未跑条目 not_run） */
       abortRun();
       clearDetail();
       hideProgress();
@@ -208,19 +225,13 @@
 
   /* profiles.js 与本文件同在 DOMContentLoaded 初始化，而 loadProfiles 是异步的：
      首屏快照可能还是空。轮询等它就绪再定显隐（空快照按规格隐藏；10s 等不到
-     就保持隐藏，不无限轮询）。 */
+     就保持隐藏，不无限轮询）。轮询实现收口到 cards.js 的导出版（U0：250ms
+     × 40 tick，到点自停，返回定时器句柄）；这里只保留防重入与句柄归属 state
+     ——init 只跑一次，句柄到点停摆后留在 state 里仅作防重入标记。 */
   function startProfilesPoll() {
     if (state.profilesPoll) return;
-    let ticks = 0;
-    state.profilesPoll = window.setInterval(() => {
-      ticks += 1;
-      applyVisibility();
-      const snap = snapshot();
-      if ((snap && snap.active) || ticks >= 40) {
-        window.clearInterval(state.profilesPoll);
-        state.profilesPoll = null;
-      }
-    }, 250);
+    if (typeof cards.startProfilesPoll !== "function") return;
+    state.profilesPoll = cards.startProfilesPoll(applyVisibility, snapshot);
   }
 
   /* ---------- 输入模式 ---------- */
@@ -315,8 +326,12 @@
   function suggestTitle(items) {
     const first = items[0];
     const raw = (first && typeof first === "object") ? (first.text || first.url || "") : first;
-    const snippet = String(raw || "").replace(/\s+/g, " ").trim().slice(0, 24);
-    return `材料批次 ${items.length} 条${snippet ? ` · ${snippet}` : ""}`;
+    const snippet = String(raw || "").replace(/\s+/g, " ").trim();
+    /* 截 24 字并标注「已截断」（口径对齐 cards.js 的截断标注），不让用户
+       以为首条材料只有这一点内容 */
+    const cut = snippet.length > 24;
+    const shown = cut ? snippet.slice(0, 24) : snippet;
+    return `材料批次 ${items.length} 条${shown ? ` · ${shown}${cut ? "…（已截断）" : ""}` : ""}`;
   }
 
   /* ---------- 开始 / 停止 ---------- */
@@ -351,8 +366,12 @@
       await consumeStream(id);
     } catch (err) {
       if (err && err.name === "AbortError") {
-        /* abort 已断开连接：后端检测到断开即协作取消 */
-        showProgress("已停止：连接已断开，后端据此协作取消（最终状态以列表为准）。", null);
+        /* abort 断开进度流：后端检测到 SSE 客户端断开后 request_cancel，
+           批次落 cancelled、未跑条目标 not_run（W2 已接线，最终状态以
+           列表/详情为准） */
+        showProgress(
+          "已停止：进度流已断开，已通知后端取消本批；"
+          + "已跑条目的结论保留，未跑条目标记为未跑（最终状态以列表为准）。", null);
       } else {
         showError(`提交失败：${(err && err.message) || err}`);
         hideProgress();
@@ -371,44 +390,8 @@
     }
   }
 
-  /* ---------- SSE 消费（POST/GET + ReadableStream 手工拆帧，照抄 chat.js 写法） ---------- */
-  function parseFrame(frame) {
-    let name = "message";
-    const dataLines = [];
-    frame.split("\n").forEach((line) => {
-      const trimmed = line.replace(/\r$/, "");
-      if (trimmed.startsWith("event:")) name = trimmed.slice(6).trim();
-      else if (trimmed.startsWith("data:")) dataLines.push(trimmed.slice(5).replace(/^ /, ""));
-    });
-    if (!dataLines.length) return null;
-    try {
-      return { event: name, data: JSON.parse(dataLines.join("\n")) };
-    } catch (e) {
-      return null;   // 半截 JSON / 非 JSON 帧直接丢弃，不让整条流崩掉
-    }
-  }
-
-  async function readSseStream(resp, handlers) {
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      let idx;
-      while ((idx = buf.indexOf("\n\n")) >= 0) {
-        const frame = buf.slice(0, idx);
-        buf = buf.slice(idx + 2);
-        const evt = parseFrame(frame);
-        if (evt && handlers[evt.event]) handlers[evt.event](evt.data);
-      }
-    }
-    /* 流尾残余（正常实现每帧以空行结尾，这里只是兜底） */
-    const tail = parseFrame(buf);
-    if (tail && handlers[tail.event]) handlers[tail.event](tail.data);
-  }
-
+  /* ---------- SSE 消费（POST/GET + ReadableStream；读流/拆帧实现收口到
+     cards.js 导出的 readSseStream，本文件只管事件分发） ---------- */
   async function consumeStream(id) {
     state.controller = new AbortController();
     const resp = await fetch(apiPath(API.batchStream, id), {
@@ -492,9 +475,17 @@
 
   function onStreamDone(d) {
     const cost = (d && d.cost) || {};
-    showProgress(
-      `批次完成（API 调用 ${Number(cost.requests) || 0} 次 · ${Number(cost.tokens) || 0} tokens）`,
-      100);
+    /* 后端 R7 起 done.cost 为真实值；0 既可能是真的没有模型调用，也可能是
+       计数降级（前端分不出来）——统一用降级口径文案，不显示"0 次"冒充
+       精确计数 */
+    const requests = Number(cost.requests);
+    const tokens = Number(cost.tokens);
+    const reqOk = Number.isFinite(requests) && requests > 0;
+    const tokOk = Number.isFinite(tokens) && tokens > 0;
+    const costText = (reqOk || tokOk)
+      ? `API 调用 ${reqOk ? requests : 0} 次 · ${tokOk ? tokens : 0} tokens`
+      : "计数不可用或无模型调用";
+    showProgress(`批次完成（${costText}）`, 100);
     /* 汇总以服务端详情为准：拉一次详情补条目列表（卡片已在流里出过）；
        同批次的叙述要留着，不能被刷新吞掉 */
     loadBatch(state.activeBatchId, true);
@@ -516,14 +507,34 @@
   }
 
   /* ---------- 批次列表 ---------- */
+  /* 列表加载失败行：结构与 chat.js 的 renderListError 一致（li.chat-list-error
+     > span 文案 + button「点击重试」；纯 createElement/textContent，不进
+     innerHTML）。样式用 chat.css 已有的 .chat-list-error（U0 同批新增）；
+     该类的列表行细化选择器目前只覆盖会话/档案两个列表，批次列表只有基础
+     flex 排版生效——如需虚线框样式，CSS 层补 .chat-batch-list li.chat-list-error */
+  function renderListError(list) {
+    list.textContent = "";
+    const li = el("li", "chat-list-error");
+    li.appendChild(el("span", "", "批次列表加载失败"));
+    const btn = el("button", "", "点击重试");
+    btn.type = "button";
+    btn.addEventListener("click", () => reload());
+    li.appendChild(btn);
+    list.appendChild(li);
+  }
+
   async function reload() {
-    let data = {};
+    const list = $("#batchList");
+    let data = null;
     try {
       const resp = await fetch(API.batches);
-      if (!resp.ok) return;
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       data = await resp.json();
     } catch (e) {
-      return;   // 列表加载失败不阻塞面板其余交互
+      /* 列表加载失败不再静默吞掉：就地渲染错误行 + 点击重试
+         （仍不阻塞面板其余交互） */
+      if (list) renderListError(list);
+      return;
     }
     state.batches = Array.isArray(data.batches) ? data.batches : [];
     renderList();
@@ -552,14 +563,46 @@
     head.appendChild(el("span", `badge ${bmeta.cls}`, bmeta.text));
 
     const meta = el("div", "chat-batch-item-meta muted");
+    /* blocked 已从 failed 分列（W2 R5）：列表行带读侧派生的 blocked_count；
+       与未跑同口径，>0 才显示，不让每行都背着 0 计数 */
+    const blocked = Number(b.blocked_count) || 0;
     const notRun = Number(b.not_run_count) || 0;
     const counts = `共 ${Number(b.item_count) || 0} 条 · 成功 ${Number(b.ok_count) || 0}`
-      + ` · 失败 ${Number(b.failed_count) || 0}` + (notRun > 0 ? ` · 未跑 ${notRun}` : "");
+      + ` · 失败 ${Number(b.failed_count) || 0}`
+      + (blocked > 0 ? ` · 已拦截 ${blocked}` : "")
+      + (notRun > 0 ? ` · 未跑 ${notRun}` : "");
     meta.textContent = `#${id} · ${sourceLabel(b.source)} · ${counts} · ${when(b.created_at)}`;
 
     li.appendChild(head);
     li.appendChild(meta);
-    li.addEventListener("click", () => loadBatch(id));
+
+    /* 键盘可达性：li 可点开详情，键盘用户同样要能进——tabindex + role=button，
+       Enter/Space 与 click 走同一 open 动作。:focus-visible 焦点框样式在
+       chat.css（不归本文件改），这里用 focus/blur 内联 outline 兜底，
+       :focus-visible 不被支持时退化为"聚焦即显示"。 */
+    const open = () => loadBatch(id);
+    li.tabIndex = 0;
+    li.setAttribute("role", "button");
+    li.setAttribute("aria-label", `${b.title || `批次 #${id}`}，点按查看批次详情`);
+    li.addEventListener("click", open);
+    li.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " " || ev.key === "Spacebar") {
+        ev.preventDefault();   // 空格默认滚屏 / 回车默认提交，都不留给浏览器
+        open();
+      }
+    });
+    li.addEventListener("focus", () => {
+      let focusVisible = false;
+      try { focusVisible = li.matches(":focus-visible"); } catch (e) { focusVisible = true; }
+      if (focusVisible) {
+        li.style.outline = "2px solid var(--primary)";
+        li.style.outlineOffset = "-2px";
+      }
+    });
+    li.addEventListener("blur", () => {
+      li.style.outline = "";
+      li.style.outlineOffset = "";
+    });
     return li;
   }
 
@@ -597,6 +640,13 @@
     detail.classList.remove("hidden");
     state.itemEls = {};
 
+    /* 汇总取数提前：blocked 分列与汇总卡共用同一份（顶层 summary 优先，
+       回落 batch.summary；都没有就不显示，不编造） */
+    const summary = (topSummary && typeof topSummary === "object" && Object.keys(topSummary).length)
+      ? topSummary
+      : ((batch.summary && typeof batch.summary === "object"
+          && Object.keys(batch.summary).length) ? batch.summary : null);
+
     const head = el("div", "chat-batch-detail-head");
     head.appendChild(el("div", "chat-batch-detail-title",
       batch.title || `批次 #${Number(batch.id)}`));
@@ -604,19 +654,22 @@
     const counts = `共 ${Number(batch.item_count) || 0} 条 · 成功 ${Number(batch.ok_count) || 0}`
       + ` · 失败 ${Number(batch.failed_count) || 0}`;
     const notRun = Number(batch.not_run_count) || 0;
+    /* blocked 已从 failed 分列（W2 R5）：详情行自带读侧派生的 blocked_count，
+       行字段缺失时回落汇总里的 blocked；与未跑同口径，>0 才显示 */
+    const rowBlocked = Number(batch.blocked_count);
+    const blockedCount = Number.isFinite(rowBlocked)
+      ? rowBlocked
+      : (Number(summary && summary.blocked) || 0);
     head.appendChild(el("div", "chat-batch-detail-meta muted",
       `状态：${bmeta.text} · ${sourceLabel(batch.source)} · ${counts}`
+      + (blockedCount > 0 ? ` · 已拦截 ${blockedCount}` : "")
       + (notRun > 0 ? ` · 未跑 ${notRun}` : "") + ` · ${when(batch.created_at)}`));
     detail.appendChild(head);
 
-    /* 汇总卡：顶层 summary 优先，回落 batch.summary；都没有就不显示（不编造）。
-       详情接口的 summary 是纯汇总 dict（不带 card_type / batch_id / title /
-       source）——这几项用 batch 行自带的真实字段补齐（与后端 summary_card
-       的拼法一致），as_of 汇总里没有就照实显示"未知"，不拿时间冒充证据截至 */
-    const summary = (topSummary && typeof topSummary === "object" && Object.keys(topSummary).length)
-      ? topSummary
-      : ((batch.summary && typeof batch.summary === "object"
-          && Object.keys(batch.summary).length) ? batch.summary : null);
+    /* 汇总卡：详情接口的 summary 是纯汇总 dict（不带 card_type / batch_id /
+       title / source）——这几项用 batch 行自带的真实字段补齐（与后端
+       summary_card 的拼法一致），as_of 汇总里没有就照实显示"未知"，
+       不拿时间冒充证据截至 */
     if (summary && window.ChatCards && typeof window.ChatCards.mountCard === "function") {
       const slot = el("div", "chat-batch-card-slot");
       window.ChatCards.mountCard(slot, Object.assign({

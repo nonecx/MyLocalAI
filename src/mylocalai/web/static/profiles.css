@@ -2,6 +2,8 @@
    profiles.css —— 档案工作区（多 Profile 分家）样式
    只新增 profile-* 类，复用 style.css 的 :root 令牌（不另起一套配色）；
    与 settings.css 同一纪律。chat.css 提供 .chat-profile-line 的左栏行样式。
+   v7：补内联编辑表单（.profile-inline-form*）、菜单空态、键盘可达焦点环
+   与窄屏 900px 断点（对照 chat.css / settings.css 的既有断点写法）。
    ============================================================ */
 
 /* ---------- 顶栏切换器 ---------- */
@@ -91,6 +93,21 @@
   border-radius: 0 0 6px 6px;
   margin-top: 4px;
   color: var(--muted);
+}
+
+/* 菜单空态（无档案 / 首载失败的防御说明，profiles.js renderMenu 渲染） */
+.profile-menu-empty {
+  padding: 10px 12px 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* ---------- 键盘可达：菜单项 / 弹层内统一焦点环（与 settings.css 同款，
+   键盘导航配套；:focus-visible 保证鼠标点击不画环） ---------- */
+.profile-menu-item:focus-visible,
+.profile-dialog :focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
 }
 
 /* ---------- 管理弹层 ---------- */
@@ -231,4 +248,68 @@
 .profile-create-actions {
   display: flex;
   justify-content: flex-end;
+}
+
+/* ---------- 内联编辑表单（改名 / 改角色） ----------
+   骨架在 index.html（初始 hidden），profiles.js 点行内按钮时互斥显示；
+   视觉语言复用弹层既有口径：primary-soft 底 + primary-border 描边
+   （同 .profile-status / .profile-row.active），输入框同 .profile-create-fields。 */
+.profile-inline-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--primary-border);
+  border-radius: 8px;
+  background: var(--primary-soft);
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+
+.profile-inline-form.hidden {
+  display: none;
+}
+
+/* 表单标题由 profiles.js 注入（写明正在改哪个档案），独占一行 */
+.profile-inline-form-title {
+  flex: 1 0 100%;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--primary-dark);
+}
+
+.profile-inline-form input,
+.profile-inline-form select {
+  flex: 1 1 180px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--panel);
+}
+
+/* ---------- 窄屏 900px（对齐 chat.css / settings.css 的既有断点）：
+   顶栏切换器收窄不挤占品牌区，菜单不横向溢出，弹层贴边占满、字段单列 ---------- */
+@media (max-width: 900px) {
+  .profile-btn { max-width: 150px; }
+  .profile-btn #profileName { max-width: 84px; }
+
+  .profile-menu {
+    min-width: 0;
+    width: min(300px, calc(100vw - 24px));
+    max-width: calc(100vw - 24px);
+  }
+
+  /* 名称与计数说明都允许截断，长档案名不把菜单行撑破 */
+  .profile-menu-name { flex-shrink: 1; }
+  .profile-menu-meta { flex-shrink: 1; overflow: hidden; text-overflow: ellipsis; }
+
+  .profile-dialog { padding: 8px; }
+  .profile-dialog-card { max-height: 92vh; padding: 12px; }
+  .profile-row-head { flex-wrap: wrap; }
+  .profile-create-fields { grid-template-columns: 1fr; }
+  .profile-inline-form input,
+  .profile-inline-form select { flex: 1 1 100%; }
 }

@@ -7,6 +7,13 @@
    卡片渲染逻辑现由本文件独家承载）。
    由 chat.js 调用（chat.js 不直接拼卡片 HTML）。
 
+   同时是前端公共小工具的唯一归属（U0 收口）：escapeHtml / when / apiPath /
+   parseFrame + readSseStream（SSE 拆帧读流，自 chat.js 移入）/
+   startProfilesPoll（等档案快照，batch.js / monitor.js 同款）与
+   BATCH_ITEM_STATUS / MONITOR_STATUS 状态映射，全部经 window.ChatCards
+   导出；batch.js / monitor.js / platform.js 等文件里的逐字重复副本由各自
+   代理换成消费这里的导出版（单一事实源，本文件是唯一归属）。
+
    口径诚实铁律：数字旁必须展示 as_of 与徽章（置信度 / 降级 / 代理估计 /
    verdict_basis）——分数是纯函数从证据推导的，展示层不替它"说满"。
    ============================================================ */
@@ -839,6 +846,96 @@
       </div>`;
   }
 
+  /* ---------- 公共小工具（U0 收口：唯一归属，经 window.ChatCards 导出） ---------- */
+
+  /* API 路径拼装（最小实现，覆盖现存各文件的占位符风格：
+     {sid} / {id} / {batch_id} / {sub_id} 都能用）：
+     - apiPath("/api/sessions/{sid}/messages", 5) → "/api/sessions/5/messages"
+       （第二参为单值：替换路径里全部占位符，值一律 encodeURIComponent）；
+     - apiPath("/api/dossiers/{id}/export", 3, { format: "md" })
+       → "/api/dossiers/3/export?format=md"
+       （第三参为 query 对象：键值都转义，null/undefined 项丢弃；URL 已带
+        query 时用 & 续接，不重复问号）。 */
+  function apiPath(path, params, query) {
+    let url = String(path || "");
+    if (params !== null && params !== undefined && typeof params === "object") {
+      Object.keys(params).forEach((k) => {
+        url = url.split(`{${k}}`).join(encodeURIComponent(String(params[k])));
+      });
+    } else if (params !== null && params !== undefined) {
+      url = url.replace(/\{[^/}]+\}/g, encodeURIComponent(String(params)));
+    }
+    if (query && typeof query === "object") {
+      const qs = Object.keys(query)
+        .filter((k) => query[k] !== null && query[k] !== undefined)
+        .map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(String(query[k]))}`)
+        .join("&");
+      if (qs) url += (url.indexOf("?") >= 0 ? "&" : "?") + qs;
+    }
+    return url;
+  }
+
+  /* SSE 帧解析："event:" 行取事件名、"data:" 行累积成 JSON。
+     半截 JSON / 非 JSON 帧返回 null 丢弃，不让整条流崩掉
+     （与原 chat.js / batch.js 里的逐字重复副本同文）。 */
+  function parseFrame(frame) {
+    let name = "message";
+    const dataLines = [];
+    frame.split("\n").forEach((line) => {
+      const trimmed = line.replace(/\r$/, "");
+      if (trimmed.startsWith("event:")) name = trimmed.slice(6).trim();
+      else if (trimmed.startsWith("data:")) dataLines.push(trimmed.slice(5).replace(/^ /, ""));
+    });
+    if (!dataLines.length) return null;
+    try {
+      return { event: name, data: JSON.parse(dataLines.join("\n")) };
+    } catch (e) {
+      return null;   // 半截 JSON / 非 JSON 帧直接丢弃，不让整条流崩掉
+    }
+  }
+
+  /* SSE 读流：POST/GET + ReadableStream 手工拆帧（EventSource 不支持 POST）。
+     handlers 是「事件名 → 处理器」映射，未注册的事件名跳过；
+     帧以 \n\n 分隔，流尾残余兜底处理（同原实现）。 */
+  async function readSseStream(resp, handlers) {
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const frame = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        const evt = parseFrame(frame);
+        if (evt && handlers[evt.event]) handlers[evt.event](evt.data);
+      }
+    }
+    /* 流尾残余（正常实现每帧以空行结尾，这里只是兜底） */
+    const tail = parseFrame(buf);
+    if (tail && handlers[tail.event]) handlers[tail.event](tail.data);
+  }
+
+  /* 等档案快照就绪再定面板显隐（batch.js / monitor.js 同款做法）：
+     每 250ms 跑一次 applyFn（调方传自己的 applyVisibility）；快照出现 active
+     或 10s（40 tick）到顶即停，不无限轮询。返回定时器句柄，调用方自行存入
+     state 并做防重入（if (state.profilesPoll) return）。applyFn / snapshotFn
+     由调用方注入——cards.js 不依赖 ProfilesPanel 的内部状态。 */
+  function startProfilesPoll(applyFn, snapshotFn) {
+    let ticks = 0;
+    const timer = window.setInterval(() => {
+      ticks += 1;
+      if (typeof applyFn === "function") applyFn();
+      const snap = (typeof snapshotFn === "function") ? snapshotFn() : null;
+      if ((snap && snap.active) || ticks >= 40) {
+        window.clearInterval(timer);
+      }
+    }, 250);
+    return timer;
+  }
+
   /* ---------- 分发：优先 claim_answer，其次保留既有业务卡片兼容 ---------- */
   function renderCard(payload) {
     if (!payload || typeof payload !== "object") return "";
@@ -877,10 +974,17 @@
     container.innerHTML = renderCard(payload);
   }
 
-  /* 供 chat.js 调用的唯一入口（不污染全局命名空间） */
+  /* 唯一入口（不污染全局命名空间）。前 12 项是卡片渲染器；其后是公共小工具
+     （escapeHtml / when / apiPath / parseFrame / readSseStream / startProfilesPoll，
+      U0 收口的唯一归属）与状态映射（BATCH_ITEM_STATUS / MONITOR_STATUS），
+     供 chat.js / batch.js / monitor.js / platform.js 消费，替代各自的重复副本。
+     注意 when 是 escape 版（输出已 HTML 转义），只用于模板字符串插值，
+     textContent 场景请自行 String(s).replace("T", " ")。 */
   window.ChatCards = {
     renderCard, renderClaimAnswer, renderConclusion, renderSpeech, renderHeat,
     renderInsights, renderEvidence, renderPlatform, renderBatchSummary,
     renderMonitorChange, mountCard, escapeHtml,
+    when, apiPath, parseFrame, readSseStream, startProfilesPoll,
+    BATCH_ITEM_STATUS, MONITOR_STATUS,
   };
 })();

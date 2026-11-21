@@ -69,6 +69,28 @@
       <p class="profile-dialog-hint muted">每个档案工作区有独立的会话、档案与画像数据；角色决定入口与呈现，能力不裁剪。切换后左栏与会话视图随之换边。</p>
       <div id="profileStatus" class="profile-status hidden" role="status" aria-live="polite"></div>
       <div id="profileList" class="profile-list"></div>
+      <!-- 内联编辑表单骨架（初始 hidden，供 U3 接 JS：点档案行的「改名 / 改角色」时
+           显示对应表单并回填当前值，取消/保存后收起；两表单互斥显示）。
+           四个角色 option 的文案与 profiles.js 的 ROLE_META 逐字对齐
+           （layperson=普通用户 / analyst=专业用户 · 材料分析 /
+            monitor=专业用户 · 领域监测 / full=全部能力），默认选中 full。
+           注意：profiles.css 尚无 .profile-inline-form，U3 接线时补样式。 -->
+      <form id="profileRenameForm" class="profile-inline-form hidden" novalidate>
+        <input id="profileRenameInput" type="text" maxlength="40" autocomplete="off"
+          placeholder="新的显示名称" aria-label="新的显示名称" />
+        <button id="profileRenameConfirm" class="btn-primary" type="button">保存</button>
+        <button id="profileRenameCancel" class="btn-ghost" type="button">取消</button>
+      </form>
+      <form id="profileRoleForm" class="profile-inline-form hidden" novalidate>
+        <select id="profileRoleSelect" aria-label="选择角色">
+          <option value="layperson">普通用户（layperson）</option>
+          <option value="analyst">专业用户 · 材料分析（analyst）</option>
+          <option value="monitor">专业用户 · 领域监测（monitor）</option>
+          <option value="full" selected>全部能力（full）</option>
+        </select>
+        <button id="profileRoleConfirm" class="btn-primary" type="button">保存</button>
+        <button id="profileRoleCancel" class="btn-ghost" type="button">取消</button>
+      </form>
       <form id="profileCreateForm" class="profile-create" novalidate>
         <h3>新建档案</h3>
         <div class="profile-create-fields">
@@ -222,7 +244,7 @@
           <h2>领域监测</h2>
           <span class="count-chip">专业用户</span>
         </div>
-        <p class="chat-monitor-hint muted">订阅话题后按频率跑检（立即运行或等调度）；调度仅在服务运行期间有效，关服即停；频率下限 300 秒（保护搜索引擎），域名限定每轮最多 3 个 site:。</p>
+        <p class="chat-monitor-hint muted">订阅话题后按频率跑检（立即运行或等调度）；调度仅在服务运行期间有效，关服即停。频率与数量限制以表单下方的动态说明为准。</p>
         <form id="monCreateForm" class="chat-monitor-create" novalidate>
           <label>话题（必填，最多 200 字）
             <input id="monTopic" type="text" maxlength="200" autocomplete="off"
@@ -232,7 +254,7 @@
             <input id="monKeywords" type="text" autocomplete="off"
               placeholder="可选：逗号分隔，如：下毒, 水质" />
           </label>
-          <label>域名限定（可选，逗号分隔，每轮最多 3 个 site:）
+          <label>域名限定（可选，逗号分隔）
             <input id="monDomains" type="text" autocomplete="off"
               placeholder="可选：逗号分隔，如：gov.cn, news.cn" />
           </label>
@@ -290,7 +312,7 @@
         </div>
       </div>
 
-      <div id="chatError" class="error-box hidden"></div>
+      <div id="chatError" class="error-box hidden" role="alert"></div>
 
       <!-- 快捷 chips：核查真伪 / 言论土壤 只把提示词填进输入框（原文仍由用户提供，
            本系统不为用户编造待核查文本）；算热度 / 我的画像 走结构化只读 action。 -->
@@ -348,12 +370,17 @@
     </section>
     <div id="platformScanHint" class="platform-scan-hint hidden" role="status"></div>
 
-    <!-- 筛选 chips -->
+    <!-- 筛选 chips：aria-pressed 预置初值（默认「全部」按下）；platform.js 切换筛选时
+         必须同步更新 aria-pressed 与 active 类（U4 对齐，读屏器依赖该状态） -->
     <div class="platform-filterrow" id="platformFilterRow">
-      <button class="platform-filter active" data-risk="" type="button">全部</button>
-      <button class="platform-filter" data-risk="high,urgent" type="button">预警</button>
-      <button class="platform-filter" data-risk="suspect" type="button">疑似</button>
-      <button class="platform-filter" data-risk="notice" type="button">关注</button>
+      <button class="platform-filter active" data-risk="" type="button"
+        aria-pressed="true">全部</button>
+      <button class="platform-filter" data-risk="high,urgent" type="button"
+        aria-pressed="false">预警</button>
+      <button class="platform-filter" data-risk="suspect" type="button"
+        aria-pressed="false">疑似</button>
+      <button class="platform-filter" data-risk="notice" type="button"
+        aria-pressed="false">关注</button>
     </div>
 
     <!-- 信息流 -->
@@ -370,7 +397,8 @@
 
   <!-- 管理抽屉 -->
   <div class="platform-drawer-mask hidden" id="platformDrawerMask"></div>
-  <aside class="platform-drawer hidden" id="platformDrawer" aria-label="平台管理">
+  <aside class="platform-drawer hidden" id="platformDrawer" role="dialog" aria-modal="true"
+    aria-label="平台管理">
     <div class="platform-drawer-head">
       <h2>管理</h2>
       <button id="platformDrawerClose" class="btn-ghost" type="button">关闭</button>

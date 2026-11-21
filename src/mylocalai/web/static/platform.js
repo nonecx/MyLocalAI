@@ -11,16 +11,37 @@
        结束 → 刷新全部（单飞：后端忙时 started=false 如实提示）；
      - 空态双引导：没有监控词 → 引导去抽屉添加；有词无信息 → 引导立即巡检；
      - 未授权引导态：外部检索默认关闭（fail-closed），抽屉里出引导卡链到设置弹层，
-       不静默失败、不假装有数据。
+       不静默失败、不假装有数据；
+     - 加载失败如实降级：状态/信息流/监控词/巡检记录/信息源任一路失败，都在对应
+       区域渲染「数据加载失败 + 重试」错误行（.platform-load-error，纯 DOM），
+       不把网络故障演成「暂无数据」——错误态与空态分开说，空态引导只在真没数据时出。
    口径：风险分级只描述传播风险、不判定真假；热度是代理/估计值（徽章随行）；
-        所有外部文本一律 escapeHtml 后再进 innerHTML，判空再渲染，不猜数据。
-        领域只来自用户手设或后端推断链（user / inferred_*），none 与空一律不画徽章；
+        领域只来自用户手设或后端推断链（user / inferred_*），none 与空一律不画徽章。
+
+   【innerHTML 白名单声明】本文件登记为全站 innerHTML 例外渲染层（白名单成员；
+   卡片渲染的唯一事实源在 cards.js，处理用户输入的 settings.js / profiles.js
+   一律禁用 innerHTML 且有静态扫描守护）。豁免边界——只许收紧、不许扩大，
+   每次改动重审一遍：
+     1. 所有插值先过 escapeHtml：唯一实现取自 window.ChatCards 导出（U0 收口），
+        本文件不留本地副本；
+     2. 所有动态 href 一律过 safeUrl（只接受 http/https，javascript:/data: 等
+        伪协议落 "#"）；外部文本截断用 clipped（超长如实缀「…（已截断）」，
+        对齐 cards.js 口径）；
+     3. 无外部数据插值的 UI（加载失败行/重试按钮等）一律 createElement +
+        textContent 纯 DOM 构建，不走 innerHTML；
+     4. 新增渲染点能用纯 DOM 就不用 innerHTML；前后端自洽守护在
+        tests/test_platform_api.py（API 路径 / 元素 id / platform-* class 三向断言）。
    ============================================================ */
 "use strict";
 
 (function () {
   /* file:// 双击打开时 shell.js 已给出启动引导，这里静默退出 */
   if (location.protocol === "file:") return;
+
+  /* escapeHtml 取 U0 收口后的唯一实现（cards.js 先于本文件加载，见 index.html
+     脚本顺序）。依赖缺失时与「骨架不完整安静退出」同口径，不另留本地副本。 */
+  if (!window.ChatCards || typeof window.ChatCards.escapeHtml !== "function") return;
+  const escapeHtml = window.ChatCards.escapeHtml;
 
   const $ = (sel) => document.querySelector(sel);
 
@@ -67,11 +88,23 @@
   let lastWatch = [];
   let lastFeed = [];
   let lastScans = [];
+  let feedLoadFailed = false;             // 信息流加载失败态：失败时不渲染空态引导（那是空态的活）
 
-  function escapeHtml(s) {
-    return String(s)
-      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  /* 安全外链（对照 cards.js 的 safeUrl 口径）：原文链接来自外部检索内容，必须
+     按不可信输入处理——只接受 http/https；javascript:/data: 等伪协议一律落 "#"
+     （空值也归 "#"，与旧口径 e.url || "#" 一致）。返回值已转义，直接进 href。 */
+  function safeUrl(u) {
+    const s = String(u || "").trim();
+    if (!s) return "#";
+    return /^https?:\/\//i.test(s) ? escapeHtml(s) : "#";
+  }
+
+  /* 截断标注统一口径（对齐 cards.js）：超长被截时如实缀「…（已截断）」，
+     不让用户把摘要当全文。返回已转义文本，直接进模板插值。 */
+  function clipped(s, n) {
+    const str = String(s || "");
+    const cut = str.length > n;
+    return escapeHtml(cut ? str.slice(0, n) : str) + (cut ? "…（已截断）" : "");
   }
 
   function fmtTime(s) {
@@ -105,11 +138,13 @@
     if (isPlatform) refreshAll();
   }
 
-  /* ---------- 数据加载（任一路失败自行降级成空壳，不拖垮其余四路） ---------- */
+  /* ---------- 数据加载（任一路失败自行降级，不拖垮其余几路） ----------
+     失败返回 null（与「真没数据」的 [] 严格区分）：render* 收到 null 就渲染
+     失败行 + 重试按钮，收到 [] 才渲染空态——不把网络故障演成"没有数据"。 */
   async function loadStatus() {
     try {
       const resp = await fetch(PLATFORM_API.status);
-      if (!resp.ok) return null;
+      if (!resp.ok) return null;      // null = 加载失败（renderStatus 落失败态）
       return resp.json();
     } catch (e) { return null; }
   }
@@ -120,12 +155,14 @@
         ? `${PLATFORM_API.feed}?risk=${encodeURIComponent(feedRiskFilter)}&limit=50`
         : `${PLATFORM_API.feed}?limit=50`;
       const resp = await fetch(url);
-      if (!resp.ok) return [];
+      if (!resp.ok) return null;
       const data = await resp.json();
       return (data && data.entries) || [];
-    } catch (e) { return []; }
+    } catch (e) { return null; }
   }
 
+  /* 预警只并入摘要计数、无独立区域：失败退 []（计数按 0 显示）是已知取舍，
+     区域级如实报错由状态/信息流/监控词/巡检/信息源五路承担 */
   async function loadWarnings() {
     try {
       const resp = await fetch(`${PLATFORM_API.warnings}?limit=${WARN_LIMIT}`);
@@ -138,19 +175,19 @@
   async function loadWatch() {
     try {
       const resp = await fetch(PLATFORM_API.watch);
-      if (!resp.ok) return [];
+      if (!resp.ok) return null;
       const data = await resp.json();
       return (data && data.queries) || [];
-    } catch (e) { return []; }
+    } catch (e) { return null; }
   }
 
   async function loadScans() {
     try {
       const resp = await fetch(`${PLATFORM_API.scans}?limit=10`);
-      if (!resp.ok) return [];
+      if (!resp.ok) return null;
       const data = await resp.json();
       return (data && data.scans) || [];
-    } catch (e) { return []; }
+    } catch (e) { return null; }
   }
 
   async function loadSources() {
@@ -261,10 +298,34 @@
     el.textContent = text;
   }
 
+  /* 状态加载失败：摘要条如实报错 + 重试按钮，不再死在骨架的初始「加载中…」。
+     重试按区调对应加载函数（loadStatus）；成功后 renderStatus 会清掉失败钮。 */
+  function renderStatusLoadError() {
+    const bar = $("#platformStatusBar");
+    if (!bar) return;
+    const summary = $("#platformSummary");
+    if (summary) summary.textContent = "状态获取失败";
+    const dot = $("#platformStatusDot");
+    if (dot) dot.classList.remove("platform-statusdot-run", "platform-statusdot-warn");
+    const actions = bar.querySelector(".platform-statusbar-actions");
+    if (actions && !actions.querySelector(".platform-load-retry")) {
+      const btn = document.createElement("button");   // 纯 DOM：无插值，不进 innerHTML
+      btn.type = "button";
+      btn.className = "platform-load-retry";
+      btn.textContent = "重试";
+      btn.addEventListener("click", () => loadStatus().then(renderStatus));
+      actions.appendChild(btn);
+    }
+  }
+
   function renderStatus(status) {
     const bar = $("#platformStatusBar");
-    if (!status || !bar) return;
+    if (!bar) return;
+    if (!status) { renderStatusLoadError(); return; }   // null = 拉取失败（见 loadStatus）
     lastStatus = status;
+    /* 成功即清掉上一次失败留下的重试钮（若有），摘要话术由 renderSummary 重写 */
+    const staleRetry = bar.querySelector(".platform-statusbar-actions .platform-load-retry");
+    if (staleRetry) staleRetry.remove();
     const authorized = !!status.external_authorized;
     const running = !!status.running;
     const busy = running || !!status.scan_in_progress;
@@ -292,12 +353,42 @@
     renderSummary();
   }
 
+  /* ---------- 加载失败行（信息流/监控词/巡检记录/信息源四区共用） ----------
+     纯 DOM 构建（无插值、不进 innerHTML），文案脱敏（不带原始异常细节）；
+     「重试」按区调对应加载函数。样式 .platform-load-error / .platform-load-retry
+     在 platform.css（引用 :root 令牌）。 */
+  function renderLoadErrorRow(list, retry) {
+    if (!list) return;
+    const li = document.createElement("li");
+    li.className = "platform-load-error";
+    const text = document.createElement("span");
+    text.textContent = "数据加载失败（网络或服务未就绪）";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "platform-load-retry";
+    btn.textContent = "重试";
+    btn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      retry();
+    });
+    li.appendChild(text);
+    li.appendChild(btn);
+    list.replaceChildren(li);
+  }
+
   /* ---------- 渲染：监控词（抽屉） ---------- */
   function renderWatch(queries) {
     lastWatch = Array.isArray(queries) ? queries : [];
     renderSummary();
     const list = $("#platformWatchList");
     if (!list) return;
+    if (queries === null) {
+      /* 加载失败与"空清单"分开说：不把故障演成"你没有监控词"（口径同信息源区）。
+         编辑行已不可见：先退编辑态，避免卡在只读输入框上等一个看不见的保存对象 */
+      cancelWatchEdit();
+      renderLoadErrorRow(list, () => reloadWatch());
+      return;
+    }
     if (!lastWatch.length) {
       list.innerHTML = '<li class="empty">暂无监控词；添加后按调度间隔自动巡检</li>';
       watchEditId = null;               // 列表空了：编辑态失去对象，回到新增态
@@ -305,7 +396,8 @@
       return;
     }
     list.innerHTML = lastWatch.map((q) => `
-      <li data-qid="${Number(q.id)}" class="${
+      <li data-qid="${Number(q.id)}" tabindex="0" role="button"
+        aria-label="编辑监控词 ${escapeHtml(q.query || "")} 的领域" class="${
         Number(q.id) === watchEditId ? "platform-watch-editing" : ""}">
         <span class="platform-watch-query">${escapeHtml(q.query || "")}</span>
         ${watchDomainBadgeHtml(q)}
@@ -321,6 +413,14 @@
         });
       /* 行点击（非删除按钮）→ 编辑态：回填 input + 领域下拉，保存走 PUT watch/{id} */
       li.addEventListener("click", () => startWatchEdit(qid));
+      /* 键盘同权：行聚焦后 Enter/Space 进编辑态（target 限定行本身，
+         避免行内删除按钮的按键冒泡误触编辑） */
+      li.addEventListener("keydown", (ev) => {
+        if (ev.key !== "Enter" && ev.key !== " ") return;
+        if (ev.target !== li) return;
+        ev.preventDefault();
+        startWatchEdit(qid);
+      });
     });
     syncWatchEditUi();
   }
@@ -430,14 +530,15 @@
     const hasDossier = e.dossier_id !== null && e.dossier_id !== undefined
       && e.dossier_id !== "";
     const dossierId = hasDossier ? Number(e.dossier_id) : 0;
-    return `<li class="platform-feed-item${riskCls}" data-eid="${Number(e.id)}">
+    return `<li class="platform-feed-item${riskCls}" data-eid="${Number(e.id)}"
+      tabindex="0" role="button" aria-expanded="false">
       <div class="platform-feed-head">
         <span class="badge ${level.cls}">${escapeHtml(level.label)}</span>
         ${feedDomainBadgeHtml(e.topic_domain, e.topic_domain_source)}
-        <span class="platform-feed-title">${escapeHtml(String(e.title || "").slice(0, 60))}</span>
+        <span class="platform-feed-title">${clipped(e.title, 60)}</span>
         ${statusBadge}
       </div>
-      <div class="platform-feed-summary">${escapeHtml(String(e.snippet || "").slice(0, 120))}</div>
+      <div class="platform-feed-summary">${clipped(e.snippet, 120)}</div>
       <div class="platform-feed-meta">
         <span>${escapeHtml(e.domain || "")}</span>
         <span>${escapeHtml(fmtTime(e.discovered_at || e.created_at))}</span>
@@ -450,8 +551,8 @@
           reasons.length
             ? `<ol>${reasons.map((r) => `<li>${escapeHtml(r)}</li>`).join("")}</ol>`
             : "—"}</div>
-        <a class="platform-feed-url" href="${escapeHtml(e.url || "#")}" target="_blank"
-          rel="noopener noreferrer">${escapeHtml(String(e.url || "").slice(0, 90))}</a>
+        <a class="platform-feed-url" href="${safeUrl(e.url)}" target="_blank"
+          rel="noopener noreferrer">${clipped(e.url, 90)}</a>
         ${hasDossier ? `<p class="platform-feed-dossier">档案 #${dossierId} 已在档案库，`
           + `可到对话页档案库查看</p>` : ""}
       </div>
@@ -478,6 +579,16 @@
     lastFeed = Array.isArray(entries) ? entries : [];
     const list = $("#platformFeed");
     if (!list) return;
+    if (entries === null) {
+      /* 加载失败要落在信息流区域（覆盖骨架的「加载中…」占位），且不出空态引导——
+         「去添加/立即巡检」是空态的活，故障时引导反而误导 */
+      feedLoadFailed = true;
+      const box = $("#platformEmpty");
+      if (box) box.classList.add("hidden");
+      renderLoadErrorRow(list, () => loadFeed().then(renderFeed));
+      return;
+    }
+    feedLoadFailed = false;
     if (!lastFeed.length) {
       list.innerHTML = '<li class="empty">暂无信息</li>';
       renderFeedEmpty();
@@ -486,12 +597,25 @@
     const box = $("#platformEmpty");
     if (box) box.classList.add("hidden");
     list.innerHTML = lastFeed.map(feedEntryHtml).join("");
-    /* 点击卡片展开/收起详情（点原文链接放行：照常开新窗口，不误切详情） */
+    /* 点击卡片展开/收起详情（点原文链接放行：照常开新窗口，不误切详情）；
+       键盘同权：条目 tabindex=0 role=button，Enter/Space 展开/收起（Space
+       拦掉默认滚动），aria-expanded 跟随，读屏器能感知展开态 */
     list.querySelectorAll("li[data-eid]").forEach((li) => {
+      const toggle = () => {
+        const detail = li.querySelector(".platform-feed-detail");
+        if (!detail) return;
+        const nowOpen = !detail.classList.toggle("hidden");
+        li.setAttribute("aria-expanded", nowOpen ? "true" : "false");
+      };
       li.addEventListener("click", (ev) => {
         if (ev.target.closest("a")) return;
-        const detail = li.querySelector(".platform-feed-detail");
-        if (detail) detail.classList.toggle("hidden");
+        toggle();
+      });
+      li.addEventListener("keydown", (ev) => {
+        if (ev.key !== "Enter" && ev.key !== " ") return;
+        if (ev.target.closest("a")) return;
+        ev.preventDefault();
+        toggle();
       });
     });
   }
@@ -502,8 +626,8 @@
     const list = $("#platformSourceList");
     if (!list) return;
     if (sources === null) {
-      /* 加载失败与"空清单"分开说：不把故障演成"你没有信息源" */
-      list.innerHTML = '<li class="empty">信息源加载失败（切走再切回本视图重试）</li>';
+      /* 加载失败与"空清单"分开说：不把故障演成"你没有信息源"；重试不用再切视图 */
+      renderLoadErrorRow(list, () => loadSources().then(renderSources));
       return;
     }
     if (!lastSources.length) {
@@ -521,7 +645,7 @@
         <span class="platform-source-name">${escapeHtml(s.name || s.url || "未命名源")}</span>
         <span class="badge gray">${kindLabel}</span>
         <span class="badge gray">${bindLabel}</span>
-        <span class="platform-source-url">${escapeHtml(String(s.url || "").slice(0, 120))}</span>
+        <span class="platform-source-url">${clipped(s.url, 120)}</span>
         <div class="platform-source-op">
           <button type="button" data-op="toggle">${on ? "停用" : "启用"}</button>
           <button type="button" data-op="test" title="对该源单独试跑一次发现">试一下</button>
@@ -666,6 +790,11 @@
     renderSummary();   // 摘要的「最近巡检 HH:MM」取自这里的时间戳
     const list = $("#platformScans");
     if (!list) return;
+    if (scans === null) {
+      /* 加载失败与"空清单"分开说：不把故障演成"从没巡检过" */
+      renderLoadErrorRow(list, () => loadScans().then(renderScans));
+      return;
+    }
     if (!lastScans.length) {
       list.innerHTML = '<li class="empty">暂无巡检记录</li>';
       return;
@@ -697,7 +826,8 @@
     try {
       /* 领域表先取：徽章中文名与领域下拉都吃它；失败只退成"显示原始 id + 只有自动推断项" */
       lastDomains = await loadDomains();
-      /* 六路并行：状态 / 预警 / 监控词 / 信息流 / 巡检记录 / 信息源；单路失败自行降级 */
+      /* 六路并行：状态 / 预警 / 监控词 / 信息流 / 巡检记录 / 信息源；单路失败
+         自行降级成对应区域的失败行（render* 收 null 落错误态），不再演成空数据 */
       const [status, warnings, watch, feed, scans, sources] = await Promise.all(
         [loadStatus(), loadWarnings(), loadWatch(), loadFeed(), loadScans(), loadSources()]);
       renderStatus(status);
@@ -734,8 +864,9 @@
       input.value = "";
       scanHint("", false);
       await reloadWatch();
-      /* 刚补上第一个监控词会改变空态口径（无词 → 有词无信息）：空态跟着重画 */
-      if (!lastFeed.length) renderFeedEmpty();
+      /* 刚补上第一个监控词会改变空态口径（无词 → 有词无信息）：空态跟着重画；
+         信息流正处失败态时不出空态引导（故障与空数据分开说） */
+      if (!lastFeed.length && !feedLoadFailed) renderFeedEmpty();
     } catch (e) {
       scanHint(`添加失败：${(e && e.message) || e}`, true);
     }
@@ -819,14 +950,33 @@
   }
 
   /* ---------- 管理抽屉 ---------- */
+  /* 抽屉内可聚焦元素（可见且未禁用）：开抽屉的 focus 落点与 Tab 循环共用；
+     offsetParent 过滤掉 .hidden 区块（如授权后收起的引导卡）里的死焦点 */
+  function drawerFocusables() {
+    const drawer = $("#platformDrawer");
+    if (!drawer) return [];
+    return Array.from(drawer.querySelectorAll(
+      "button, input, select, textarea, a[href], [tabindex]"))
+      .filter((el) => !el.disabled && el.offsetParent !== null
+        && el.getAttribute("tabindex") !== "-1");
+  }
+
   function openDrawer() {
-    $("#platformDrawer").classList.remove("hidden");
+    const drawer = $("#platformDrawer");
+    if (!drawer) return;
+    drawer.classList.remove("hidden");
     $("#platformDrawerMask").classList.remove("hidden");
+    const closeBtn = $("#platformDrawerClose");
+    if (closeBtn) closeBtn.focus();       // 焦点进抽屉，键盘/读屏用户不被留在背景页
   }
 
   function closeDrawer() {
-    $("#platformDrawer").classList.add("hidden");
+    const drawer = $("#platformDrawer");
+    if (!drawer || drawer.classList.contains("hidden")) return;   // 已关：不重复动作、不抢焦点
+    drawer.classList.add("hidden");
     $("#platformDrawerMask").classList.add("hidden");
+    const manage = $("#platformManageBtn");
+    if (manage) manage.focus();           // 焦点还给「管理」按钮（打开它的入口）
   }
 
   function toggleDrawer() {
@@ -845,7 +995,10 @@
     $("#platformManageBtn").addEventListener("click", toggleDrawer);
     $("#platformWatchAddBtn").addEventListener("click", addWatch);
     $("#platformWatchInput").addEventListener("keydown", (ev) => {
-      if (ev.key === "Enter") addWatch();
+      if (ev.key !== "Enter") return;
+      /* 编辑态（输入框只读、只改领域）Enter=保存；新增态 Enter=添加 */
+      if (watchEditId !== null) saveWatchEdit();
+      else addWatch();
     });
     /* 监控词编辑态：保存 / 取消（保存走 PUT watch/{id} {domain}） */
     $("#platformWatchSaveBtn").addEventListener("click", saveWatchEdit);
@@ -875,19 +1028,41 @@
         triggerScan();
       }
     });
-    /* 筛选 chips：行内委托（属性选择器对空 data-risk 同样命中） */
+    /* 筛选 chips：行内委托（属性选择器对空 data-risk 同样命中）；
+       aria-pressed 与 active 类同步切（读屏器靠它感知当前档位） */
     const filterRow = $("#platformFilterRow");
     if (filterRow) {
       filterRow.addEventListener("click", (ev) => {
         const btn = ev.target.closest("button[data-risk]");
         if (!btn || !filterRow.contains(btn)) return;
         filterRow.querySelectorAll("button[data-risk]")
-          .forEach((b) => b.classList.remove("active"));
+          .forEach((b) => {
+            b.classList.remove("active");
+            b.setAttribute("aria-pressed", "false");
+          });
         btn.classList.add("active");
+        btn.setAttribute("aria-pressed", "true");
         feedRiskFilter = btn.dataset.risk || "";
         loadFeed().then(renderFeed);
       });
     }
+    /* 焦点陷阱：抽屉开着时 Tab/Shift+Tab 在抽屉内循环，不漏到背景页 */
+    document.addEventListener("keydown", (ev) => {
+      if (ev.key !== "Tab") return;
+      const drawer = $("#platformDrawer");
+      if (!drawer || drawer.classList.contains("hidden")) return;
+      const items = drawerFocusables();
+      if (!items.length) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      const inside = drawer.contains(active);
+      if (ev.shiftKey) {
+        if (!inside || active === first) { ev.preventDefault(); last.focus(); }
+      } else if (!inside || active === last) {
+        ev.preventDefault(); first.focus();
+      }
+    });
     /* Esc 关抽屉（仅开着时） */
     document.addEventListener("keydown", (ev) => {
       if (ev.key !== "Escape") return;

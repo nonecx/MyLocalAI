@@ -4,11 +4,20 @@
    main-tab* 类与少量 chat-platform-* 类；设计令牌全部复用 style.css
    的 :root 变量（--primary/--primary-soft/--primary-border/--panel/
    --border/--muted/--danger/--warn/--good），零框架、不另起配色。
+   唯一补充令牌：--danger-deep（urgent 深红）在本文件顶部局部声明——
+   style.css 的 --danger(#b42318) 盖不住 urgent 徽章/风险色条的深红
+   (#7f1d1d)，而 style.css 不许改，故局部加变量、只服务平台层。
    结构：通栏主 Tab（main-tabs）+ 居中单列信息流（platform-layout）
    + 右侧管理抽屉（platform-drawer）。
    复用而非重造：.panel/.badge(red/amber/green/gray)/.btn-primary/
    .btn-ghost/.hidden 均在 style.css，本文件不重复定义。
    ============================================================ */
+
+/* 本文件局部补充令牌（不改 style.css）：urgent 深红与 --danger 有差异，
+   风险色条与 critical 徽章共用这一支；-deep 后缀避免与全站令牌撞名 */
+:root {
+  --danger-deep: #7f1d1d;
+}
 
 /* ---------- ① 通栏主 Tab（index.html header 下方；视觉语言对齐 settings-nav） ---------- */
 .main-tabs {
@@ -73,12 +82,12 @@
   gap: 10px;
 }
 
-/* 状态点：默认灰，run=绿，warn=琥珀 */
+/* 状态点：默认灰（--muted），run=绿，warn=琥珀 */
 .platform-statusdot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #98a2b3;
+  background: var(--muted);
   flex: 0 0 auto;
 }
 .platform-statusdot-run { background: var(--good); }
@@ -177,7 +186,7 @@
   padding-left: 13px;
 }
 .platform-feed-item.platform-risk-urgent {
-  border-left: 3px solid #7f1d1d;
+  border-left: 3px solid var(--danger-deep);
   padding-left: 13px;
 }
 
@@ -291,6 +300,53 @@
   font-size: 13px;
   margin-bottom: 14px;
 }
+
+/* ---------- ⑦b 数据加载失败行（信息流/监控词/巡检记录/信息源四区共用） ----------
+   失败要落在对应区域里如实说（platform.js 纯 DOM 渲染），不把网络故障演成
+   「暂无数据」；错误态（dashed 红描边）与空态（dashed 灰描边）一眼可分。
+   li 前缀抬高特异性，盖过各列表自身的 li 底款；全部引用 :root 令牌。 */
+.platform-feed li.platform-load-error,
+.platform-watch-list li.platform-load-error,
+.platform-source-list li.platform-load-error,
+.platform-scans li.platform-load-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px dashed var(--danger);
+  border-radius: 10px;
+  padding: 14px 12px;
+  font-size: 13px;
+  color: var(--danger);
+  background: var(--panel);
+}
+
+/* 重试按钮：列表错误行与状态摘要条共用（纯按钮无插值） */
+.platform-load-retry {
+  flex: 0 0 auto;
+  border: 1px solid var(--danger);
+  background: transparent;
+  color: var(--danger);
+  font-size: 12px;
+  border-radius: 6px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+.platform-load-retry:hover {
+  background: var(--danger);
+  color: var(--panel);
+}
+
+/* 键盘可达性：信息流条目与监控词行已可聚焦（tabindex=0 role=button），
+   聚焦环用主色 2px 内描边，不挤动布局 */
+.platform-feed-item:focus-visible,
+.platform-watch-list li:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+
+/* 监控词行本就可点进编辑态，补指针手势（只给真实行，empty 提示行不给） */
+.platform-watch-list li[data-qid] { cursor: pointer; }
 
 /* ---------- ⑧ 管理抽屉（监控词 + 巡检记录） ---------- */
 .platform-drawer {
@@ -577,10 +633,11 @@
 .platform-scan-error { color: var(--danger); }
 
 /* ---------- ⑨ 徽章扩展：urgent 深红款 ---------- */
-/* .badge.red/amber/green/gray 已在 style.css 定义，这里只补 critical */
+/* .badge.red/amber/green/gray 已在 style.css 定义，这里只补 critical；
+   字色用 --panel（即纯白 #ffffff，全站无独立白色令牌，就近复用） */
 .badge.critical {
-  background: #7f1d1d;
-  color: #fff;
+  background: var(--danger-deep);
+  color: var(--panel);
 }
 
 /* ---------- ⑩ 对话里的平台卡（cards.js renderPlatform；轻量化） ---------- */
@@ -619,8 +676,8 @@
   color: var(--muted);
 }
 
-/* ---------- 窄屏适配：抽屉全宽 ---------- */
-@media (max-width: 640px) {
+/* ---------- 窄屏适配：抽屉全宽（断点对齐 chat.css 的 900px） ---------- */
+@media (max-width: 900px) {
   .platform-drawer {
     width: 100vw;
     max-width: 100vw;

@@ -1348,3 +1348,83 @@
 @media (max-width: 900px) {
   .chat-monitor-list { max-height: 240px; }
 }
+
+/* ============================================================
+   公共提示行（U0 前端基础收口）：列表加载失败行与历史坏卡占位行。
+   只引用 style.css 的 :root 令牌（--muted/--border/--panel/--primary*），
+   不另起配色；窄屏无独立断点需求，不新增 @media。
+   ============================================================ */
+
+/* 列表加载失败行：chat.js renderListError 就地渲染（textContent/createElement，
+   不进 innerHTML）；「点击重试」按钮 = 再次调用对应加载函数。
+   基础类给通用排版；左栏列表里的 li 由 .chat-session-list/.chat-dossier-list
+   的基础规则提供边框与内边距，这里补虚线样式并中和可点击的 hover 强调
+   （写法同 li.empty 的中和规则）。 */
+.chat-list-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: default;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.chat-session-list li.chat-list-error,
+.chat-dossier-list li.chat-list-error,
+.chat-batch-list li.chat-list-error,
+.chat-monitor-list li.chat-list-error {
+  border-style: dashed;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.chat-session-list li.chat-list-error:hover,
+.chat-dossier-list li.chat-list-error:hover,
+.chat-batch-list li.chat-list-error:hover,
+.chat-monitor-list li.chat-list-error:hover {
+  border-color: var(--border);
+  background: none;
+}
+
+/* 可键盘激活的行（批次列表 li、监测订阅/运行行）统一焦点环——JS 侧有内联兜底，
+   这里是正式规则；批次面板/监测面板列表行的 Enter/Space 激活见各自 js。 */
+.chat-batch-list li:focus-visible,
+.chat-monitor-list li:focus-visible,
+.chat-monitor-run[data-pickable]:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+
+.chat-monitor-run[data-pickable] {
+  cursor: pointer;
+}
+
+.chat-list-error button {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--primary-dark);
+  border-radius: 7px;
+  padding: 2px 9px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.chat-list-error button:hover {
+  border-color: var(--primary);
+  color: var(--primary-dark);
+  background: var(--primary-soft);
+}
+
+/* 历史坏卡占位行：renderHistoryMessage 对解析失败的卡片 payload 如实提示
+   （「历史消息数据不完整」），浅色虚线框，不伪造卡片。 */
+.chat-card-placeholder {
+  font-size: 12.5px;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  padding: 7px 10px;
+  margin-top: 6px;
+}
