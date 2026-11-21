@@ -50,6 +50,7 @@
     "verify_claim", "analyze_speech", "check_heat", "compute_heat",
     "list_dossiers", "get_dossier", "recheck_dossier", "export_card",
     "search_web", "read_opinions", "deep_read", "insights", "collect_evidence",
+    "platform_feed",
     "chitchat", "clarify", "refuse"
   ],
   "refusal_triggers": [

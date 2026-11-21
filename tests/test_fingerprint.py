@@ -181,6 +181,13 @@ class TestStoreFingerprintParity(unittest.TestCase):
         a = fp.shingles("自来水被下毒了")
         b = fp.shingles("自来水被下毒了吗")
         self.assertEqual(ds._fp_jaccard(a, b), fp.jaccard(a, b))
+        # title_similarity（platform 候选去重用的公开面）与
+        # normalize+shingles+jaccard 组合逐位一致（同一副本的三个原语）
+        for x, y in [("某市自来水检测异常，官方通报排除投毒", "网传某市自来水检测异常 官方通报排除投毒"),
+                     ("甲地明天举办音乐节", "乙公司发布新款新能源汽车"), ("", "x")]:
+            expected = fp.jaccard(fp.shingles(fp.normalize_claim(x)),
+                                  fp.shingles(fp.normalize_claim(y)))
+            self.assertEqual(ds.title_similarity(x, y), expected, (x, y))
 
 
 class TestStoreClaimFingerprints(unittest.TestCase):
@@ -256,6 +263,7 @@ class TestStoreClaimFingerprints(unittest.TestCase):
 
         store = DossierStore(db)   # 构造即迁移 v2→当前版本
         try:
+            self.assertEqual(SCHEMA_VERSION, 10)
             row = store.get_dossier(did)
             self.assertEqual(row["title"], "旧档案")
             self.assertEqual(store.latest_conclusion(did)["label"], "疑似谣言")
@@ -269,7 +277,7 @@ class TestStoreClaimFingerprints(unittest.TestCase):
                     "SELECT version FROM schema_migrations")}
             finally:
                 conn2.close()
-            # v6（Profile 工作区）之后旧数据仍全量在位，且被回填到默认档案
+            # v6（Profile 工作区）与 v9/v10（平台域）之后旧数据仍全量在位，且被回填到默认档案
             self.assertEqual(versions, set(range(1, SCHEMA_VERSION + 1)))
             self.assertIsNotNone(store.get_dossier(did)["profile_id"])
         finally:

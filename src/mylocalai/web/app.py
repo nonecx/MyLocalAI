@@ -10,6 +10,7 @@
       POST /api/attention     关注度评分（手动传 x/y/z，纯确定性、不调大模型）
       POST /api/attention/search  关注度评分（输入话题，联网估出 x/y/z 后评分）
       GET  /api/history       最近的分析记录（内存保存，重启清空）
+      GET  /api/models        模型管理（提供方 / 模型目录 / 密钥，设置面板用）
       GET  /api/health        健康检查
   - 托管 static/ 下的前端页面，单进程即可前后端一体运行
   - 交互式接口文档：http://127.0.0.1:8000/docs
@@ -47,8 +48,11 @@ from mylocalai.classic.language import analyze_aggression, analyze_emotion  # no
 from mylocalai.classic.logic import analyze_logic  # noqa: E402
 from mylocalai.llm import llm_cache  # noqa: E402
 from mylocalai.llm import llm_client as _llm_client  # noqa: E402
+from mylocalai.llm import model_registry as _model_registry  # noqa: E402
 from mylocalai.util.console_io import force_utf8_stdio  # noqa: E402
 from mylocalai.util.text_safety import has_surrogates, sanitize_text  # noqa: E402
+from mylocalai.web import platform_api  # noqa: E402
+from mylocalai.web.models_api import router as models_router  # noqa: E402
 from mylocalai.web.privacy_api import router as privacy_router  # noqa: E402
 from mylocalai.web.profiles_api import router as profiles_router  # noqa: E402
 from mylocalai.web.batch_api import router as batch_router  # noqa: E402
@@ -58,13 +62,17 @@ from mylocalai.web.monitor_api import router as monitor_router  # noqa: E402
 
 @asynccontextmanager
 async def _lifespan(_app: Any):
-    """应用生命周期：起领域监测调度 daemon 线程（阶段 3）。
+    """应用生命周期：起领域监测调度 daemon 线程（阶段 3）+ 平台巡检调度线程（合并线）。
 
     调度只在**服务运行期间**有效（关服即停，产品口径如实告知用户）；多 worker
-    部署时只有主进程调度（启动告警复用 _warn_if_multiworker 的口径）。
+    部署时只有主进程调度（启动告警复用 _warn_if_multiworker 的口径）。平台调度器
+    自带 enabled 开关（规则 enabled=false 时 start_scheduler_if_enabled 是空操作）
+    与 fail-soft（启动失败只记日志，网站主功能不受影响）。
     """
     from mylocalai.web import monitor_api
     monitor_api.start_scheduler()
+    if _WORKERS <= 1:
+        platform_api.start_scheduler_if_enabled()
     try:
         yield
     finally:
@@ -125,6 +133,12 @@ app.include_router(profiles_router)
 app.include_router(batch_router)
 app.include_router(materials_router)
 app.include_router(monitor_router)
+# 模型管理（设置面板）：与 privacy_router 紧挨——两者都是"用户在本机改自己的配置"，
+# 前缀/异常口径保持一致（404 未知、400 中文 detail、写后 llm_client.reset_cache()）
+app.include_router(models_router)
+# 监测平台（platform 包）：状态/信息流/预警/监控词/巡检触发；调度器线程由
+# _lifespan 里的 platform_api.start_scheduler_if_enabled() 启动（默认 enabled=false 空操作）
+app.include_router(platform_api.router)
 
 
 def _active_profile_id() -> Optional[int]:
@@ -172,6 +186,10 @@ def _warn_if_multiworker() -> None:
 
 # 启动时提示一次（放在函数定义之后，避免 NameError）
 _warn_if_multiworker()
+
+# 平台巡检调度器不再在模块导入期启动（2026-11-21 合并：迁入 _lifespan，随服务
+# 生命周期起停；多 worker 守卫 _WORKERS 同样生效）——import 本模块（含测试）
+# 不再有副作用。
 
 
 class AnalyzeRequest(BaseModel):
@@ -233,6 +251,10 @@ def health() -> Dict[str, Any]:
             "base_url": _llm_client.get_base_url(),
             "error": "" if llm_ok else llm_detail,
         },
+        # 模型注册表的加载期告警数：data/models.json 缺失/损坏/版本不符时 > 0
+        # （注册表会 fail-soft 退回内置提供方表，服务照常起）。原文在设置面板里看，
+        # 这里给一个计数，便于不看页面也知道"配置没被正常加载"。
+        "models": {"warnings": len(_model_registry.warnings())},
     }
 
 

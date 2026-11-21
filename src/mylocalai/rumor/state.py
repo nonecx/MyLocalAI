@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 COMPONENTS = ("markers", "emotion", "aggression", "logic", "claims", "evidence")
 
@@ -38,6 +38,7 @@ def default_funcs(state: "AnalysisState | None" = None) -> Dict[str, Callable[[s
             claims=state.ensure("claims") if state is not None else None,
             markers=state.peek("markers") if state is not None else None,
             source_profile=getattr(state, "source_profile", None) if state is not None else None,
+            domain_hints=getattr(state, "domain_hints", None) if state is not None else None,
         )
 
     return {
@@ -50,7 +51,8 @@ def default_funcs(state: "AnalysisState | None" = None) -> Dict[str, Callable[[s
 class AnalysisState:
     def __init__(self, text: str, funcs: Optional[Dict[str, Callable]] = None,
                  on_component_done: Optional[Callable[[str], None]] = None,
-                 source_profile: Optional[Dict[str, Dict[str, int]]] = None) -> None:
+                 source_profile: Optional[Dict[str, Dict[str, int]]] = None,
+                 domain_hints: Optional[List[str]] = None) -> None:
         self.text = text
         merged = default_funcs(self)
         if funcs:
@@ -63,6 +65,10 @@ class AnalysisState:
         # 默认 evidence 闭包只在非空时把它透传给 collect_evidence 做反哺抬分，
         # 不传时输出逐位不变（守卫测试 tests/test_source_profile_lift.py 锁定）。
         self.source_profile = source_profile
+        # 领域检索提示（平台领域线程）：领域判定产出的 host 清单，默认 None=不启用，
+        # 经默认 evidence 闭包透传给 collect_evidence 追加一轮 site: 定向补搜；
+        # 不传时输出逐位不变（守卫测试 tests/test_rumor_domain_hints.py 锁定）。
+        self.domain_hints = domain_hints
         self._results: Dict[str, Dict[str, Any]] = {}
         self._locks = {name: threading.Lock() for name in COMPONENTS}
         self.timings: Dict[str, float] = {}

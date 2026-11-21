@@ -6,6 +6,8 @@
   <title>网络言论智能分析系统</title>
   <link rel="stylesheet" href="static/style.css" />
   <link rel="stylesheet" href="static/chat.css" />
+  <!-- 监测平台视图样式：只新增 platform-* 类，复用 style.css 设计令牌 -->
+  <link rel="stylesheet" href="static/platform.css" />
   <!-- 设置弹层（模型管理）样式：只新增 settings-* 类，复用 style.css 的 :root 令牌 -->
   <link rel="stylesheet" href="static/settings.css" />
   <!-- 档案工作区（多 Profile 分家）样式：只新增 profile-* 类，同样复用 :root 令牌 -->
@@ -46,6 +48,14 @@
         aria-haspopup="dialog" aria-controls="aboutDialog">关于</button>
     </div>
   </header>
+
+  <!-- 通栏视图切换 Tab：对话 ↔ 监测平台（下划线式；默认对话视图，
+       平台视图由 platform.js 接管，chat.js 不参与切换） -->
+  <nav class="main-tabs" id="mainTabs" aria-label="视图切换">
+    <button id="navChat" class="main-tab active" type="button"
+      aria-current="page">对话</button>
+    <button id="navPlatform" class="main-tab" type="button">监测平台</button>
+  </nav>
 
   <!-- 档案工作区管理弹层：列表（改名/改角色/删除空档案）+ 新建表单。
        用户输入一律 textContent 渲染（同 settings.js 纪律），不拼 innerHTML。 -->
@@ -325,6 +335,91 @@
     最终判断权与事实核查请由用户自行把握。
   </footer>
 
+  <!-- ============ 监测平台视图（方案 G：状态摘要条 + 筛选 chips + 信息流；默认隐藏，导航切换） ============ -->
+  <main class="platform-layout hidden" id="platformView">
+    <!-- 状态摘要条 -->
+    <section class="platform-statusbar" id="platformStatusBar">
+      <span class="platform-statusdot" id="platformStatusDot"></span>
+      <span class="platform-summary" id="platformSummary">加载中…</span>
+      <div class="platform-statusbar-actions">
+        <button id="platformScanBtn" class="btn-primary" type="button">立即巡检</button>
+        <button id="platformManageBtn" class="btn-ghost" type="button">管理</button>
+      </div>
+    </section>
+    <div id="platformScanHint" class="platform-scan-hint hidden" role="status"></div>
+
+    <!-- 筛选 chips -->
+    <div class="platform-filterrow" id="platformFilterRow">
+      <button class="platform-filter active" data-risk="" type="button">全部</button>
+      <button class="platform-filter" data-risk="high,urgent" type="button">预警</button>
+      <button class="platform-filter" data-risk="suspect" type="button">疑似</button>
+      <button class="platform-filter" data-risk="notice" type="button">关注</button>
+    </div>
+
+    <!-- 信息流 -->
+    <ul class="platform-feed" id="platformFeed">
+      <li class="empty">加载中…</li>
+    </ul>
+
+    <!-- 空态 -->
+    <div class="platform-empty hidden" id="platformEmpty">
+      <p class="platform-empty-text" id="platformEmptyText"></p>
+      <button id="platformEmptyBtn" class="btn-primary" type="button"></button>
+    </div>
+  </main>
+
+  <!-- 管理抽屉 -->
+  <div class="platform-drawer-mask hidden" id="platformDrawerMask"></div>
+  <aside class="platform-drawer hidden" id="platformDrawer" aria-label="平台管理">
+    <div class="platform-drawer-head">
+      <h2>管理</h2>
+      <button id="platformDrawerClose" class="btn-ghost" type="button">关闭</button>
+    </div>
+    <section class="platform-drawer-section">
+      <h3>监控词</h3>
+      <div class="platform-watch-add">
+        <input id="platformWatchInput" type="text" maxlength="200" placeholder="输入监控词（话题/事件关键词）" />
+        <!-- 领域下拉：第一项 value="" = 自动推断（LLM 判定 → 历史分布 → 不猜），
+             其余 12 项由 GET /api/platform/domains 运行时填充（平台唯一数据源） -->
+        <select id="platformWatchDomain" class="platform-watch-domain-select"
+          title="监控词领域：留空=自动推断，也可手设固定领域">
+          <option value="">自动推断</option>
+        </select>
+        <button id="platformWatchAddBtn" class="btn-primary" type="button">添加</button>
+        <!-- 编辑态：点监控词行进入（回填 input + 领域下拉），保存走 PUT watch/{id} -->
+        <button id="platformWatchSaveBtn" class="btn-primary hidden" type="button">保存修改</button>
+        <button id="platformWatchCancelEditBtn" class="btn-ghost hidden" type="button">取消</button>
+      </div>
+      <ul class="platform-watch-list" id="platformWatchList"><li class="empty">加载中…</li></ul>
+    </section>
+    <section class="platform-drawer-section">
+      <h3>信息源</h3>
+      <div class="platform-source-add">
+        <input id="platformSourceName" type="text" maxlength="60" placeholder="来源名称" />
+        <input id="platformSourceUrl" type="text" maxlength="500"
+          placeholder="https://…（RSS feed 或网页 URL）" />
+        <select id="platformSourceKind" title="rss=RSS/Atom 供给；page=网页链接（列表页锚文本粗糖匹配）">
+          <option value="rss">RSS/Atom 供给</option>
+          <option value="page">网页链接</option>
+        </select>
+        <!-- 多选绑定监控词：不选 = 全局源（对所有监控词生效）；选项运行时由监控词列表填充 -->
+        <select id="platformSourceBindings" class="platform-source-bindings" multiple size="3"
+          title="绑定监控词（Ctrl/⌘ 多选）：不选 = 全局（对所有监控词生效）"></select>
+        <button id="platformSourceAddBtn" class="btn-primary" type="button">添加来源</button>
+      </div>
+      <p class="platform-source-hint" id="platformSourceHint"></p>
+      <ul class="platform-source-list" id="platformSourceList"><li class="empty">加载中…</li></ul>
+    </section>
+    <section class="platform-drawer-section">
+      <h3>巡检记录</h3>
+      <ul class="platform-scans" id="platformScans"><li class="empty">加载中…</li></ul>
+    </section>
+    <section class="platform-drawer-auth" id="platformDrawerAuth">
+      <p>平台需要联网检索/抓取才能发现热门信息（搜索引擎与 RSS 都算外发）。默认关闭是故意的——授权后才巡检，不授权就不外发、不落库。</p>
+      <button id="platformAuthSettingsBtn" class="btn-primary" type="button">去设置里授权</button>
+    </section>
+  </aside>
+
   <script src="static/shell.js"></script>
   <!-- 设置弹层：紧接 shell.js（外壳只做开合绑定，面板逻辑与渲染全在 settings.js） -->
   <script src="static/settings.js"></script>
@@ -343,5 +438,7 @@
        mylocalai:profile-changed 事件驱动。必须晚于 batch.js 加载（顺序锁见
        tests/test_models_ui.py：shell → settings → cards → chat → profiles → batch）。 -->
   <script src="static/monitor.js"></script>
+  <!-- 监测平台视图：与对话页并列（导航切换），不碰 chat.js 契约 -->
+  <script src="static/platform.js"></script>
 </body>
 </html>

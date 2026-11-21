@@ -45,7 +45,7 @@
 │   │   ├── attn_rules.json / deep_read_rules.json / society_issues.json / prompts.json
 │   │   └── README.md           关注度与深读的完整说明（公式、触发、护栏、隔离）
 │   ├── dossier/                档案库（SQLite 单文件 + WAL）
-│   │   ├── store.py            连接工厂、schema_version 顺序迁移（v4 指纹表+话术标记表、v6 Profile 工作区、v7 材料批次、v8 监测订阅）、档案域七表 + 会话域三表
+│   │   ├── store.py            连接工厂、schema_version 顺序迁移（v4 指纹表+话术标记表、v6 Profile 工作区、v7 材料批次、v8 监测订阅、v9 平台三表、v10 自建信息源与领域列）、档案域七表 + 会话域三表
 │   │   ├── profiles.py         Profile 工作区（多档案数据分家 + 角色，v6）
 │   │   ├── batches.py          材料批次存储（v7）
 │   │   ├── batch_summary.py    批次汇总纯函数（零 LLM，永不抛）
@@ -58,7 +58,8 @@
 │   │   ├── registry.py         工具注册表（schema 校验、权限分级、成本/延迟元数据）
 │   │   ├── tools_verify.py / tools_heat.py / tools_memory.py / tools_chapters.py
 │   │   ├── tools_batch.py      材料批次编排（阶段 2：同源分组 + 逐条核查 + 双预算）
-│   │   └── tools_monitor.py    领域监测编排（阶段 3：授权闸 + 检索 + 变化摘要）
+│   │   ├── tools_monitor.py    领域监测编排（阶段 3：授权闸 + 检索 + 变化摘要）
+│   │   ├── tools_platform.py   平台只读工具（platform_feed：对话里查预警/信息流/巡检记录，零 LLM）
 │   │   ├── fingerprint.py      话术指纹纯函数（归一化/shingle/Jaccard——谣言库秒回的地基）
 │   │   ├── reminders.py        被动提醒纯函数（档案年龄/热度变化 → 一行提示）
 │   │   ├── context.py          上下文窗口构建器（12k 字符预算、裁剪与摘要）
@@ -67,15 +68,29 @@
 │   │   ├── mcp_server.py       助手 MCP（python -m mylocalai.assistant.mcp_server）
 │   │   ├── prompts.json        人设与固定话术——改这里而非改代码
 │   │   └── assistant_rules.json  路由模型/上限/预算/指纹阈值/信源画像阈值/拒绝词表——改这里而非改代码
+│   ├── platform/               监测平台（热门信息自动巡检：发现 → 初筛 → 深查 → 传播风险分级）
+│   │   ├── runner.py           巡检编排（两阶段分流：不过门槛只登记不深查；深查预算封顶 + 协作取消）
+│   │   ├── scheduler.py        巡检调度器（web 内置后台线程 / CLI 单次，单飞互斥 + 规则热更新）
+│   │   ├── sources.py          发现源（搜索引擎 / RSS-Atom / 用户自建 rss·page 源，单源降级不拖全局）
+│   │   ├── candidates.py       候选归一化与两道去重闸（URL 唯一 + 标题指纹近似）
+│   │   ├── heat.py             热度估计（复用 attention 两层，从已取回结果估 x/y/z，零额外检索）
+│   │   ├── risk.py             传播风险分级纯函数（阈值矩阵 + floors 保底，大模型不参与打分）
+│   │   ├── rules.py            规则加载（坏配置退默认留告警，PLATFORM_RULES_PATH 整套替换）
+│   │   ├── domains.py          领域表与推断（platform_domains.json 12 项；LLM 不可用就不猜）
+│   │   ├── store.py            平台域存储（监控词/信息流/巡检记录/自建信息源，与档案同库不同连接）
+│   │   ├── platform_rules.json / platform_domains.json  平台规则与领域表——改这里而非改代码
+│   │   └── __main__.py         CLI 入口（python -m mylocalai.platform --once/--status/--serve/--json）
 │   ├── web/                    FastAPI 网站 + static/（src/mylocalai/web/app.py）
 │   │   ├── app.py              REST API 全貌（分析/关注度/对话/会话/档案/画像/Profile/批次/监测）+ lifespan 调度
 │   │   ├── profiles_api.py     Profile 工作区 CRUD + 激活（v6）
 │   │   ├── batch_api.py        材料批次 API + SSE 进度（v7）
 │   │   ├── materials_api.py    上传文件内存解析（txt/md/csv/json，不落盘）
 │   │   ├── monitor_api.py      监测订阅 API + 调度线程（v8）
+│   │   ├── platform_api.py     平台 REST（/api/platform：状态/信息流/预警/监控词/信息源/巡检/领域）
 │   │   └── static/             单一对话页的全部界面：index.html + shell.js（file:// 引导/服务状态）
 │   │                           + chat.js/cards.js（会话、档案库、事件流与全部卡片渲染）+ chat.css
 │   │                           + profiles.js（档案切换器）+ batch.js（材料批次面板）+ monitor.js（领域监测面板）
+│   │                           + platform.js（监测平台视图与管理抽屉）+ platform.css（平台样式）
 │   ├── util/                   text_safety（代理项规整）/ console_io（stdio 规整）
 │   └── cli.py                  命令行入口（python -m mylocalai.cli）
 ├── my_website/                 启动器（start.bat / start.sh）与说明，实际代码在 src/mylocalai/web/
@@ -254,6 +269,61 @@ python -m mylocalai.cli --attention-online "某段待分析的文本"
 实测结论（5 个真实头部话题，2026-10-26）：默认参数下 `E>66` 需要 `y` 达 1e8 量级，
 本批 5 个话题 0/5 触发（最高 54.81）。详见 `docs/关注度评估报告-2026-10-26.md`。
 
+## 监测平台（热门信息自动巡检）
+
+在对话助手之外新增**监测平台**：后台按监控词自动发现热门信息（搜索引擎 + RSS 源），
+本地初筛后对过门槛候选联网深查，**纯函数推导传播风险**并分级预警。传播风险分级
+只描述「如果继续传播，造成大规模误信/骚动的风险」，**不判定内容真假**；high/urgent
+为「大规模传播风险」口径，只在平台页内以信息流筛选与条目风险色条呈现（**无横幅、
+无推送、不打扰**）。
+
+```
+通栏 Tab「对话 ｜ 监测平台」（单页双视图，默认落在对话视图）
+├── 状态摘要条：状态点三态（未授权 / 调度运行 / 默认灰）+ 「N 个话题 · 最近巡检 · 高风险 N 条」
+├── 筛选 chips：全部 / 预警（high,urgent）/ 疑似 / 关注
+├── 热榜信息流：发现条目 + 热度 E（代理徽章）+ 深查结论 + 领域徽章 + 风险档位（关注/疑似/高危/紧急）；
+│   点卡展开传播风险理由与原文链接，high/urgent 条目左侧加风险色条
+├── 空态双引导：无监控词 →「去添加」；有词无信息 →「立即巡检一次」
+└── 管理抽屉（右侧，「管理」按钮开合；Esc / 点遮罩 / 关闭按钮均可关）
+    ├── 信息源管理：用户自建 RSS/网页源，全局或按词绑定，可停用、可「试一下」单源试跑
+    ├── 监控词管理：增删查 + 领域下拉（自动推断/手设 12 领域）；点行进编辑态改领域
+    ├── 巡检记录：每次 scan 的候选/深查/降级计数与失败原因
+    └── 未授权引导卡：说明外发口径，链到设置弹层授权（fail-closed）
+```
+
+- 风险分级（`src/mylocalai/platform/risk.py`，**大模型不参与打分**）：
+  `score = w_heat·E + w_growth·环比 + w_breadth·覆盖面 + w_rumor·核查风险分`，
+  阈值分档 + floors 保底；输入只有确定性数字与 `ALL_LABELS` 封闭标签集
+  （变异测试锁定 LLM 进不了分级链）。
+- 两阶段成本控制：不过热度门槛且无话术命中的候选只登记不深查；深查有
+  候选数/条数/总时限三重封顶（`platform_rules.json`）。
+- **信息源管理**（抽屉「信息源」区）：除搜索引擎与规则里的 RSS 源，还可自建
+  `rss`（RSS/Atom 供给）与 `page`（网页链接——列表页锚文本粗糖匹配，不抓正文、
+  不渲染 JS，反爬如实降级）两类源；**不选绑定 = 全局源**（对所有监控词生效），
+  选了就是只对选中词可见的窄授权；可停用（不删绑定）、可删除；「试一下」对该源
+  单独跑一次发现（`POST /api/platform/sources/{id}/test`，返回匹配数与前 3 条
+  标题），保存前也能先试。
+- **领域**（`platform/domains.py` + `platform_domains.json`，12 项，与助手 taxonomy
+  对齐）：监控词下拉可留空「自动推断」或手设固定领域；自动推断走
+  「文本 → TTL 缓存 → LLM 封闭枚举判定 → 历史分布 → 不猜」链，**LLM 不可用就不猜**
+  （绝不按关键词拍一个）；领域只在信息流条目上以徽章呈现——手设/监控词手设是实色
+  淡底，自动推断是描边 + 「推」角标，未判定不画徽章。领域的检索提示（裸 host）会
+  注入 rumor 深查的一轮 `site:` 定向补搜，提示不是权威认定。
+- CLI（可挂 Windows 计划任务）：`python -m mylocalai.platform --once`
+  （`--query` 指定词 / `--status` 看状态 / `--serve` 前台循环 / `--json`）；
+  web 启动时按规则开关自动起后台巡检线程（多 worker 不启）。
+- 隐私 fail-closed：外部检索未授权 → 巡检 skipped + 平台页管理抽屉里出授权引导卡；
+  结果保存关闭 → 只进当次返回不落库。
+- REST：`GET /api/platform/{status,feed,warnings,watch,scans}`、
+  `POST /api/platform/{watch,scan}`、`DELETE /api/platform/watch/{id}`；
+  v7 新增：`GET /api/platform/domains`（领域表）、
+  `GET/POST /api/platform/sources`、`PUT/DELETE /api/platform/sources/{id}`、
+  `POST /api/platform/sources/{id}/test`（单源试运行）、
+  `PUT /api/platform/watch/{id}`（监控词领域手设，空串=恢复自动推断）；
+  对话里问「最近有什么预警」走只读工具 `platform_feed`（零 LLM），出的平台卡是
+  轻量化的：档位徽章 + 标题 + 单行 meta（有条目领域时追加领域 id），要看细节回平台页。
+- 完整口径（架构/数据模型/算法/降级矩阵/测试）：`docs/监测平台规格-2026-11-20.md`。
+
 ## 判定口径可配置
 
 风险分阈值、无事实声明封顶、证据抬分锚点、信源分级名单，以及**"哪几档算可靠/可抓/可扩链"
@@ -324,8 +394,7 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 1365 个用例（unittest discover 全量，2026-11-20 角色扩展第二轮（Skill 体系与
-提示词分层）后实测；
+离线套件共 1676 个用例（unittest discover 全量，2026-11-21 两线合并（角色扩展 + 监测平台）后实测；
 **M4 起由 `tests.test_readme_counts` 自动校验此数字与 mock 闸门条数，改动后须同步回写**）：
 M1-M3 的全部回归（详见 git 历史），加上 M4 新增模块：
 **成本真实计数**（llm_client 进程级计数器：真实上游调用数 + usage tokens，缓存命中/
@@ -363,7 +432,15 @@ CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
 真假判定）、**collect_evidence 工具与研究助手接线**（`tests.test_research_assistant`
 22 例：工具注册与校验、取消与绝对死线透传、六种状态保真、路由与 allowlist、
 上下文不伪造档案号、报告引用逐字保留）。
-另有 `tests/run_module_tests.py`（12 条内置用例全模块跑一遍并落盘）、
+加上监测平台新增模块（tests/ 下 test_platform_ 前缀共十一个）：**规则加载**（默认值/坏配置
+ 降级/权重校验）、**平台域存储**（v9/v10 迁移/三表 CRUD/URL 唯一去重/保留期清理/
+ 外键冲突不伪装去重）、**发现源**（搜索授权门、RSS/Atom 解析与过滤、DOCTYPE/ENTITY、
+ SSRF、超限）、**候选去重**（URL 去重键、标题指纹近似）、**热度估计**（零额外检索、
+ 环比口径）、**传播风险分级纯函数**（阈值矩阵/四因素/floors/**变异测试**——LLM 文本
+ 进不了分级链）、**巡检编排**（两阶段分流/预算封顶/跨巡检去重/取消/降级/隐私门/
+ 删词 race）、**调度器与 CLI**（启停/立即首跑/间隔循环/热更新/单飞/退出码）、
+ **API 与前端自洽**（端点契约 + openapi 路由/元素 id/动态 class/档位集合）、
+ **platform_feed 只读工具**（封闭枚举/三视图/空库合法/降级/四方接线）。另有 `tests/run_module_tests.py`（12 条内置用例全模块跑一遍并落盘）、
 `tests/smoke_api.py`（配置自检 + 连通性）。
 
 ## 已知局限
@@ -385,6 +462,7 @@ CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
 ## 文档
 
 - `docs/Agent工作流规格-v0.1.md` —— **Agent 工作流实施基线**（用户能力、主张/传播证据双维判定、外发授权、分类保存与验收矩阵；规格不等于所有阶段已实现）。
+- `docs/监测平台规格-2026-11-20.md` —— **监测平台实施基线**（热门信息自动巡检：发现源、两阶段编排、传播风险分级纯函数、隐私 fail-closed、API 与测试矩阵）。
 - `docs/取证技能-2026-11-05.md` —— 取证三技能（领域识别/信源发现/证据检索）的口径文档：分工、执行流程、安全模型、状态取值、预算与局限。
 - `docs/智能助手Skill工作流设计讨论-2026-11-07.md` —— Skill 融入工作流的问题与方向讨论汇总（两套证据链现状、能力分层、混合表达、内部机制不暴露、待决问题清单）。
 - `docs/使用说明书.md` —— **使用者操作手册**（安装/配置/启动/单页对话与左栏/命令行/MCP/配置调整/数据备份/常见问题）。

@@ -40,7 +40,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from mylocalai.llm import llm_cache
 from mylocalai.assistant import router as router_mod
 from mylocalai.assistant import (tools_chapters, tools_evidence, tools_heat, tools_insights,
-                                 tools_memory, tools_verify)
+                                 tools_memory, tools_platform, tools_verify)
 from mylocalai.assistant.context import build_context
 from mylocalai.assistant.events import EventStream
 from mylocalai.assistant.fingerprint import DEFAULT_SHINGLE_SIZE
@@ -72,6 +72,8 @@ _CARD_TYPE = {
     "insights": "insights",
     # 取证三技能流水线（collect_evidence）：evidence 卡，前端 cards.js renderEvidence
     "collect_evidence": "evidence",
+    # 监测平台只读工具（platform_feed）：platform 卡，前端 cards.js renderPlatform
+    "platform_feed": "platform",
 }
 
 _ARGS_PREVIEW_WIDTH = 60
@@ -653,6 +655,9 @@ class AssistantLoop:
             # 逐个去已核验信源找可定位引文，不建档、不出真假分（铁律：不扩权）。
             # 路由枚举与 allowlist 同步补 "collect_evidence"。
             tools_evidence.register_all(reg, None)
+            # 监测平台只读工具（platform_feed）：预警/信息流/巡检记录，零 LLM。
+            # 路由枚举与 allowlist 同步补 "platform_feed"。
+            tools_platform.register_all(reg, None)
             self._registry = reg
         return self._registry
 

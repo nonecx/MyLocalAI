@@ -1,8 +1,8 @@
 /* ============================================================
    cards.js —— 对话卡片渲染器（M2，工作指导 §4.3）
    三个渲染器：结论卡 / 言论土壤卡（classic 四档） / 热度 E 分卡；
-   另加我的画像卡（insights 只读聚合）、事实核查答案渲染、材料批次汇总卡
-   与领域监测变化卡（monitor_change 订阅跑检）。
+   另加我的画像卡（insights 只读聚合）、事实核查答案渲染、监测平台卡（platform）、
+   材料批次汇总卡与领域监测变化卡（monitor_change 订阅跑检）。
    标记从原分析页卡片"复制 + 参数化"而来（原 app.js 已在单页化中删除，
    卡片渲染逻辑现由本文件独家承载）。
    由 chat.js 调用（chat.js 不直接拼卡片 HTML）。
@@ -545,6 +545,66 @@
       </div>`;
   }
 
+  /* ---------- 监测平台卡（platform_feed 工具：预警/信息流/巡检记录） ----------
+     由后端 tools_platform 产出：card = {card_type:"platform", kind, as_of,
+     warnings|feed|scans}。口径：传播风险分级只描述传播风险、不判定真假；
+     热度是代理/估计值；只读零 LLM。放在画像区之外（test_insights_api 的
+     渲染区切片以「新事实核查答案」为界，平台卡字段不该混进画像自洽断言）。 */
+  const PLATFORM_LEVEL_CLS = { notice: "gray", suspect: "amber", high: "red", urgent: "critical" };
+
+  /* 方案 G 轻量化：条目只有「档位徽章 + 标题 + 单行 meta（E / 结论 / 发现时间）」。
+     风险理由链与档案号属于重信息，不进对话卡（要看细节回平台页）。 */
+  function renderPlatformEntry(e) {
+    e = e || {};
+    const cls = PLATFORM_LEVEL_CLS[e.risk_level] || "gray";
+    const eVal = (e.e_score === null || e.e_score === undefined) ? "E=?" : `E=${Number(e.e_score).toFixed(1)}`;
+    const verdict = e.verdict_label
+      ? `${escapeHtml(e.verdict_label)}${e.risk_score !== null && e.risk_score !== undefined ? `（${Number(e.risk_score)}）` : ""}`
+      : "未深查";
+    const when = String(e.discovered_at || "").replace("T", " ").slice(0, 19) || "未知";
+    /* 领域（v7）：feed_entries 的领域列叫 topic_domain（domain 是 URL 主机域）。
+       只有带领域值的条目才在 meta 行末追加，保持对话卡轻量；中文名映射在平台页
+       platform.js（领域表唯一数据源是 GET /api/platform/domains），这里不重复一张表。 */
+    const domainLabel = String(e.topic_domain || "").trim();
+    const domainPart = domainLabel ? ` · 领域：${escapeHtml(domainLabel)}` : "";
+    return `<li class="chat-platform-entry">
+      <div class="chat-platform-entry-head">
+        <span class="badge ${cls}">${escapeHtml(e.risk_label || e.risk_level || "?")}</span>
+        <span class="chat-platform-entry-title">${escapeHtml(String(e.title || "").slice(0, 60))}</span>
+      </div>
+      <div class="chat-platform-entry-meta">${eVal} · 结论：${verdict} · ${escapeHtml(when)}${domainPart}</div>
+    </li>`;
+  }
+
+  function renderPlatform(card) {
+    card = card || {};
+    const kind = String(card.kind || "");
+    const titles = { warnings: "监测平台 · 传播风险预警", feed: "监测平台 · 信息流", scans: "监测平台 · 巡检记录" };
+    const title = titles[kind] || "监测平台";
+    let body = "";
+    if (kind === "scans") {
+      const scans = Array.isArray(card.scans) ? card.scans : [];
+      body = scans.length
+        ? `<ul class="chat-platform-list">${scans.map((s) => `
+          <li><span class="badge gray">${escapeHtml(s.status || "?")}</span>
+          <span class="chat-platform-entry-meta">${escapeHtml(String(s.started_at || "").replace("T", " ").slice(0, 19))}</span>
+          <span class="chat-platform-entry-meta">候选 ${Number(s.candidates) || 0} · 深查 ${Number(s.verified) || 0} · 降级 ${Number(s.degraded) || 0}</span>
+          ${s.error ? `<div class="chat-platform-entry-meta">${escapeHtml(s.error)}</div>` : ""}</li>`).join("")}</ul>`
+        : '<p class="chat-insight-empty">暂无巡检记录</p>';
+    } else {
+      const rows = Array.isArray(card[kind]) ? card[kind] : [];
+      body = rows.length
+        ? `<ul class="chat-platform-list">${rows.map(renderPlatformEntry).join("")}</ul>`
+        : `<p class="chat-insight-empty">${kind === "warnings" ? "暂无预警（没有高危/紧急档信息）" : "暂无信息"}</p>`;
+    }
+    return `
+      <div class="chat-card chat-card-platform">
+        <div class="chat-card-title">${escapeHtml(title)}<span class="badge gray">只读 · 零 LLM</span>${degradedBadge(card)}</div>
+        ${body}
+        ${asOfLine(card.as_of)}
+      </div>`;
+  }
+
   /* ---------- 6. 材料批次汇总卡（batch_summary：批量核查的计数 / 分布 / 同源组 / 条目） ----------
      由后端 /api/batch/{id} 的 summary 与批次 SSE 的 card 事件产出：
      card = {card_type:"batch_summary", batch_id, title, source, as_of, total, ok,
@@ -788,6 +848,7 @@
     const type = String(payload.card_type || payload.type || "").toLowerCase();
     if (type === "insights") return renderInsights(payload);
     if (type === "evidence") return renderEvidence(payload);
+    if (type === "platform") return renderPlatform(payload);
     if (type === "batch_summary") return renderBatchSummary(payload);
     if (type === "monitor_change") return renderMonitorChange(payload);
     if (type === "conclusion") return renderConclusion(payload);
@@ -819,7 +880,7 @@
   /* 供 chat.js 调用的唯一入口（不污染全局命名空间） */
   window.ChatCards = {
     renderCard, renderClaimAnswer, renderConclusion, renderSpeech, renderHeat,
-    renderInsights, renderEvidence, renderBatchSummary, renderMonitorChange,
-    mountCard, escapeHtml,
+    renderInsights, renderEvidence, renderPlatform, renderBatchSummary,
+    renderMonitorChange, mountCard, escapeHtml,
   };
 })();

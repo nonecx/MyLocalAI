@@ -33,7 +33,8 @@ class TestMigrations(unittest.TestCase):
         names = {r["name"] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
         for t in ("dossiers", "conclusions", "evidence_entries", "attention_snapshots",
-                  "opinion_profiles", "deep_reads", "analysis_runs", "schema_migrations"):
+                  "opinion_profiles", "deep_reads", "analysis_runs", "schema_migrations",
+                  "watch_queries", "feed_entries", "scan_runs"):
             self.assertIn(t, names)
         dossier_cols = {r["name"] for r in conn.execute("PRAGMA table_info(dossiers)")}
         message_cols = {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}
@@ -243,10 +244,12 @@ class TestMarkersStore(unittest.TestCase):
     def test_fresh_migrate_reaches_current_schema_with_markers_table(self):
         """全新库 migrate：应用全部迁移段、schema_migrations 记到当前版本、
         dossier_markers 表与唯一索引都在（v4 建表，v5 追加保留期列，
-        v6 建 Profile 工作区，当前 SCHEMA_VERSION）。"""
+        v6 建 Profile 工作区，v7/v8 批次与订阅，v9/v10 平台域三表与信息源/领域列，
+        当前 SCHEMA_VERSION）。"""
         conn = connect(self.db)
         try:
             self.assertEqual(migrate(conn), SCHEMA_VERSION)
+            self.assertEqual(SCHEMA_VERSION, 10)
             self.assertEqual(
                 conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0],
                 SCHEMA_VERSION)
@@ -261,7 +264,7 @@ class TestMarkersStore(unittest.TestCase):
 
     def test_upgrade_from_v3_keeps_history(self):
         """v3 老库升级路径：手工只跑 MIGRATIONS[0:3] 建库、登记版本 1-3（真实 v3 库
-        的 schema_migrations 状态）并写入历史数据，再 migrate 补跑 v4+v5+v6 各段——
+        的 schema_migrations 状态）并写入历史数据，再 migrate 补跑 v4..v10 七段——
         历史档案与结论原样保留，且被回填到默认档案工作区（v6 分家不丢旧数据）。"""
         conn = connect(self.db)
         try:
@@ -281,7 +284,7 @@ class TestMarkersStore(unittest.TestCase):
             conn.execute(
                 "INSERT INTO conclusions (dossier_id, version, label, created_at)"
                 " VALUES (?, 1, '疑似谣言', '2026-10-01T08:00:00+08:00')", (did,))
-            self.assertEqual(migrate(conn), SCHEMA_VERSION - 3)   # 补跑 v4 + v5 + v6
+            self.assertEqual(migrate(conn), SCHEMA_VERSION - 3)   # 补跑 v4..v10 七段
             self.assertEqual(
                 conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0],
                 SCHEMA_VERSION)
@@ -309,6 +312,97 @@ class TestMarkersStore(unittest.TestCase):
             self.assertEqual(
                 conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0],
                 SCHEMA_VERSION)
+        finally:
+            conn.close()
+
+    # ---- 两线合并（2026-11-21）：platform-monitor 线存量库的重登记升级专项 ----
+
+    def test_platform_line_v7_db_upgrades_to_unified_v10(self):
+        """A 线（platform-monitor）v7 存量库 → 统一 v10：_rebase_platform_line 按
+        表存在性识别（有平台三表、无 profiles 表），把登记号 6→9、7→10 重登记
+        （不重放——v10 的 ALTER 不可重放），再补跑统一链 v6/v7/v8 三段；平台旧行
+        原样保留，存量档案回填默认档案工作区。"""
+        conn = connect(self.db)
+        try:
+            conn.execute("""CREATE TABLE IF NOT EXISTS schema_migrations (
+                                version    INTEGER PRIMARY KEY,
+                                applied_at TEXT NOT NULL)""")
+            # 真实 A 线 v7 库：v1-v5 已应用登记为 1-5；平台旧 v6/v7（= 统一链
+            # MIGRATIONS[8]/[9] 脚本原文）登记为 6/7
+            for i, script in enumerate(ds.MIGRATIONS[:5], start=1):
+                with conn:
+                    conn.executescript(script)
+                    conn.execute("INSERT INTO schema_migrations (version, applied_at)"
+                                 " VALUES (?, '2026-10-01T00:00:00+08:00')", (i,))
+            for idx, version in ((8, 6), (9, 7)):
+                with conn:
+                    conn.executescript(ds.MIGRATIONS[idx])
+                    conn.execute("INSERT INTO schema_migrations (version, applied_at)"
+                                 " VALUES (?, '2026-11-20T00:00:00+08:00')", (version,))
+            # A 线存量数据：平台监控词一行 + v1 时代的老档案一行
+            conn.execute("INSERT INTO watch_queries (query, created_at)"
+                         " VALUES ('隔夜茶', '2026-11-20T00:00:00+08:00')")
+            conn.execute(
+                "INSERT INTO dossiers (created_at, updated_at, title, input_text)"
+                " VALUES ('2026-11-19T08:00:00+08:00', '2026-11-19T08:00:00+08:00',"
+                " 'A线旧档', '老正文')")
+            applied = migrate(conn)
+            self.assertEqual(applied, 3)   # 补跑统一 v6 profiles + v7 batches + v8 subscriptions
+            versions = {r["version"] for r in conn.execute(
+                "SELECT version FROM schema_migrations")}
+            self.assertEqual(versions, set(range(1, SCHEMA_VERSION + 1)))
+            # 平台旧行原样保留，v10 的领域列在位
+            row = conn.execute(
+                "SELECT domain FROM watch_queries WHERE query = '隔夜茶'").fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["domain"], "")
+            # 存量档案回填默认档案工作区
+            prof = conn.execute("SELECT profile_id FROM dossiers WHERE title = 'A线旧档'").fetchone()
+            self.assertIsNotNone(prof["profile_id"])
+        finally:
+            conn.close()
+
+    def test_platform_line_v6_db_upgrades_to_unified_v10(self):
+        """A 线只跑到旧 v6（平台三表已建、v7 领域段未跑）的分支：登记号 6→9，
+        补跑统一 v6/v7/v8 + v10 四段（applied=4），平台行与领域列最终齐备。"""
+        conn = connect(self.db)
+        try:
+            conn.execute("""CREATE TABLE IF NOT EXISTS schema_migrations (
+                                version    INTEGER PRIMARY KEY,
+                                applied_at TEXT NOT NULL)""")
+            for i, script in enumerate(ds.MIGRATIONS[:5], start=1):
+                with conn:
+                    conn.executescript(script)
+                    conn.execute("INSERT INTO schema_migrations (version, applied_at)"
+                                 " VALUES (?, '2026-10-01T00:00:00+08:00')", (i,))
+            with conn:
+                conn.executescript(ds.MIGRATIONS[8])   # 平台三表（A 线旧 v6 = 统一 v9）
+                conn.execute("INSERT INTO schema_migrations (version, applied_at)"
+                             " VALUES (6, '2026-11-20T00:00:00+08:00')")
+            conn.execute("INSERT INTO watch_queries (query, created_at)"
+                         " VALUES ('某监控词', '2026-11-20T00:00:00+08:00')")
+            self.assertEqual(migrate(conn), 4)   # 补跑统一 v6 + v7 + v8 + v10
+            versions = {r["version"] for r in conn.execute(
+                "SELECT version FROM schema_migrations")}
+            self.assertEqual(versions, set(range(1, SCHEMA_VERSION + 1)))
+            # v10 的领域列在位、旧行保留
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(watch_queries)")}
+            self.assertIn("domain", cols)
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM watch_queries WHERE query = '某监控词'").fetchone()[0], 1)
+        finally:
+            conn.close()
+
+    def test_rebase_does_not_touch_unified_or_fresh_dbs(self):
+        """守卫：统一链库（有 profiles 表）与全新库不被 _rebase_platform_line 改写。"""
+        # 全新库：直接 migrate，登记号即 1..10，无重登记痕迹
+        conn = connect(self.db)
+        try:
+            self.assertEqual(migrate(conn), SCHEMA_VERSION)
+            rows = conn.execute(
+                "SELECT version, applied_at FROM schema_migrations ORDER BY version").fetchall()
+            self.assertEqual([r["version"] for r in rows], list(range(1, SCHEMA_VERSION + 1)))
+            self.assertEqual(migrate(conn), 0)
         finally:
             conn.close()
 

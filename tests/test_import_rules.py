@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """包依赖方向约束（AST 静态检查，2026-10-30 M1-2 任务 4）。
 
-依赖方向只有一条（工作指导 §4.1）：
-    core ← llm ← retrieval ← {classic, rumor, attention} ← {dossier, assistant} ← web/cli/mcp
+依赖方向只有一条（工作指导 §4.1，2026-11-20 扩平台包）：
+    core ← llm ← retrieval ← {classic, rumor, attention} ← {dossier, assistant, platform}
+    ← web/cli/mcp
 classic / rumor / attention 三者互不 import。config 与 util 是叶子（不 import 任何内部包）。
 
 检查所有 `import` / `from ... import`（含函数体内的延迟导入）。豁免清单见 _EXEMPT。
@@ -22,17 +23,22 @@ SRC = ROOT / "src" / "mylocalai"
 # 2026-10-31 复核修复补三行：依赖方向（§4.1）core ← llm ← retrieval ←
 # {classic, rumor, attention} ← {dossier, assistant} ← web/cli/mcp，
 # 因此 assistant 只禁 web、dossier 禁 {web, assistant}、web 是顶层无上游可禁（{}）。
+# 2026-11-20 平台包（platform）：与 dossier/assistant 同层，消费
+# {core, llm, config, util, retrieval, classic, rumor, attention, dossier}，
+# 被 web/cli/assistant 消费（assistant 的 platform_feed 工具即助手→平台）；
+# 上游各包一律禁 platform（防反向依赖），platform 自身禁 web/assistant（不成环）。
 FORBIDDEN = {
-    "mylocalai.core": {"classic", "rumor", "attention", "retrieval", "web", "llm"},
-    "mylocalai.config": {"classic", "rumor", "attention", "retrieval", "web", "llm", "core", "util"},
-    "mylocalai.util": {"classic", "rumor", "attention", "retrieval", "web", "llm", "core", "config"},
-    "mylocalai.llm": {"classic", "rumor", "attention", "web"},
-    "mylocalai.retrieval": {"classic", "rumor", "attention", "web"},
-    "mylocalai.classic": {"rumor", "attention"},
-    "mylocalai.rumor": {"classic", "attention"},
-    "mylocalai.attention": {"classic", "rumor"},
-    "mylocalai.dossier": {"web", "assistant"},
+    "mylocalai.core": {"classic", "rumor", "attention", "retrieval", "web", "llm", "platform"},
+    "mylocalai.config": {"classic", "rumor", "attention", "retrieval", "web", "llm", "core", "util", "platform"},
+    "mylocalai.util": {"classic", "rumor", "attention", "retrieval", "web", "llm", "core", "config", "platform"},
+    "mylocalai.llm": {"classic", "rumor", "attention", "web", "platform"},
+    "mylocalai.retrieval": {"classic", "rumor", "attention", "web", "platform"},
+    "mylocalai.classic": {"rumor", "attention", "platform"},
+    "mylocalai.rumor": {"classic", "attention", "platform"},
+    "mylocalai.attention": {"classic", "rumor", "platform"},
+    "mylocalai.dossier": {"web", "assistant", "platform"},
     "mylocalai.assistant": {"web"},
+    "mylocalai.platform": {"web", "assistant"},
     "mylocalai.web": set(),
 }
 

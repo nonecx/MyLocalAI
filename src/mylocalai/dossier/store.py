@@ -26,7 +26,7 @@ from typing import Any, Dict, Iterable, List, Optional
 __all__ = ["SCHEMA_VERSION", "DEFAULT_DB_PATH", "connect", "migrate",
            "DossierStore", "default_db_path"]
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 10
 
 #: 顺序迁移：索引 i 的脚本把库从版本 i 升到 i+1。永不修改已发布的条目，只允许追加。
 MIGRATIONS: List[str] = [
@@ -307,6 +307,89 @@ MIGRATIONS: List[str] = [
     );
     CREATE INDEX IF NOT EXISTS idx_sub_runs_sub ON subscription_runs(subscription_id, id);
     """,
+    # v9: 平台域三表（热门监测平台；原 platform-monitor 线 v6，2026-11-21 两线合并
+    # 时平移为 v9，DDL 逐字未动——platform.store 依赖这些表名与列）。watch_queries
+    # 是监控词；feed_entries 是巡检发现的信息流条目（url 唯一约束即去重第一道闸，
+    # result_expires_at 走 results 保留期）；scan_runs 记录每次巡检的执行状态。
+    # 建表顺序：scan_runs 先于 feed_entries（后者有 FK 指向前者）。
+    """
+    CREATE TABLE IF NOT EXISTS scan_runs (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        started_at  TEXT NOT NULL,
+        finished_at TEXT,
+        status      TEXT NOT NULL DEFAULT 'running',
+        queries     INTEGER NOT NULL DEFAULT 0,
+        candidates  INTEGER NOT NULL DEFAULT 0,
+        verified    INTEGER NOT NULL DEFAULT 0,
+        degraded    INTEGER NOT NULL DEFAULT 0,
+        error       TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS watch_queries (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        query      TEXT NOT NULL UNIQUE,
+        enabled    INTEGER NOT NULL DEFAULT 1,
+        note       TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS feed_entries (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        query_id      INTEGER NOT NULL REFERENCES watch_queries(id) ON DELETE CASCADE,
+        scan_id       INTEGER REFERENCES scan_runs(id) ON DELETE SET NULL,
+        title         TEXT NOT NULL DEFAULT '',
+        url           TEXT NOT NULL UNIQUE,
+        domain        TEXT NOT NULL DEFAULT '',
+        domain_tier   TEXT NOT NULL DEFAULT '',
+        snippet       TEXT NOT NULL DEFAULT '',
+        discovered_at TEXT NOT NULL DEFAULT '',
+        e_score       REAL,
+        e_prev        REAL,
+        risk_level    TEXT NOT NULL DEFAULT 'notice',
+        risk_reasons  TEXT NOT NULL DEFAULT '[]',
+        verdict_label TEXT NOT NULL DEFAULT '',
+        risk_score    REAL,
+        dossier_id    INTEGER REFERENCES dossiers(id) ON DELETE SET NULL,
+        status        TEXT NOT NULL DEFAULT 'new',
+        result_expires_at TEXT,
+        created_at    TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_feed_query ON feed_entries(query_id, id);
+    CREATE INDEX IF NOT EXISTS idx_feed_risk ON feed_entries(risk_level, id);
+    CREATE INDEX IF NOT EXISTS idx_feed_expiry ON feed_entries(result_expires_at);
+    """,
+    # v10: 平台"用户自建信息源" + 监控词领域 + 信息流领域（原 platform-monitor 线
+    # v7，2026-11-21 两线合并时平移为 v10，DDL 逐字未动）。
+    # patrol_sources 是用户自建的 RSS/页面源（url 唯一即去重第一道闸，kind 封闭集
+    # 由 CHECK 兜底）；patrol_query_sources 是"源 × 监控词"绑定表（复合主键幂等，
+    # 双外键 CASCADE：删词或删源，绑定行随之消失，不留孤儿）。
+    # watch_queries 增 domain（用户手设领域，空串 = 交给自动推断）与
+    # inferred_domain/inferred_at（自动推断缓存；用户手改 domain 即由平台层清空，
+    # 库里不写触发器，清缓存语义见 platform.store.set_watch_query_domain）。
+    # feed_entries 增 topic_domain/topic_domain_source（信息流所属领域及其来源）。
+    # 命名注意：feed_entries.domain 自 v9 起就是 **URL 主机域**（runner 写
+    # cand.domain），故新领域列另起名 topic_domain，不与该列争名；索引名沿用
+    # idx_feed_domain（建在 topic_domain 上）。
+    """
+    ALTER TABLE watch_queries ADD COLUMN domain TEXT NOT NULL DEFAULT '';
+    ALTER TABLE watch_queries ADD COLUMN inferred_domain TEXT NOT NULL DEFAULT '';
+    ALTER TABLE watch_queries ADD COLUMN inferred_at TEXT NOT NULL DEFAULT '';
+    CREATE TABLE IF NOT EXISTS patrol_sources (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        name       TEXT NOT NULL DEFAULT '',
+        url        TEXT NOT NULL UNIQUE,
+        kind       TEXT NOT NULL DEFAULT 'rss' CHECK (kind IN ('rss', 'page')),
+        enabled    INTEGER NOT NULL DEFAULT 1,
+        note       TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS patrol_query_sources (
+        query_id  INTEGER NOT NULL REFERENCES watch_queries(id) ON DELETE CASCADE,
+        source_id INTEGER NOT NULL REFERENCES patrol_sources(id) ON DELETE CASCADE,
+        PRIMARY KEY (query_id, source_id)
+    );
+    ALTER TABLE feed_entries ADD COLUMN topic_domain TEXT NOT NULL DEFAULT '';
+    ALTER TABLE feed_entries ADD COLUMN topic_domain_source TEXT NOT NULL DEFAULT '';
+    CREATE INDEX IF NOT EXISTS idx_feed_domain ON feed_entries(topic_domain, id);
+    """,
 ]
 
 
@@ -444,11 +527,58 @@ def _fp_jaccard(a: Any, b: Any) -> float:
     return len(sa & sb) / union
 
 
+def title_similarity(a: Any, b: Any) -> float:
+    """两条标题的指纹相似度（0-1）。**纯函数、永不抛**（坏输入按 0.0）。
+
+    供 platform 候选去重使用（同一事件多家转载的标题近似判定）；与
+    assistant.fingerprint 的 normalize/shingles/jaccard 逐字节同口径，一致性由
+    tests/test_fingerprint.py 的对拍用例锁定——改动必须两处同步。
+    """
+    try:
+        na = _fp_normalize(a)
+        nb = _fp_normalize(b)
+        if not na or not nb:
+            return 0.0
+        return _fp_jaccard(_fp_shingle_hashes(na), _fp_shingle_hashes(nb))
+    except Exception:  # noqa: BLE001  相似度是增益层，任何意外按"不相似"
+        return 0.0
+
+
+def _rebase_platform_line(conn: sqlite3.Connection) -> None:
+    """把"platform-monitor 线"存量库的迁移登记号改写到统一链上（2026-11-21 两线合并）。
+
+    背景：合并前两条线各自发布了 v6/v7——本线 v6=profiles、v7=batches；platform
+    线 v6=平台三表、v7=领域+patrol 表。``schema_migrations`` 只记版本号，两种 v7
+    无法凭登记号区分。统一链（v6 profiles → v7 batches → v8 subscriptions →
+    v9 平台三表 → v10 领域+patrol）沿用本线编号，平台内容平移到 v9/v10。
+
+    识别方式：**表存在性探测**——已存在平台三表（watch_queries/feed_entries/
+    scan_runs）且不存在 profiles 表的库，必是 platform 线存量库，其登记号 6/7
+    对应统一链的 9/10。只做**重登记**（改版本号、保留 applied_at），绝不重放：
+    v10 含 5 条无 IF NOT EXISTS 的 ``ALTER TABLE ADD COLUMN``，对已加列的库重放
+    会 duplicate column 崩溃。
+
+    探测条件刻意收窄（有平台表 **且** 无 profiles 表）：本线库与全新库都不触发；
+    只跑到 v5 的老库没有平台表，正常走统一链。平台线库重登记后，剩余缺口
+    （profiles/batches/subscriptions 三段）由 migrate 循环照常补跑，平台旧行原样保留。
+    """
+    tables = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    has_platform = {"watch_queries", "feed_entries", "scan_runs"}.issubset(tables)
+    if not has_platform or "profiles" in tables:
+        return
+    with conn:
+        # v10 的 ALTER 不可重放——这里只能改登记号（单事务，保 applied_at 审计链）
+        conn.execute("UPDATE schema_migrations SET version = 9 WHERE version = 6")
+        conn.execute("UPDATE schema_migrations SET version = 10 WHERE version = 7")
+
+
 def migrate(conn: sqlite3.Connection) -> int:
     """把库迁到 SCHEMA_VERSION；返回应用了的迁移数。幂等，可重复调用。"""
     conn.execute("""CREATE TABLE IF NOT EXISTS schema_migrations (
                         version    INTEGER PRIMARY KEY,
                         applied_at TEXT NOT NULL)""")
+    _rebase_platform_line(conn)
     done = {r["version"] for r in conn.execute("SELECT version FROM schema_migrations")}
     applied = 0
     for i, script in enumerate(MIGRATIONS, start=1):
