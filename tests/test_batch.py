@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import threading
@@ -183,6 +184,104 @@ class TestBatchSummary(unittest.TestCase):
         self.assertEqual(card["items"][0]["dossier_id"], 5)
         self.assertIn("as_of", card)
 
+    def test_group_labels_accumulate_within_group(self):
+        """R3：组内标签计数按成员累加——同组 3 条同标签如实 ×3（此前 dict 推导
+        同键互相覆盖恒显示 ×1，与 cards.js 照实渲染的口径不符）。"""
+        from mylocalai.dossier.batch_summary import summarize
+        items = [{"position": i, "status": "ok", "label": "疑似谣言",
+                  "risk_score": 60, "dossier_id": i + 1, "group_id": 1}
+                 for i in range(3)]
+        s = summarize(items)
+        self.assertEqual(s["groups"][0]["labels"], {"疑似谣言": 3})
+        # 混合标签组：各标签分别累加
+        items.append({"position": 3, "status": "ok", "label": "存疑待核实",
+                      "risk_score": 40, "dossier_id": 4, "group_id": 1})
+        s = summarize(items)
+        self.assertEqual(s["groups"][0]["labels"], {"疑似谣言": 3, "存疑待核实": 1})
+
+    def test_summarize_three_elements_with_evidence(self):
+        """规格 §5 三要素：立场矩阵 / 证据重合 Top / 信源战绩（纯函数，零 LLM）。"""
+        from mylocalai.dossier.batch_summary import summarize
+        items = [
+            {"position": 0, "status": "ok", "label": "疑似谣言", "risk_score": 62,
+             "dossier_id": 1},
+            {"position": 1, "status": "ok", "label": "疑似谣言", "risk_score": 58,
+             "dossier_id": 2},
+            {"position": 2, "status": "ok", "label": "低风险", "risk_score": 10,
+             "dossier_id": 3},
+        ]
+        evidence = {
+            1: [{"url": "https://gov.example/1", "domain": "gov.example", "stance": "反驳"},
+                {"url": "https://news.example/1", "domain": "news.example",
+                 "stance": "支持"}],
+            2: [{"url": "https://gov.example/1", "domain": "gov.example", "stance": "反驳"}],
+            3: [{"url": "https://quiet.example/x", "domain": "quiet.example", "stance": ""}],
+        }
+        s = summarize(items, evidence_by_dossier=evidence)
+        # 立场矩阵：结论标签 × 证据立场计数；无立场的数据行如实省略（低风险行）
+        self.assertEqual(s["stance_matrix"], {"疑似谣言": {"反驳": 2, "支持": 1}})
+        # 信源战绩：出现次数降序、同数按域名升序；反驳条目按 stance 原值计数
+        self.assertEqual(s["sources_top"], [
+            {"domain": "gov.example", "refute_entries": 2},
+            {"domain": "news.example", "refute_entries": 0},
+            {"domain": "quiet.example", "refute_entries": 0}])
+        # cards.js 契约：sources_top 数组、元素恰有 domain(str)/refute_entries(int)
+        for entry in s["sources_top"]:
+            self.assertEqual(set(entry.keys()), {"domain", "refute_entries"})
+            self.assertIsInstance(entry["domain"], str)
+            self.assertIsInstance(entry["refute_entries"], int)
+        # 证据重合：条目 0 与 1 同引 gov.example/1——URL 重合已隐含域名重合，
+        # 去重后 shared 只记 URL，不重复计域名
+        self.assertEqual(s["evidence_overlap_top"], [
+            {"a": 0, "b": 1, "shared": ["https://gov.example/1"], "count": 1}])
+
+    def test_three_elements_empty_without_evidence(self):
+        """不给证据原料：三要素如实空结构（不编造、不抛）。"""
+        from mylocalai.dossier.batch_summary import summarize
+        s = summarize([{"position": 0, "status": "ok", "label": "疑似谣言",
+                        "dossier_id": 9}])
+        self.assertEqual((s["stance_matrix"], s["evidence_overlap_top"], s["sources_top"]),
+                         ({}, [], []))
+
+    def test_overlap_top_capped_at_five_and_empty_when_no_overlap(self):
+        """重合 Top-N ≤5；0 重合给空列表（前端判空整块不渲染）。"""
+        from mylocalai.dossier.batch_summary import summarize
+        items = [{"position": i, "status": "ok", "label": "疑似谣言",
+                  "dossier_id": i + 1} for i in range(4)]
+        evidence = {
+            1: [{"url": "", "domain": f"d{i}.example", "stance": "反驳"}
+                for i in range(3)],
+            2: [{"url": "", "domain": "d0.example", "stance": ""}],
+            3: [{"url": "", "domain": "d0.example", "stance": ""},
+                {"url": "", "domain": "d1.example", "stance": ""}],
+            4: [{"url": "", "domain": "d0.example", "stance": ""},
+                {"url": "", "domain": "d1.example", "stance": ""},
+                {"url": "", "domain": "d2.example", "stance": ""}],
+        }
+        s = summarize(items, evidence_by_dossier=evidence)
+        top = s["evidence_overlap_top"]
+        # 6 对里 6 对重合：count 降序 [3,2,2,1,1,1]，Top-N 只留前 5
+        self.assertEqual([p["count"] for p in top], [3, 2, 2, 1, 1])
+        self.assertEqual(top[0], {"a": 0, "b": 3,
+                                  "shared": ["d0.example", "d1.example", "d2.example"],
+                                  "count": 3})
+        # >5 对时只留前 5
+        many = [{"position": i, "status": "ok", "label": "疑似谣言",
+                 "dossier_id": i + 1} for i in range(8)]
+        ev_many = {i + 1: [{"url": "", "domain": "same.example", "stance": ""}]
+                   for i in range(8)}
+        s_many = summarize(many, evidence_by_dossier=ev_many)
+        self.assertEqual(len(s_many["evidence_overlap_top"]), 5)
+        # 完全无重合 → 空列表
+        s2 = summarize([{"position": 0, "status": "ok", "label": "L", "dossier_id": 1},
+                        {"position": 1, "status": "ok", "label": "L", "dossier_id": 2}],
+                       evidence_by_dossier={
+                           1: [{"url": "https://a.example/1", "domain": "a.example",
+                                "stance": ""}],
+                           2: [{"url": "https://b.example/1", "domain": "b.example",
+                                "stance": ""}]})
+        self.assertEqual(s2["evidence_overlap_top"], [])
+
 
 # ---------------------------------------------------------------------------
 # C. 编排（run_batch）
@@ -302,10 +401,100 @@ class TestRunBatch(BatchTestBase):
         self.assertEqual(item["status"], "ok")
         self.assertEqual(item["raw_text"], "抓取到的正文内容")
 
+    def test_all_blocked_batch_is_partial_not_failed(self):
+        """R5：全 blocked 批次不再落 failed——status=partial、failed_count=0，
+        blocked 走 summary JSON 派生的 blocked_count（get/list 同口径）。"""
+        bid = self.store.create_batch("URL 批次", "urls",
+                                      [{"text": "", "url": f"https://example.com/{i}"}
+                                       for i in range(3)])
+        with mock.patch("mylocalai.core.privacy.load_preferences",
+                        return_value=_prefs(external=False)):
+            self.run_batch(bid, store=self.store, dossiers=self.dossiers,
+                           services={"verify": _stub_verify()}, events=None,
+                           rules=_rules())
+        batch = self.store.get_batch(bid)
+        self.assertEqual(batch["status"], "partial")
+        self.assertEqual(batch["failed_count"], 0)
+        self.assertEqual(batch["blocked_count"], 3)
+        listed = self.store.list_batches()
+        self.assertEqual((listed[0]["failed_count"], listed[0]["blocked_count"]),
+                         (0, 3))
+
+    def test_blocked_split_from_failed_in_store_counts(self):
+        """R5：blocked 与 failed 分列——条目 error 记 failed_count，blocked 不再并入。"""
+        bid = self.store.create_batch("混合批次", "urls",
+                                      [{"text": "", "url": "https://example.com/a"},
+                                       {"text": "纯文本材料", "url": ""}])
+        with mock.patch("mylocalai.core.privacy.load_preferences",
+                        return_value=_prefs(external=False)):
+            # services 空 → 文本条目 error（核查服务未装配）；URL 条目 blocked
+            self.run_batch(bid, store=self.store, dossiers=self.dossiers,
+                           services={}, events=None, rules=_rules())
+        items = self.store.items(bid)
+        self.assertEqual([it["status"] for it in items], ["blocked", "error"])
+        batch = self.store.get_batch(bid)
+        self.assertEqual((batch["status"], batch["failed_count"], batch["blocked_count"]),
+                         ("partial", 1, 1))
+
+    def test_summary_includes_three_elements_from_stored_evidence(self):
+        """编排收尾把条目档案证据喂给汇总：落库 summary 含信源战绩/立场矩阵。"""
+        bid = self.make_batch(["材料甲"])
+        self.run_batch(bid, store=self.store, dossiers=self.dossiers,
+                       services={"verify": _stub_verify()}, events=None,
+                       rules=_rules())
+        summary = self.store.get_batch(bid)["summary"]
+        self.assertEqual(summary["sources_top"],
+                         [{"domain": "gov.example", "refute_entries": 1}])
+        self.assertEqual(summary["stance_matrix"], {"疑似谣言": {"反驳": 1}})
+        self.assertEqual(summary["evidence_overlap_top"], [])
+
+    def test_done_event_reports_real_cost_delta(self):
+        """R7：done.cost = llm_client 计数器段前/段后快照差值（不再硬编码 0），
+        且随 summary 落库——完结批次重放的 done 也如实。"""
+        from mylocalai.assistant.events import EventStream
+        counter = {"requests": 5, "tokens": 100}
+
+        def fake_snapshot():
+            counter["requests"] += 3
+            counter["tokens"] += 150
+            return dict(counter)
+
+        bid = self.make_batch(["甲", "乙"])
+        events = EventStream()
+        with mock.patch("mylocalai.llm.llm_client.usage_snapshot", fake_snapshot):
+            self.run_batch(bid, store=self.store, dossiers=self.dossiers,
+                           services={"verify": _stub_verify()}, events=events,
+                           rules=_rules())
+        done = next(e for e in events.snapshot() if e["event"] == "done")
+        self.assertEqual(done["cost"], {"requests": 3, "tokens": 150})
+        self.assertEqual(self.store.get_batch(bid)["summary"]["cost"],
+                         {"requests": 3, "tokens": 150})
+
+    def test_done_cost_degrades_to_zero_when_counter_unavailable(self):
+        """R7：计数面不可用（读取抛错）→ done.cost 如实退 0（既有降级口径）。"""
+        from mylocalai.assistant.events import EventStream
+        bid = self.make_batch(["甲"])
+        events = EventStream()
+        with mock.patch("mylocalai.llm.llm_client.usage_snapshot",
+                        side_effect=RuntimeError("counter unavailable")):
+            self.run_batch(bid, store=self.store, dossiers=self.dossiers,
+                           services={"verify": _stub_verify()}, events=events,
+                           rules=_rules())
+        done = next(e for e in events.snapshot() if e["event"] == "done")
+        self.assertEqual(done["cost"], {"requests": 0, "tokens": 0})
+
 
 # ---------------------------------------------------------------------------
 # D. Web API
 # ---------------------------------------------------------------------------
+
+class _FakeStreamRequest:
+    """batch_stream/_drain 的最小 request 替身：is_disconnected 恒 False。
+    客户端断开用生成器 aclose 模拟（TestClient 提前关流同样走生成器 finally）。"""
+
+    async def is_disconnected(self) -> bool:
+        return False
+
 
 class TestBatchApi(unittest.TestCase):
     @classmethod
@@ -341,6 +530,9 @@ class TestBatchApi(unittest.TestCase):
             patcher = mock.patch.object(module, attr, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        # 登记表是模块级单例：跨测试清场（各测试用各自的临时库，批次 id 会撞号）
+        with batch_api._streams_lock:
+            batch_api._streams.clear()
         # 批次 worker 用注入的 stub loop（不碰真实默认库）
         stub_loop = mock.Mock()
         stub_loop.dossiers = self.service
@@ -411,6 +603,112 @@ class TestBatchApi(unittest.TestCase):
         self.assertIn("batch_summary", body)
         self.assertIn("event: done", body)
 
+    def test_replay_done_cost_and_three_elements_from_stored_summary(self):
+        """重放契约：done.cost 用编排期落库的真实值；卡片带三要素（sources_top）。"""
+        from mylocalai.assistant.events import EventStream
+        from mylocalai.assistant.tools_batch import run_batch
+        counter = {"requests": 0, "tokens": 0}
+
+        def fake_snapshot():
+            counter["requests"] += 2
+            counter["tokens"] += 7
+            return dict(counter)
+
+        bid = self.store.create_batch("重放成本", "text", [{"text": "甲", "url": ""}])
+        events = EventStream()
+        with mock.patch("mylocalai.llm.llm_client.usage_snapshot", fake_snapshot):
+            run_batch(bid, store=self.store, dossiers=self.service,
+                      services={"verify": _stub_verify()}, events=events,
+                      rules=_rules())
+        with self.client.stream("GET", f"/api/batch/{bid}/stream") as resp:
+            body = "".join(chunk for chunk in resp.iter_text())
+        done_data, card_data = None, None
+        for frame in body.strip().split("\n\n"):
+            lines = frame.split("\n")
+            name = lines[0][len("event: "):]
+            payload = json.loads(lines[1][len("data: "):])
+            if name == "done":
+                done_data = payload
+            elif name == "card":
+                card_data = payload
+        self.assertEqual(done_data["cost"], {"requests": 2, "tokens": 7})
+        self.assertEqual(card_data["sources_top"],
+                         [{"domain": "gov.example", "refute_entries": 1}])
+
+    def test_stream_disconnect_cancels_running_batch(self):
+        """R1：SSE 客户端断开（"停止"按钮）→ request_cancel → 剩余条目 not_run、
+        批次 cancelled；已完成的条目结论保留。"""
+        from mylocalai.web import batch_api
+        gate = threading.Event()
+        release = threading.Event()
+
+        def gated_verify(text, deep=False, on_component_done=None, cancel_check=None):
+            gate.set()
+            release.wait(timeout=10.0)   # 卡在"核查中"，模拟进行中的批次
+            return {"label": "疑似谣言", "risk_score": 50.0, "signals": [],
+                    "degraded_components": [], "agent_error": "", "llm_turns": 0,
+                    "evidence_book": {"claim": text, "entries": []}}
+
+        stub_loop = mock.Mock()
+        stub_loop.dossiers = self.service
+        stub_loop.services = {"verify": gated_verify}
+        patcher = mock.patch.object(batch_api, "_loop_factory", lambda: stub_loop)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        resp = self.client.post("/api/batch",
+                                json={"items": ["甲", "乙", "丙"], "source": "text"})
+        self.assertEqual(resp.status_code, 202)
+        bid = resp.json()["batch"]["id"]
+        self.assertTrue(gate.wait(timeout=10.0))   # 第一条已进入核查（批次在跑）
+
+        async def _open_and_close():
+            # 直播路径：取到事件流生成器后立刻关闭——即客户端断开 SSE
+            stream = await batch_api.batch_stream(str(bid), _FakeStreamRequest())
+            agen = stream.body_iterator
+            first = await agen.__anext__()   # 至少吐出 meta 帧（证明是直播非重放）
+            await agen.aclose()              # 断开 → finally → events.request_cancel()
+            return first
+
+        first = asyncio.run(_open_and_close())
+        self.assertIn("event: meta", first)
+        release.set()
+        batch = self._wait_done(bid)
+        self.assertEqual(batch["status"], "cancelled")
+        statuses = [it["status"] for it in self.store.items(bid)]
+        self.assertEqual(statuses, ["ok", "not_run", "not_run"])
+
+    def test_stream_registry_cleaned_after_live_stream_ends(self):
+        """R6：直播流收尾（见到 done）后，登记表条目被摘除（长驻进程防泄漏）。"""
+        from mylocalai.web import batch_api
+        resp = self.client.post("/api/batch",
+                                json={"items": ["甲"], "source": "text"})
+        bid = resp.json()["batch"]["id"]
+        with batch_api._streams_lock:
+            self.assertIn(bid, batch_api._streams)   # 开跑即登记
+        with self.client.stream("GET", f"/api/batch/{bid}/stream") as resp:
+            body = "".join(chunk for chunk in resp.iter_text())
+        self.assertIn("event: done", body)
+        with batch_api._streams_lock:
+            self.assertNotIn(bid, batch_api._streams)
+
+    def test_stream_registry_cleaned_on_replay(self):
+        """R6：已完结批次（登记条目残留）访问一次流即被清理——重放不依赖登记表。"""
+        from mylocalai.assistant.events import EventStream
+        from mylocalai.assistant.tools_batch import run_batch
+        from mylocalai.web import batch_api
+        bid = self.store.create_batch("残留清理", "text", [{"text": "甲", "url": ""}])
+        run_batch(bid, store=self.store, dossiers=self.service,
+                  services={"verify": _stub_verify()}, events=None, rules=_rules())
+        with batch_api._streams_lock:
+            batch_api._streams[bid] = EventStream()   # 模拟历史泄漏残留
+        with self.client.stream("GET", f"/api/batch/{bid}/stream") as resp:
+            self.assertEqual(resp.status_code, 200)
+            body = "".join(chunk for chunk in resp.iter_text())
+        self.assertIn("event: done", body)
+        with batch_api._streams_lock:
+            self.assertNotIn(bid, batch_api._streams)
+
     def test_cross_profile_batch_404(self):
         """批次属于别的工作区 → 404（详情与流都是）。"""
         other = self.profiles.create_profile("other-ws", "别区", "analyst")
@@ -476,13 +774,23 @@ class TestMaterialsApi(unittest.TestCase):
         self.assertEqual(resp.json()["items"], ["甲", "乙"])
 
     def test_rejections(self):
-        """扩展名/大小/坏编码/空内容 → 400。"""
+        """扩展名/坏编码/空内容 → 400。"""
         self.assertEqual(self._upload("a.exe", "x").status_code, 400)
-        big = "x" * (2 * 1024 * 1024 + 10)
-        self.assertEqual(self._upload("a.txt", big).status_code, 400)
         self.assertEqual(self._upload("a.txt", b"\xff\xfe\x00bad").status_code, 400)
         self.assertEqual(self._upload("a.txt", "   ").status_code, 400)
         self.assertEqual(self._upload("a.json", '{"not": "a list"}').status_code, 400)
+
+    def test_oversize_upload_413_without_full_read(self):
+        """R11：超限 413（中文 detail），且分块累计——不在内存整载后才拒；
+        贴线（上限内 1 字节）不误伤。"""
+        big = "x" * (2 * 1024 * 1024 + 10)
+        resp = self._upload("a.txt", big)
+        self.assertEqual(resp.status_code, 413)
+        self.assertIn("过大", resp.json()["detail"])
+        # 上限内贴线：2MB-1 字节，正常解析（单段 1 条）
+        ok = self._upload("a.txt", "x" * (2 * 1024 * 1024 - 1))
+        self.assertEqual(ok.status_code, 200)
+        self.assertEqual(ok.json()["count"], 1)
 
 
 if __name__ == "__main__":

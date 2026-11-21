@@ -394,7 +394,7 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 1676 个用例（unittest discover 全量，2026-11-21 两线合并（角色扩展 + 监测平台）后实测；
+离线套件共 1700 个用例（unittest discover 全量，2026-11-21 批次域收口（取消链/汇总三要素/blocked 分列/真实成本/上传 413）后实测；
 **M4 起由 `tests.test_readme_counts` 自动校验此数字与 mock 闸门条数，改动后须同步回写**）：
 M1-M3 的全部回归（详见 git 历史），加上 M4 新增模块：
 **成本真实计数**（llm_client 进程级计数器：真实上游调用数 + usage tokens，缓存命中/
@@ -634,11 +634,18 @@ DOSSIER_DB_PATH 可覆盖）。测试：`tests.test_mcp_assistant`（同核对�
 取消的条目标 `not_run`（不把"没跑"显示成"没发现"）。
 
 - **接口**：`POST /api/batch`（202 + 后台跑）、`GET /api/batch`、`GET /api/batch/{id}`、
-  `GET /api/batch/{id}/stream`（SSE 进度）、`POST /api/materials/upload`；
-- **汇总卡**（`batch_summary`，零 LLM 纯函数）：状态计数 / 结论分布 / 疑似同源组 /
-  逐条结论与档案链接 / 降级清单；
+  `GET /api/batch/{id}/stream`（SSE 进度）、`POST /api/materials/upload`（超限 413）；
+- **取消链**：客户端断开 SSE（前端"停止"按钮）→ `events.request_cancel()` → 编排协作收工，
+  剩余条目标 `not_run`、批次记 `cancelled`（已跑条目的结论保留）；
+- **汇总卡**（`batch_summary`，零 LLM 纯函数）：状态计数 / 结论分布 / 疑似同源组
+  （组内标签按成员累加）/ 逐条结论与档案链接 / 降级清单，以及规格 §5 三要素——
+  `stance_matrix`（结论标签 × 证据立场）、`evidence_overlap_top`（条目两两证据 URL/域名
+  重合 Top-5）、`sources_top`（出现最多的信源域名 + 反驳条目计数，cards.js 渲染位已备）；
+- **计数口径**：`failed_count` 只记真失败（条目 error），blocked 经 summary JSON 派生为
+  `blocked_count` 随列表/详情一并返回；全 blocked 批次落 `partial` 不再落 `failed`；
+  `done` 事件 cost 为 llm_client 进程级计数器段前/段后差值（缓存命中如实为 0）；
 - **schema v7**：`batches` + `batch_items`（group_id 同源分组、status 六态）；
-- 测试：`tests.test_batch`（存储 / 分组 / 汇总 / 编排八场景 / Web API / 上传解析）。
+- 测试：`tests.test_batch`（存储 / 分组 / 汇总（含三要素）/ 编排 / 取消与登记表清理 / Web API / 上传解析）。
 
 ### 专业用户 B · 领域监测订阅（阶段 3）
 

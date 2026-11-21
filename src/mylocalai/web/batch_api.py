@@ -3,9 +3,13 @@
 
 端点（本地、无鉴权，与既有 API 一致）：
   POST /api/batch                建批次并后台开跑（202 + batch）
-  GET  /api/batch                批次列表（当前档案工作区）
+  GET  /api/batch                批次列表（当前档案工作区，含 blocked_count 分列）
   GET  /api/batch/{id}           批次详情 + 条目 + 汇总
   GET  /api/batch/{id}/stream    SSE 进度（meta/status/progress/card/narrative/done/error）
+
+取消链（R1）：客户端断开 SSE（前端"停止"按钮）→ 流式出口 events.request_cancel()
+→ 编排 run_batch 的 cancel_check 轮询命中 → 剩余条目标 not_run、批次记 cancelled
+（协作取消语义与 /api/chat 同款）。
 
 并发：MAX_CONCURRENT_BATCHES（rules.batch.max_concurrent，缺省 2）个信号量，
 超限 503 + Retry-After——与 /api/analyze 的 _Slot 同模式，批量最坏可跑 15 分钟，
@@ -21,13 +25,13 @@ import json
 import threading
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, UploadFile
+from fastapi import APIRouter, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from mylocalai.assistant.events import EventStream, format_sse
 from mylocalai.dossier import batch_summary
-from mylocalai.dossier.batches import BatchStore
+from mylocalai.dossier.batches import TERMINAL_BATCH_STATUS, BatchStore
 
 router = APIRouter()
 
@@ -197,9 +201,12 @@ def _run_worker(batch_id: int, events: EventStream, profile_id: Optional[int]) -
     try:
         loop = _build_loop()
         from mylocalai.assistant.tools_batch import run_batch
+        # R1 取消链：cancel_check 轮询 EventStream.cancelled——SSE 客户端断开时
+        # _drain/_live 的 finally 会 request_cancel，编排据此把剩余条目标 not_run、
+        # 批次记 cancelled（与 /api/chat 的 lambda: events.cancelled 同一原语）。
         run_batch(batch_id, store=get_batch_store(), dossiers=loop.dossiers,
                   services=loop.services, events=events, rules=_rules(),
-                  profile_id=profile_id)
+                  profile_id=profile_id, cancel_check=lambda: events.cancelled)
     except Exception as exc:  # noqa: BLE001  编排炸了也要给前端一个诚实收尾
         try:
             get_batch_store().set_batch_status(batch_id, "failed",
@@ -210,6 +217,22 @@ def _run_worker(batch_id: int, events: EventStream, profile_id: Optional[int]) -
             pass
     finally:
         _release_slot()
+
+
+def _forget_stream_if_terminal(batch_id: int) -> None:
+    """R6：批次进入终态后把登记表里的 EventStream 条目摘掉（长驻进程防泄漏）。
+
+    终态以库内 status 为准——客户端断开但批次仍在跑（status=running）不清，
+    同批次重连还能续上直播；重放路径只依赖库内汇总，摘掉登记条目无碍。
+    清理失败静默（下次访问该批次时再清），不影响主流程。
+    """
+    try:
+        batch = get_batch_store().get_batch(int(batch_id))
+    except Exception:  # noqa: BLE001
+        return
+    if batch is not None and str(batch.get("status") or "") in TERMINAL_BATCH_STATUS:
+        with _streams_lock:
+            _streams.pop(int(batch_id), None)
 
 
 @router.get("/api/batch")
@@ -231,6 +254,21 @@ def _batch_or_404(batch_id: int) -> Dict[str, Any]:
     return batch
 
 
+def _summary_for(store: BatchStore, batch: Dict[str, Any],
+                 items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """批次汇总：完结批次用库内 summary（编排期已含规格 §5 三要素与 cost）；
+    在跑/旧数据无汇总时现算——证据经 BatchStore 只读取，读不到三要素如实为空。"""
+    stored = batch.get("summary")
+    if isinstance(stored, dict) and stored:
+        return stored
+    try:
+        evidence = store.evidence_for_dossiers([it.get("dossier_id") for it in items
+                                                if it.get("dossier_id")])
+    except Exception:  # noqa: BLE001  证据读不到不影响详情可用
+        evidence = None
+    return batch_summary.summarize(items, evidence_by_dossier=evidence)
+
+
 @router.get("/api/batch/{batch_id}")
 def batch_detail(batch_id: str) -> Dict[str, Any]:
     """批次详情 + 条目 + 汇总（跨工作区 404）。"""
@@ -241,17 +279,27 @@ def batch_detail(batch_id: str) -> Dict[str, Any]:
     store = get_batch_store()
     batch = _batch_or_404(bid)
     items = store.items(bid)
-    summary = batch.get("summary") if isinstance(batch.get("summary"), dict) else {}
-    if not summary:
-        summary = batch_summary.summarize(items)
+    summary = _summary_for(store, batch, items)
     return {"batch": batch, "items": items, "summary": summary}
 
 
-async def _drain(events: EventStream, poll_interval: float = 0.05):
-    """把 EventStream 新增事件逐帧吐成 SSE（终止契约同 web.chat：done/error 且
-    工作已收尾；批次 worker 是 daemon 线程，这里以事件流终止为准）。"""
+async def _drain(events: EventStream, request: Any = None,
+                 poll_interval: float = 0.05):
+    """把 EventStream 新增事件逐帧吐成 SSE（终止契约同 web.chat：done/error 即
+    收尾；批次 worker 是 daemon 线程，这里以事件流终止为准）。
+
+    R1 断开检测：request.is_disconnected() 命中即返回，外层 _live 的 finally
+    会 events.request_cancel() 触发协作取消（与 web.chat 的 drain 同款）。
+    """
     seen = 0
     while True:
+        if request is not None:
+            try:
+                disconnected = await request.is_disconnected()
+            except Exception:  # noqa: BLE001  断开检测自身失败不吞事件流
+                disconnected = False
+            if disconnected:
+                return
         snapshot = events.snapshot()
         total = len(snapshot)
         while seen < total:
@@ -264,7 +312,7 @@ async def _drain(events: EventStream, poll_interval: float = 0.05):
 
 
 @router.get("/api/batch/{batch_id}/stream")
-async def batch_stream(batch_id: str) -> StreamingResponse:
+async def batch_stream(batch_id: str, request: Request) -> StreamingResponse:
     """SSE 进度流。在跑的批次直播事件；已完结的批次用库内汇总重建卡片后一次性吐出
     （刷新页面不丢结论，与"卡片永远在叙述之前"同一取向）。"""
     try:
@@ -273,23 +321,42 @@ async def batch_stream(batch_id: str) -> StreamingResponse:
         raise HTTPException(status_code=404, detail=f"批次不存在: {batch_id}") from None
     store = get_batch_store()
     batch = _batch_or_404(bid)
+    if str(batch.get("status") or "") in TERMINAL_BATCH_STATUS:
+        _forget_stream_if_terminal(bid)   # R6：终态批次即到即清登记条目
     with _streams_lock:
         events = _streams.get(bid)
     if events is not None and str(batch.get("status")) == "running":
-        return StreamingResponse(_drain(events), media_type="text/event-stream",
+
+        async def _live():
+            try:
+                async for frame in _drain(events, request):
+                    yield frame
+            finally:
+                # R1 取消链：断开（disconnect 或连接被关闭）也触发协作取消——
+                # 前端"停止"按钮即断开 SSE，这里就是它的取消原语；对已收尾的
+                # 批次 request_cancel 无副作用。R6：终态后摘登记条目。
+                events.request_cancel()
+                _forget_stream_if_terminal(bid)
+
+        return StreamingResponse(_live(), media_type="text/event-stream",
                                  headers=_SSE_HEADERS)
 
-    # 已完结：重建卡片（meta → card → narrative → done）
+    # 已完结：重建卡片（meta → status → card → done）；汇总用库内 summary
+    # （编排期已含三要素与真实 cost），旧数据无汇总才现算。
     items = store.items(bid)
-    summary = batch.get("summary") if isinstance(batch.get("summary"), dict) \
-        else batch_summary.summarize(items)
-    card = batch_summary.summary_card(batch, items)
+    summary = _summary_for(store, batch, items)
+    card = batch_summary.summary_card(batch, items, summary=summary)
 
     def _replay():
         from mylocalai.assistant.events import make_event
         yield format_sse(make_event("meta", batch_id=bid))
         yield format_sse(make_event("status", stage=str(batch.get("status") or "done")))
         yield format_sse(make_event("card", **card))
-        yield format_sse(make_event("done", cost={"requests": 0, "tokens": 0}))
+        # cost 用编排期落库的真实值；旧批次 summary 无 cost 时如实 0（不估算）
+        stored_cost = summary.get("cost") if isinstance(summary.get("cost"), dict) \
+            else {}
+        yield format_sse(make_event("done", cost={
+            "requests": int(stored_cost.get("requests") or 0),
+            "tokens": int(stored_cost.get("tokens") or 0)}))
     return StreamingResponse(_replay(), media_type="text/event-stream",
                              headers=_SSE_HEADERS)
