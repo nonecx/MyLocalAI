@@ -107,9 +107,15 @@ def _verify_authority(ctx: Any, text: str = "", followup: bool = False) -> Dict[
                                     getattr(ctx, "session_id"), ("authority", "composite"))
     except Exception:  # noqa: BLE001
         prior = None
-    is_followup = bool(followup) or (prior is not None
-                                     and looks_like_followup(user_text)
-                                     and not looks_like_rerun(user_text))
+    # “重新查/换主题”优先于任何 followup=true：不得把旧主张/旧证据夹带进新说法。
+    rerun = looks_like_rerun(user_text)
+    if rerun:
+        prior = None
+    is_followup = (not rerun) and (bool(followup) or (
+        prior is not None and looks_like_followup(user_text)))
+    if is_followup and prior is None:
+        return _clarify("本会话没有可复用的上一张核验卡（可能结果保存已关闭），无法做增量。"
+                        "请重述要核验的说法重新核验，或直接说“重新核验”。")
     if not value and prior is not None:
         value = prior_text(prior)
     if not value:

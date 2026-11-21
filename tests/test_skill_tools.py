@@ -15,7 +15,8 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from mylocalai.assistant import tools_authority, tools_composite, tools_research  # noqa: E402
+from mylocalai.assistant import (tools_authority, tools_composite, tools_research,
+                                 tools_skill_cards)  # noqa: E402
 from mylocalai.assistant import loop as loop_mod  # noqa: E402
 from mylocalai.assistant import router as router_mod  # noqa: E402
 from mylocalai.assistant.registry import ToolRegistry  # noqa: E402
@@ -197,6 +198,25 @@ class ResearchToolTest(unittest.TestCase):
         self.assertFalse(out["ok"])
         self.assertEqual(out["status"], "failed")
 
+    def test_followup_without_prior_clarifies(self):
+        out = tools_research._collect_research(
+            ctx_with(sessions=FakeSessions([]), session_id=1, user_text="补充一下"),
+            "", followup=True)
+        self.assertEqual(out["status"], "needs_clarification")
+        self.assertIn("上一张资料卡", out["digest"])
+
+    def test_rerun_beats_explicit_followup(self):
+        prior = {"card_type": "research", "topic": "旧主题", "as_of": "2026-11-20T00:00:00"}
+        sessions = FakeSessions([{"card_type": "research", "card": prior}])
+        stub = StubSkills(research_result())
+        out = tools_research._collect_research(
+            ctx_with(research=stub, sessions=sessions, session_id=1,
+                     user_text="换个主题重新收集"), "新主题")
+        self.assertTrue(out["ok"])
+        self.assertEqual(stub.calls[0][0], "新主题")
+        self.assertFalse(stub.calls[0][1]["followup"])
+        self.assertIsNone(stub.calls[0][1]["prior"])
+
 
 class AuthorityToolTest(unittest.TestCase):
     def test_empty_text_clarifies(self):
@@ -222,6 +242,26 @@ class AuthorityToolTest(unittest.TestCase):
         self.assertTrue(out["ok"])
         self.assertEqual(stub.calls[0][0], "网传某地自来水被投毒")
         self.assertTrue(stub.calls[0][1]["followup"])
+
+    def test_followup_without_prior_clarifies(self):
+        out = tools_authority._verify_authority(
+            ctx_with(sessions=FakeSessions([]), session_id=1, user_text="补充一下"), "",
+            followup=True)
+        self.assertEqual(out["status"], "needs_clarification")
+        self.assertIn("上一张核验卡", out["digest"])
+
+    def test_rerun_beats_explicit_followup(self):
+        prior = {"card_type": "authority", "as_of": "2026-11-20T00:00:00",
+                 "claims": [{"text": "旧说法"}]}
+        sessions = FakeSessions([{"card_type": "authority", "card": prior}])
+        stub = StubSkills(authority_result())
+        out = tools_authority._verify_authority(
+            ctx_with(authority=stub, sessions=sessions, session_id=1,
+                     user_text="重新核验这个新说法"), "新说法")
+        self.assertTrue(out["ok"])
+        self.assertEqual(stub.calls[0][0], "新说法")
+        self.assertFalse(stub.calls[0][1]["followup"])
+        self.assertIsNone(stub.calls[0][1]["prior"])
 
 
 class CompositeToolTest(unittest.TestCase):
@@ -269,6 +309,20 @@ class CardContractTest(unittest.TestCase):
         card = tools_authority.authority_card(authority_result())
         self.assertEqual(card["claims"][0]["conclusion"],
                          "在现有资料覆盖范围内，权威资料可以直接反驳该说法：官方通报否认。")
+
+    def test_authority_card_counts_verified_sources(self):
+        card = tools_authority.authority_card(authority_result())
+        self.assertEqual(card["counts"]["verified_sources"], 1)
+        self.assertEqual(card["counts"]["official_sources"], 1)
+
+    def test_composite_keeps_incremental_marker(self):
+        research = tools_research.research_card({**research_result("引文"),
+                                                 "incremental": True,
+                                                 "base_as_of": "2026-11-20T00:00:00"})
+        authority = tools_authority.authority_card(authority_result())
+        card = tools_skill_cards.composite_card(research, authority)
+        self.assertTrue(card["incremental"])
+        self.assertEqual(card["base_as_of"], "2026-11-20T00:00:00")
 
 
 if __name__ == "__main__":

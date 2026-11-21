@@ -1,4 +1,4 @@
-# MyLocalAI —— 网络言论智能分析与谣言识别
+﻿# MyLocalAI —— 网络言论智能分析与谣言识别
 
 对一段网络文本（评论、帖子、聊天记录）做**多维度分析与风险判定**，并提供可交互的展示网站
 和可被 MCP 客户端接入的谣言识别 Agent。全部靠**提示词工程 + 大模型 API** 实现，无需 GPU。
@@ -332,7 +332,7 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 1662 个用例（unittest discover 全量，2026-11-20 角色扩展合并回主线后实测；
+离线套件共 1668 个用例（unittest discover 全量，2026-11-20 角色扩展合并回主线后实测；
 **M4 起由 `tests.test_readme_counts` 自动校验此数字与 mock 闸门条数，改动后须同步回写**）：
 M1-M3 的全部回归（详见 git 历史），加上 M4 新增模块：
 **成本真实计数**（llm_client 进程级计数器：真实上游调用数 + usage tokens，缓存命中/

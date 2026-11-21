@@ -137,9 +137,15 @@ def _failed_authority(reason: str) -> Dict[str, Any]:
 
 def _maybe_handoff(ctx: Any, card: Dict[str, Any], topic: str) -> Optional[Dict[str, Any]]:
     prefs = _prefs()
+    status = str(card.get("status") or "")
     if not bool((prefs.get("composite") or {}).get("enabled", True)):
+        card["handoff_skipped"] = "复合能力已在设置中关闭，未自动核验"
         return None
     if not bool((prefs.get("research") or {}).get("auto_verify_findings", True)):
+        card["handoff_skipped"] = "研究后自动核验已在设置中关闭"
+        return None
+    if status not in ("completed", "partial"):
+        card["handoff_skipped"] = "资料收集未完成，未自动核验"
         return None
     quotes = _handoff_quotes(card)
     if not quotes:
@@ -174,9 +180,15 @@ def _collect_research(ctx: Any, topic: str = "", followup: bool = False) -> Dict
                                     getattr(ctx, "session_id"), ("research", "composite"))
     except Exception:  # noqa: BLE001  prior 只是增量增益，读不到按首轮
         prior = None
-    is_followup = bool(followup) or (prior is not None
-                                     and looks_like_followup(user_text)
-                                     and not looks_like_rerun(user_text))
+    # “重新查/换主题”优先于任何 followup=true：不得把旧主题/旧证据夹带进新主题。
+    rerun = looks_like_rerun(user_text)
+    if rerun:
+        prior = None
+    is_followup = (not rerun) and (bool(followup) or (
+        prior is not None and looks_like_followup(user_text)))
+    if is_followup and prior is None:
+        return _clarify("本会话没有可复用的上一张资料卡（可能结果保存已关闭），无法做增量。"
+                        "请重述主题重新收集，或直接说“重新收集”。")
     if not text and prior is not None:
         text = prior_topic(prior)
     if not text:

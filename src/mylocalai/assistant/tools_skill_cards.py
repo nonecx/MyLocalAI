@@ -94,6 +94,7 @@ def authority_card(result: Mapping[str, Any]) -> Dict[str, Any]:
     result = result if isinstance(result, Mapping) else {}
     data = _dict(result.get("data"))
     counts = _counts(result, data)
+    counts["verified_sources"] = len(_list(_dict(data.get("sources")).get("verified")))
     counts["official_sources"] = len([
         s for s in _list(_dict(data.get("sources")).get("verified"))
         if _s(_dict(s).get("authority_class")) in
@@ -182,6 +183,8 @@ def composite_card(research: Mapping[str, Any], authority: Mapping[str, Any],
         "gaps": _list(research.get("gaps")) + _list(authority.get("gaps")),
         "errors": _list(research.get("errors")) + _list(authority.get("errors")),
         "counts": counts,
+        "incremental": bool(research.get("incremental") or authority.get("incremental")),
+        "base_as_of": _s(research.get("base_as_of") or authority.get("base_as_of")),
     }
 
 
