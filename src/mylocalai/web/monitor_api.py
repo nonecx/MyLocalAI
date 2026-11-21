@@ -6,7 +6,8 @@
   POST   /api/subscriptions              新建 {topic, keywords, domains, frequency_s}
   PUT    /api/subscriptions/{id}         改主题/关键词/域名/频率/启停
   DELETE /api/subscriptions/{id}         删除
-  POST   /api/subscriptions/{id}/run-now   立即跑一轮（202 + 后台线程）
+  POST   /api/subscriptions/{id}/run-now   立即跑一轮（202 + 后台线程，响应带 run_id；
+                                            已在跑或已暂停 → 409）
   GET    /api/subscriptions/{id}         详情 + 运行历史 + 最新变化卡
   GET    /api/subscriptions/{id}/runs    运行历史
 
@@ -177,25 +178,45 @@ def subscriptions_delete(sub_id: int) -> Dict[str, Any]:
 
 @router.post("/api/subscriptions/{sub_id}/run-now", status_code=202)
 def subscriptions_run_now(sub_id: int) -> Dict[str, Any]:
-    """立即跑一轮（202 + 后台线程；已在跑 → 409）。"""
+    """立即跑一轮（202 + 后台线程；已在跑或已暂停 → 409）。
+
+    R2：起跑即预建运行行（响应体带 run_id）并把 last_status 置 'running'，
+    前端首轮轮询不会把上一轮的旧终态误读为"已完成"；终态仍由收尾照常写。
+    R8：enabled=0（授权闸暂停等）的订阅不执行、不隐式恢复，返回 409 并带
+    暂停原因；恢复启用走用户显式的 PUT enabled=true。
+    """
     sub = _sub_or_404(int(sub_id))
+    if not sub.get("enabled"):
+        reason = str(sub.get("paused_reason") or "").strip()
+        detail = "订阅已暂停，请先恢复启用后再手动运行"
+        if reason:
+            detail += f"（暂停原因：{reason}）"
+        raise HTTPException(status_code=409, detail=detail)
+    store = get_subscription_store()
     with _running_lock:
         if int(sub_id) in _running:
             raise HTTPException(status_code=409, detail="该订阅正在运行中，请稍候")
         _running.add(int(sub_id))
-    threading.Thread(target=_run_worker, args=(int(sub_id), sub),
-                     name=f"monitor-{int(sub_id)}", daemon=True).start()
-    return {"started": True, "id": int(sub_id)}
-
-
-def _run_worker(sub_id: int, sub: Dict[str, Any]) -> None:
     try:
-        tools_monitor.run_subscription(get_subscription_store(), sub, _dossiers())
+        run_id = int(store.start_run(int(sub_id)))   # 预建运行行：响应体立即带 run_id
+        store.mark_running(int(sub_id))              # 起跑即 running，不等后台线程
+        threading.Thread(target=_run_worker, args=(int(sub_id), sub, run_id),
+                         name=f"monitor-{int(sub_id)}", daemon=True).start()
+    except Exception as exc:  # noqa: BLE001  起跑失败不占 _running 坑
+        with _running_lock:
+            _running.discard(int(sub_id))
+        raise HTTPException(status_code=500, detail=f"立即运行启动失败: {exc}") from exc
+    return {"started": True, "id": int(sub_id), "run_id": run_id}
+
+
+def _run_worker(sub_id: int, sub: Dict[str, Any], run_id: int) -> None:
+    try:
+        tools_monitor.run_subscription(get_subscription_store(), sub, _dossiers(),
+                                       run_id=run_id)
     except Exception:  # noqa: BLE001  run_subscription 永不抛，这里是双保险
         try:
-            get_subscription_store().finish_run(
-                get_subscription_store().start_run(sub_id), "error",
-                error="worker_exception")
+            get_subscription_store().finish_run(run_id, "error",
+                                                error="worker_exception")
         except Exception:  # noqa: BLE001
             pass
     finally:

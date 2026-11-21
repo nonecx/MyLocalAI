@@ -270,9 +270,10 @@ def search_all(query: str, k: int = 6,
 
     providers 缺省时用 default_providers()（环境变量可插拔专用 API）。
     domains（可选，领域监测用）：为每个域名构造一次 `site:域名` 查询变体
-    （≤3 个，与订阅层 MAX_DOMAINS 同口径），结果合并去重；不传时只查原 query，
-    与加参数前逐位不变。搜索引擎对 site: 的支持是尽力而为：不支持时该变体
-    自然少结果，调用方按实到结果呈现，不谎报"已限定"。
+    （≤3 个，与订阅层 MAX_DOMAINS 同口径），结果合并去重后按域名后置过滤；
+    不传时只查原 query，与加参数前逐位不变。搜索引擎对 site: 的支持是尽力
+    而为：变体全空时兜底保留非限定结果并标注 scope_degraded=True（同时
+    domain_scope_applied=False），调用方按实到结果呈现，不谎报"已限定"。
     """
     if authorized is None:
         if providers is not None:
@@ -314,13 +315,22 @@ def search_all(query: str, k: int = 6,
                 seen.add(dedup_key)
                 merged.append(r)
             slot["count"] = int(slot.get("count", 0)) + len(results or [])
+    scoped = bool(domains)
+    degraded = False
     if domains:
-        merged = [r for r in merged if _in_domains(r.url, domains)] or merged
+        kept = [r for r in merged if _in_domains(r.url, domains)]
+        if kept:
+            merged = kept
+        else:
+            # site: 变体全空（引擎不支持 site: 或该站暂无收录）：兜底保留非限定
+            # 结果照常呈现，但如实标注"未限定 + 降级"（R9），不谎报已限定。
+            degraded = True
+            scoped = False
     # 截断口径：不传 domains 时与加参数前逐位一致（k 条）；传了 domains 时按
-    # 变体数放宽（每变体至多 k 条），总量有界。
+    # 变体数放宽（每变体至多 k 条），总量有界（全空兜底路径口径不变）。
     limit = k if not domains else k * max(1, len(queries))
     return _finalize(query, merged[:max(1, int(limit))], engines,
-                     domain_scoped=bool(domains))
+                     domain_scoped=scoped, scope_degraded=degraded)
 
 
 def _in_domains(url: str, domains: List[str]) -> bool:
@@ -334,15 +344,21 @@ def _in_domains(url: str, domains: List[str]) -> bool:
 
 def _finalize(query: str, merged: List[SearchResult],
               engines: Dict[str, Dict[str, object]],
-              domain_scoped: bool = False) -> Dict[str, object]:
+              domain_scoped: bool = False,
+              scope_degraded: bool = False) -> Dict[str, object]:
     """排序 + 组装返回（原 search_all 尾段；domain_scoped 时如实标注）。
 
+    scope_degraded（R9）：site: 变体全空兜底的诚实标注——domain_scope_applied
+    置 False 并带 scope_degraded=True；不传 domains 时两个键都不出现（逐位不变）。
     截断由调用方做（见 search_all 的 limit 口径），这里只排序不裁。
     """
     # 排序不写死档名：按 registry 里 tiers 的声明顺序排（越靠前越权威），未声明的档排最后。
     merged.sort(key=lambda r: (tier_rank(r.domain_tier), r.rank))
     out: Dict[str, object] = {"query": query, "results": merged, "engines": engines}
-    if domain_scoped:
+    if scope_degraded:
+        out["domain_scope_applied"] = False
+        out["scope_degraded"] = True
+    elif domain_scoped:
         out["domain_scope_applied"] = True
     return out
 
