@@ -1,8 +1,9 @@
 # 用户角色与档案工作区规格 v1.0
 
-> 状态：阶段 1 已实现（Profile 骨架 + 普通用户呈现）；阶段 2（材料批量分析）、
-> 阶段 3（领域监测订阅）按本文档的接口契约分阶段落地。
-> 日期：2026-11-20
+> 状态：**阶段 1/2/3 全部已实现**（阶段 1 于 2026-11-20 落地，阶段 2/3 于
+> 2026-11-20 落地、2026-11-21 完成验证收口与监测平台两线合并）。本文档的接口
+> 契约即实现契约；实现细节与验收以 §7 验收矩阵和 README 对应章节为准。
+> 日期：2026-11-20（2026-11-21 更新状态与数据模型）
 > 上游依据：`docs/Agent工作流规格-v0.1.md`（四类用户能力）、
 > `docs/工作指导-智能助手重塑-2026-10-30.md`（§2.4 非目标：不做多用户与鉴权）。
 
@@ -21,19 +22,39 @@
 | 角色 | 用户诉求 | 阶段 1 现状 | 后续 |
 | --- | --- | --- | --- |
 | `layperson` | 只判定单条言论是不是谣言 | 简化结论卡（无 risk_score 数值、presentation=simple） | — |
-| `analyst` | 分析辨别自行搜集的多条信息 | 角色已定义，入口未建 | 阶段 2：批量核查 + 跨条汇总 |
-| `monitor` | 自动搜集特定领域信息 | 角色已定义，入口未建 | 阶段 3：订阅 + 服务内调度 |
+| `analyst` | 分析辨别自行搜集的多条信息 | 已落地：左栏「材料批次」面板（阶段 2） | — |
+| `monitor` | 自动搜集特定领域信息 | 已落地：左栏「领域监测」面板（阶段 3） | — |
 | `full` | 不按角色裁剪 | v6 迁移默认档 | — |
 
-## 2. 数据模型（schema v6）
+## 2. 数据模型（schema v6 → v10，2026-11-21 两线合并后）
 
 ```sql
+-- v6：Profile 工作区
 profiles(id, key UNIQUE, display_name, role CHECK IN ('layperson','analyst','monitor','full'),
          created_at, updated_at)
 app_state(key PK, value)            -- 单行 active_profile_id
 sessions.profile_id  INTEGER        -- v6 新增列 + 索引
 dossiers.profile_id INTEGER         -- v6 新增列 + 索引
+-- v7：材料批次（阶段 2）
+batches(id, profile_id, source CHECK IN ('text','file','urls'), status CHECK IN
+        ('running','done','partial','failed','cancelled'), ok/failed/not_run 计数, summary, …)
+batch_items(batch_id, position, raw_text/url, dossier_id, status CHECK IN
+        ('pending','running','ok','error','blocked','not_run'), label, risk_score, group_id, …)
+-- v8：领域监测订阅（阶段 3）
+subscriptions(id, profile_id, topic, keywords, domains, frequency_s, enabled, dossier_id,
+        last_run_at, next_run_at, last_status, paused_reason, …)
+subscription_runs(subscription_id, status CHECK IN ('running','ok','partial','blocked','error'),
+        results_count, new_count, summary, …)
+-- v9/v10：平台域三表 + 信息源/领域列（原 platform-monitor 线 v6/v7，2026-11-21 合并平移）
+scan_runs / watch_queries / feed_entries（v9）
+patrol_sources / patrol_query_sources + watch_queries.domain 等列 + feed_entries.topic_domain 等（v10）
 ```
+
+**两线合并的迁移语义（`dossier/store.py` 的 `_rebase_platform_line`）**：合并前
+platform-monitor 线发布过自己的 v6/v7（平台三表/领域列），`schema_migrations` 只记
+版本号无法区分链别——按**表存在性探测**（有平台三表且无 profiles 表）识别 A 线存量库，
+把登记号 6→9、7→10 **重登记**（绝不重放：v10 含无 IF NOT EXISTS 的 ALTER），再照常
+补跑统一链缺口段。
 
 迁移语义（`dossier/store.py` 的 `_ensure_default_profile`，每次 migrate 幂等执行）：
 
@@ -72,7 +93,7 @@ dossiers.profile_id INTEGER         -- v6 新增列 + 索引
   （"核查结果"）、隐去"结论卡"徽章、加一行简化说明；其余徽章
   （置信度/证据充分度/as_of/降级）保留——口径诚实铁律不 relax。
 
-## 5. 阶段 2 契约（专业用户 A · 材料分析）——未实现
+## 5. 阶段 2 契约（专业用户 A · 材料分析）——已实现（2026-11-20 落地，2026-11-21 收口）
 
 - 输入：多条文本粘贴 / 文件上传（txt/md/csv/json）/ URL 列表；
 - 编排：逐条 `RumorAgent.analyze` + 自动建档；条目上限与双预算
@@ -82,10 +103,11 @@ dossiers.profile_id INTEGER         -- v6 新增列 + 索引
 - 失败语义：单条失败记 `status=error` 不阻断；预算用尽未跑条目标 `not_run`，
   汇总卡如实呈现，**不把"没跑"显示成"没发现"**。
 
-## 6. 阶段 3 契约（专业用户 B · 领域监测）——未实现
+## 6. 阶段 3 契约（专业用户 B · 领域监测）——已实现（2026-11-20 落地，2026-11-21 收口）
 
 - `subscriptions`（profile_id/topic/keywords/domains/frequency_s/enabled/next_run_at/…）
-  + `subscription_runs`（status ∈ ok/partial/blocked/error、results_count/new_count/summary）；
+  + `subscription_runs`（status ∈ running/ok/partial/blocked/error——running 为
+  起跑初态，2026-11-21 收口补充；results_count/new_count/summary）；
 - 调度：web lifespan 起驻线程（tick 60s、串行、单 worker 假设 + 启动告警）；
 - 授权：每轮运行前查 `external_processing_enabled` + `public-search`，未过 →
   `blocked`、订阅暂停并写明原因，**零外发**；
@@ -104,6 +126,13 @@ dossiers.profile_id INTEGER         -- v6 新增列 + 索引
 | 5 | layperson 结论卡无 risk_score + presentation=simple；full 逐位不变 | test_profiles loop 组 |
 | 6 | /api/profiles 与前端切换器前后端自洽 | test_website_chat TestProfilesFrontendConsistency |
 | 7 | 全量离线套件 + CI 绿（除既知存量失败外无新增） | scripts\ci.cmd |
+| 8 | 批次三输入/上限 8 条/双预算/同源 Jaccard≥0.72 分组各自判定/失败不阻断/not_run 语义 | test_batch 存储与编排组 |
+| 9 | 批次接口（202/SSE 进度/重放/并发闸）与上传解析（txt/md/csv/json、2MB、413） | test_batch Web API 与上传组 |
+| 10 | 批次取消链路（SSE 断开 → cancelled + not_run）与规格 §5 汇总三要素 | test_batch 取消与三要素用例（2026-11-21 收口补齐） |
+| 11 | 订阅 CRUD/频率下限 300s/授权闸 fail-closed 零外发/失败推进不卡死 | test_monitor 存储与编排组 |
+| 12 | run-now 起跑即 running + run_id、409 防重入与暂停拒绝、调度生命周期 | test_monitor API 与调度组（2026-11-21 收口补齐） |
+| 13 | search_all domains 直测（变体≤3/合并过滤/全空兜底 scope_degraded/不传逐位不变） | test_monitor 检索直测组（2026-11-21 补齐） |
+| 14 | 四区前端自洽与可访问性（脚本顺序/id 接线/类名↔CSS/aria/键盘） | test_models_ui、test_website_chat、test_platform_api |
 
 ## 8. Skill 与提示词分层（2026-11-20 角色扩展第二轮）
 
@@ -114,6 +143,13 @@ dossiers.profile_id INTEGER         -- v6 新增列 + 索引
 loop.py 自动合并且经 review——角色扩展的 `_session_profile`/`_present_for_role` 与
 取证三技能的 `mixed_choice` 闸/collect_evidence 接线互不冲突。合并后既知存量失败
 （test_insights_api 的卡片字段契约）因对方补齐 API 字段而自然修复。
+
+2026-11-21 将并行分支的**监测平台**（热门信息自动巡检 + 热榜式 UI + 信息源/领域）合并进
+本分支：schema 统一为 v6 profiles → v7 batches → v8 subscriptions → v9/v10 平台域
+（`_rebase_platform_line` 按表存在性重登记收编 platform 线存量库，见 §2）；冲突 15 文件
+逐个解决（union 口径，两线功能并存）；app.py 两个调度线程统一收进 `_lifespan`
+（monitor 调度 + `_WORKERS<=1` 守卫下的 platform 调度），模块导入期不再有启动副作用。
+平台三表**不做 profile 分家**（产品决策，单用户本地工具口径下暂不阻塞）。
 
 ### 8.2 角色 ↔ 能力 ↔ Skill ↔ 通道 映射总表
 

@@ -322,6 +322,10 @@ python -m mylocalai.cli --attention-online "某段待分析的文本"
   `PUT /api/platform/watch/{id}`（监控词领域手设，空串=恢复自动推断）；
   对话里问「最近有什么预警」走只读工具 `platform_feed`（零 LLM），出的平台卡是
   轻量化的：档位徽章 + 标题 + 单行 meta（有条目领域时追加领域 id），要看细节回平台页。
+- 前端加载失败**不演成空态**（2026-11-21）：状态摘要条/信息流/监控词/巡检记录/信息源
+  五区任一接口失败时显示"数据加载失败 + 点击重试"，与"暂无数据"严格区分；信息流条目
+  的原文链接一律过 safeUrl 白名单（仅 http/https，`javascript:`/`data:` 等伪协议落 `#`）；
+  筛选 chips、抽屉、条目与监控词行均支持键盘操作与 aria 状态。
 - 完整口径（架构/数据模型/算法/降级矩阵/测试）：`docs/监测平台规格-2026-11-20.md`。
 
 ## 判定口径可配置
@@ -607,11 +611,11 @@ DOSSIER_DB_PATH 可覆盖）。测试：`tests.test_mcp_assistant`（同核对�
 每个工作区有**独立的会话、档案与画像数据**（`profile_id` 分家，跨工作区访问一律按
 "不存在"处理，不泄露别的工作区有哪些会话/档案号）。
 
-| 角色 | 面向 | 现状（2026-11-20 阶段 1） |
+| 角色 | 面向 | 现状（2026-11-21 三阶段 + 两线合并后） |
 | --- | --- | --- |
 | `layperson` 普通用户 | 只做言论核查：输入一条消息，拿回结论 | 结论卡**简化呈现**（隐去 risk_score 数值、标注 presentation=simple，完整数值仍在档案库）；能力不裁剪 |
-| `analyst` 专业用户 · 材料分析 | 分析辨别自行搜集的多条材料 | 批量核查入口建设中（阶段 2） |
-| `monitor` 专业用户 · 领域监测 | 按领域自动搜集信息 | 订阅 + 服务内定时线程建设中（阶段 3） |
+| `analyst` 专业用户 · 材料分析 | 分析辨别自行搜集的多条材料 | **材料批次面板已落地**（阶段 2：三输入/双预算/同源分组/取消链路，见下节） |
+| `monitor` 专业用户 · 领域监测 | 按领域自动搜集信息 | **领域监测面板已落地**（阶段 3：订阅 + 服务内调度线程，见下节） |
 | `full` 全部能力 | 不按角色裁剪 | v6 迁移给存量数据的默认档，保证旧行为逐位不变 |
 
 - **数据模型**：`profiles` 表（key/display_name/role）+ `app_state` 单行激活态；
@@ -656,15 +660,20 @@ DOSSIER_DB_PATH 可覆盖）。测试：`tests.test_mcp_assistant`（同核对�
 E 分首末差，不外推）。
 
 - **接口**：`GET/POST /api/subscriptions`、`PUT/DELETE /api/subscriptions/{id}`、
-  `POST /api/subscriptions/{id}/run-now`（202 + 后台，409 防重入）、
+  `POST /api/subscriptions/{id}/run-now`（202 + 后台，响应带 `run_id`；409 有两义：
+  防重入、**已暂停的订阅拒绝手动运行**——不隐式恢复，须先显式"恢复"）、
   `GET /api/subscriptions/{id}`（详情 + 运行历史 + 最新变化卡）、`GET .../runs`；
 - **授权闸**：每轮运行前查 public-search 外发授权，未过 → `blocked`、订阅暂停并
   写明原因，**零外发**（fail-closed）；
+- **域名限定诚实标注**：`site:` 变体全空兜底时 run.summary 如实记
+  `domain_scope_applied=false` + `scope_degraded=true`（引擎不支持 site: 检索时
+  不谎报"已限定"），面板运行历史以灰徽章呈现；不传 domains 时两键都不出现；
 - **调度**：web lifespan 起 daemon 线程（tick 60s、串行、单 worker 假设 + 启动
   告警）；关服即停，产品口径如实告知；
-- **schema v8**：`subscriptions` + `subscription_runs`；
+- **schema v8**：`subscriptions` + `subscription_runs`（status 含 running 初态，
+  起跑即写，前端轮询按 run_id 精确判定本轮完成）；
 - 测试：`tests.test_monitor`（存储 / due / 变化摘要 / 编排含 blocked 零外发 /
-  失败不卡死 / API / 调度 tick）。
+  失败不卡死 / API 含 run-now 竞态与 409 / search_all domains 直测 / 调度生命周期）。
 
 ## 参谋与洞察（2026-10-31，L4）
 
