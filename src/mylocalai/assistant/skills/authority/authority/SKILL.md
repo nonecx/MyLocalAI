@@ -1,5 +1,7 @@
 <!--
 技能名：authority-discovery（权威源发现与身份核验，权威核验阶段2）
+分类：通用
+服务能力：authority-verification
 职责：从检索候选里判定哪些域名有资格作为权威证据来源、以哪种核验方式记录；只回答"这个来源能不能作证"，不判真假。
 输入：候选域名/URL 清单 + 已读正文（动态信号只能来自实际读过的页面）+ skills/sources.json 目录与 authorities.json 配置。
 输出（由代码产出，模型不参与判定）：每个来源的 authority_class ∈ official/international_org/academic/standards/factcheck/media/unverified，

@@ -16,6 +16,17 @@
     两者均只读、不建档、不出真假结论、不给数值评分，共占对话路由枚举两项
     （router.TOOL_ACTIONS）；至此用户能力共八项（四类基础 + 两类复合形态 +
     两类只读对话）。
+  - 2026-11-21 分类与第四波：能力分"通用/专用"两档，落到各 SKILL.md 头部新增的
+    "分类/适用角色"两个字段——通用（全部角色可用）与专用（绑定档案工作区主角色：
+    claim-checking→layperson、material-analysis→analyst、domain-monitoring→monitor，
+    判定语义与角色无关）；skills/ 执行层各 SKILL.md 的 HTML 注释头同步加
+    "分类/服务能力"挂接字段（注释会被 pipeline 剥离、不注入模型）。同日再追加两个
+    通用只读对话能力：source_credibility（信源可信度速查，check_source，单源画像
+    速查）与 fact_check_guide（辟谣方法指南，guide_fact_check，零检索纯知识），
+    同样只读、不建档、无分数，共占对话路由枚举两项，机器契约来源为
+    skills/source/pipeline.py 与 skills/guide/guide.py（共享口径 skills/collect_core.py）；
+    至此用户能力共十项，本目录共 10 份能力文档（四类基础 + 两类复合形态 +
+    四类只读对话）。
   - 本包只放“人读”的能力策略文档，不放代码：SKILL.md 是文档不是 Python 模块，
     因此本 __init__ 不 import 任何子目录、不导出符号（__all__ = []）。
   - 机器可执行契约（能力 id/版本/输入 schema/计划步骤/预算/权限）的唯一规范来源是

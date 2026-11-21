@@ -5,7 +5,8 @@
   一、_prompts_for_role 合并规则（addon 追加 / 覆盖 / full 逐位不变 / 未知角色回落）；
   二、loop 集成：三角色会话的 router/narrate system 按角色不同，full 与基座逐位一致；
   三、导流口径：analyst/monitor 的路由附加段包含面板导流与"不拼工具"指令；
-  四、SKILL.md 结构 lint（8 份能力文档的头字段与必备章节）；
+  四、SKILL.md 结构 lint（10 份能力文档的头字段与必备章节；通用/专用分类与
+      适用角色封闭枚举对拍；执行层 9 份 SKILL.md 的 分类/服务能力 映射对拍）；
   五、对拍：prompts.json 的 roles 键 ↔ dossier/profiles.py 的 ROLES；
      SKILL.md 的能力 id ↔ capabilities 目录名。
 
@@ -35,7 +36,7 @@ from mylocalai.dossier.store import DossierStore  # noqa: E402
 PROMPTS_PATH = ROOT / "src" / "mylocalai" / "assistant" / "prompts.json"
 CAPS_DIR = ROOT / "src" / "mylocalai" / "assistant" / "capabilities"
 
-#: 八个用户能力（目录名 ↔ 能力 id 的连字符形式）
+#: 十个用户能力（目录名 ↔ 能力 id 的连字符形式）
 EXPECTED_CAPS = {
     "claim_checking": "claim-checking",
     "evidence_research": "evidence-research",
@@ -45,10 +46,42 @@ EXPECTED_CAPS = {
     "domain_monitoring": "domain-monitoring",
     "information_collection": "information-collection",
     "authority_verification": "authority-verification",
+    "source_credibility": "source-credibility",
+    "fact_check_guide": "fact-check-guide",
+}
+
+#: 通用/专用分类与适用角色（按角色绑定，2026-11-21 分类体系）：
+#: 通用 = 横向能力（任何工作区可用，适用角色=全部）；专用 = 角色主能力（适用角色=该角色）。
+#: 与各 SKILL.md 头注释逐字对拍，分类漂移在这里报错。
+EXPECTED_CLASSIFICATION = {
+    "claim_checking": ("专用", "layperson"),
+    "material_analysis": ("专用", "analyst"),
+    "domain_monitoring": ("专用", "monitor"),
+    "evidence_research": ("通用", "全部"),
+    "topic_understanding": ("通用", "全部"),
+    "speech_understanding": ("通用", "全部"),
+    "information_collection": ("通用", "全部"),
+    "authority_verification": ("通用", "全部"),
+    "source_credibility": ("通用", "全部"),
+    "fact_check_guide": ("通用", "全部"),
+}
+
+#: 执行层 SKILL.md（skills/ 下，会注入模型）→ 服务的上层能力 id：
+#: 注释头带 `分类：通用` 与 `服务能力：<capability id>`，建立执行层→能力层映射。
+EXPECTED_SKILL_SERVICE = {
+    "domain": "evidence-research",
+    "sources": "evidence-research",
+    "evidence": "evidence-research",
+    "research/scope": "information-collection",
+    "research/digest": "information-collection",
+    "authority/authority": "authority-verification",
+    "authority/adjudicate": "authority-verification",
+    "source": "source-credibility",
+    "guide": "fact-check-guide",
 }
 
 #: SKILL.md 头注释必备字段与正文必备章节
-REQUIRED_HEADER_FIELDS = ("能力 id", "版本", "一句话目标", "文档性质")
+REQUIRED_HEADER_FIELDS = ("能力 id", "版本", "一句话目标", "文档性质", "分类", "适用角色")
 REQUIRED_SECTIONS = ("## 1.", "## 2.", "## 3.", "## 4.", "## 5.", "## 6.", "## 7.")
 
 
@@ -247,8 +280,8 @@ class TestLoopRolePrompts(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestCapabilitySkillDocs(unittest.TestCase):
-    def test_eight_capability_docs_exist_with_header_and_sections(self):
-        """八个能力目录各有一份 SKILL.md：头字段齐全、必备章节齐全。"""
+    def test_capability_docs_exist_with_header_and_sections(self):
+        """十个能力目录各有一份 SKILL.md：头字段齐全（含分类/适用角色）、必备章节齐全。"""
         dirs = {p.name for p in CAPS_DIR.iterdir()
                 if p.is_dir() and p.name != "__pycache__"}
         self.assertEqual(dirs, set(EXPECTED_CAPS), f"能力目录集合漂移: {dirs}")
@@ -263,6 +296,34 @@ class TestCapabilitySkillDocs(unittest.TestCase):
                           f"{dirname} 的能力 id 与目录名不一致")
             for section in REQUIRED_SECTIONS:
                 self.assertIn(section, text, f"{dirname} 缺章节: {section}")
+
+    def test_capability_classification_matches_mapping(self):
+        """通用/专用分类与适用角色逐字对拍：通用=全部、专用=绑定角色主能力。"""
+        for dirname, (category, role) in EXPECTED_CLASSIFICATION.items():
+            head = (CAPS_DIR / dirname / "SKILL.md").read_text(
+                encoding="utf-8").split("-->", 1)[0]
+            self.assertIn(f"分类：{category}", head,
+                          f"{dirname} 分类应为 {category}（头注释漂移）")
+            self.assertIn(f"适用角色：{role}", head,
+                          f"{dirname} 适用角色应为 {role}（头注释漂移）")
+        # 语义对拍：通用必须是"全部"，专用必须绑定具体角色——防映射表自身漂移
+        for dirname, (category, role) in EXPECTED_CLASSIFICATION.items():
+            if category == "通用":
+                self.assertEqual(role, "全部", f"{dirname} 标通用但适用角色不是全部")
+            else:
+                self.assertIn(role, ("layperson", "analyst", "monitor"),
+                              f"{dirname} 标专用但适用角色不是三角色之一")
+
+    def test_execution_skill_docs_marked_with_service_capability(self):
+        """执行层 9 份 SKILL.md 注释头带 分类：通用 与 服务能力：<能力 id>（映射对拍）。"""
+        skills_dir = ROOT / "src" / "mylocalai" / "assistant" / "skills"
+        for rel, cap_id in EXPECTED_SKILL_SERVICE.items():
+            path = skills_dir / rel / "SKILL.md"
+            self.assertTrue(path.is_file(), f"缺少执行层 {path}")
+            head = path.read_text(encoding="utf-8").split("-->", 1)[0]
+            self.assertIn("分类：通用", head, f"skills/{rel} 注释头缺 分类：通用")
+            self.assertIn(f"服务能力：{cap_id}", head,
+                          f"skills/{rel} 注释头缺 服务能力：{cap_id}（执行层映射漂移）")
 
     def test_no_dangling_overview_references(self):
         """能力文档不再引用不在库内的《项目工作流与 Skill 总览》。"""
