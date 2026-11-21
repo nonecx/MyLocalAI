@@ -37,10 +37,12 @@ META_ACTIONS = ("chitchat", "clarify", "refuse")
 #: 第二波追加 collect_evidence（取证三技能流水线，只读：不建档、不出真假分）。
 #: 第三波追加 collect_research / verify_authority（资料收集 / 权威核验，均只读：
 #: 不建档、无分数、不出真假结论；与既有能力的分流见 prompts.json router_system）。
+#: 第四波追加 check_source / guide_fact_check（信源可信度速查 / 辟谣方法指南，均只读）：
+#: 前者评信源本身（与 verify_claim 核说法内容区分），后者教查证方法（与 chitchat 闲聊区分）。
 TOOL_ACTIONS = ("verify_claim", "analyze_speech", "check_heat", "compute_heat",
                 "list_dossiers", "get_dossier", "recheck_dossier", "export_card",
                 "search_web", "read_opinions", "deep_read", "insights", "collect_evidence",
-                "collect_research", "verify_authority")
+                "collect_research", "verify_authority", "check_source", "guide_fact_check")
 
 #: 带 id 参数的工具：缺 id 时允许"本会话最近档案"的确定性兜底（§5.4 ②）。
 #: 章节类两项同规：用户说"看看刚才那条的观点"没带档案号，用会话最近档案补。

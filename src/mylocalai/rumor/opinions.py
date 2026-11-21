@@ -43,8 +43,14 @@ MAX_ARGUMENTS_PER_ARTICLE = 6
 SIDES = ("支持", "反驳")
 _BASIS_CUES = ("数据", "研究", "论文", "通报", "实验")
 
-ARGUMENTS_SYSTEM_PROMPT = (
-    "你是论据抽取助理。用户会给出一篇文章正文（可能来自自媒体、论坛或评论区），"
+# ---- 论据抽取 System Prompt（内置默认；三段结构加在开头，字段要求与 JSON 契约原样在后）----
+ARGUMENTS_SYSTEM_PROMPT_BUILTIN = (
+    "【角色身份】你是事实核查链的论据抽取助理，负责从民间文章里抽取支持或反对主张的论据。\n"
+    "【任务目标】你为民间观点聚合分析环节达成可聚类、可定级的论据条目："
+    "每条含 argument/basis/source/channel/verifiable。\n"
+    "【边界】你只抽取并一句话概括论据，不给论据打分或定级（可信度由确定性代码计算）；"
+    "文中没有论据时返回空数组。\n"
+    "用户会给出一篇文章正文（可能来自自媒体、论坛或评论区），"
     "请抽取其中用来支持或反对某一主张的论据，每条论据给出一句话概括。\n"
     "每条论据输出以下字段：\n"
     "  argument   论据的一句话概括\n"
@@ -58,8 +64,14 @@ ARGUMENTS_SYSTEM_PROMPT = (
     '"channel": "网络传言", "verifiable": "无法核实"}]}'
 )
 
-CLUSTER_SYSTEM_PROMPT = (
-    "你是论据聚类助理。用户会给出一组带编号的论据，请把表达同一意思（同一条论据）的"
+# ---- 论据聚类 System Prompt（内置默认；三段结构加在开头，编号规则与 JSON 契约原样在后）----
+CLUSTER_SYSTEM_PROMPT_BUILTIN = (
+    "【角色身份】你是事实核查链的论据聚类助理，负责把跨文章抽取的编号论据按意思归组。\n"
+    "【任务目标】你为民间观点聚合分析环节达成跨文章的证据重合度统计："
+    "输出 clusters 编号分组（每个编号恰好出现一次）。\n"
+    "【边界】你只输出编号分组，不改写、不评价论据内容；"
+    "两条例据意思是否相同拿不准时，按意思不同各自成组。\n"
+    "用户会给出一组带编号的论据，请把表达同一意思（同一条论据）的"
     "编号归为一组，意思不同的论据各自成组。\n"
     "编号是全局连续编号，从 0 开始；每个编号必须恰好出现一次，不得重复、不得遗漏、"
     "不得越界。\n"
@@ -67,8 +79,14 @@ CLUSTER_SYSTEM_PROMPT = (
     '{"clusters": [[0, 2], [1]]}'
 )
 
-CONTRADICTION_SYSTEM_PROMPT = (
-    "你是矛盾检测助理。用户会给出一组带编号的论据，请找出其中的矛盾：\n"
+# ---- 矛盾检测 System Prompt（内置默认；三段结构加在开头，输出要求与 JSON 契约原样在后）----
+CONTRADICTION_SYSTEM_PROMPT_BUILTIN = (
+    "【角色身份】你是事实核查链的矛盾检测助理，负责发现论据之间的自相矛盾与互相矛盾。\n"
+    "【任务目标】你为民间观点聚合分析环节达成矛盾清单：每条含 kind/a/b/why，"
+    "供报告提示口径冲突。\n"
+    "【边界】你只找矛盾并一句话说明矛盾所在，不评估论据真假或可信度；"
+    "矛盾类型拿不准时归“互相矛盾”，没有矛盾时返回空数组。\n"
+    "用户会给出一组带编号的论据，请找出其中的矛盾：\n"
     "  - 自相矛盾：同一条论据内部前后不一致（此时 a 与 b 填同一条论据）\n"
     "  - 互相矛盾：两条不同论据相互冲突\n"
     "每条矛盾输出 kind（自相矛盾|互相矛盾）、a（论据A概括）、b（论据B概括）、"
@@ -76,6 +94,16 @@ CONTRADICTION_SYSTEM_PROMPT = (
     '严格按以下 JSON 格式输出，键名必须是 contradictions：\n'
     '{"contradictions": [{"kind": "互相矛盾", "a": "论据A", "b": "论据B", "why": "原因"}]}'
 )
+
+# ---- 生效值：配置里有就用配置的，否则用上面的内置默认（src/mylocalai/rumor/prompts.json） ----
+from mylocalai.config import prompt_config
+
+ARGUMENTS_SYSTEM_PROMPT = prompt_config.get_prompt(
+    "opinions_arguments_system", ARGUMENTS_SYSTEM_PROMPT_BUILTIN)
+CLUSTER_SYSTEM_PROMPT = prompt_config.get_prompt(
+    "opinions_cluster_system", CLUSTER_SYSTEM_PROMPT_BUILTIN)
+CONTRADICTION_SYSTEM_PROMPT = prompt_config.get_prompt(
+    "opinions_contradiction_system", CONTRADICTION_SYSTEM_PROMPT_BUILTIN)
 
 
 # ---------------------------------------------------------------------------

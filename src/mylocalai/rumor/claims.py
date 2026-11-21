@@ -14,8 +14,14 @@ from typing import Any, Dict, List
 
 from mylocalai.llm.llm_client import chat_json
 
-CLAIMS_SYSTEM_PROMPT = (
-    "你是一名事实核查助理。请找出用户文本中“可被核实的事实性声明”，并输出JSON。\n"
+# ---- 主张拆解 System Prompt（内置默认；三段结构加在开头，字段要求与 JSON 契约原样在后）----
+CLAIMS_SYSTEM_PROMPT_BUILTIN = (
+    "【角色身份】你是事实核查链的主张拆解助理，负责判断文本里有没有可被核实的事实性声明。\n"
+    "【任务目标】你为谣言判定链的证据检索环节达成可核查的对象："
+    "输出 has_factual_claim 与最多 3 条声明（claim/has_source/verifiability）的结构化JSON。\n"
+    "【边界】你只拆解与标注声明，不判断任何声明为真或为假；"
+    "拿不准能否核实时按“无法核实”归类，观点、情绪与预测一律不算事实性声明。\n"
+    "请找出用户文本中“可被核实的事实性声明”，并输出JSON。\n"
     "事实性声明＝关于具体人物/事件/时间/地点/数据/因果关系的断言，原则上能通过查证判断真假。"
     "观点、情绪宣泄、辱骂、个人感受、主观评价、对未来的预测都不是事实性声明。\n"
     "字段要求：\n"
@@ -29,6 +35,11 @@ CLAIMS_SYSTEM_PROMPT = (
     '请严格按照以下JSON格式输出，不要输出任何其他内容：\n'
     '{"has_factual_claim": true, "claims": [{"claim": "...", "has_source": false, "verifiability": "无法核实"}]}'
 )
+
+# ---- 生效值：配置里有就用配置的，否则用上面的内置默认（src/mylocalai/rumor/prompts.json） ----
+from mylocalai.config import prompt_config
+
+CLAIMS_SYSTEM_PROMPT = prompt_config.get_prompt("claims_system", CLAIMS_SYSTEM_PROMPT_BUILTIN)
 
 _VERIFIABILITY_ENUM = {"可核实", "无法核实"}
 _MAX_CLAIMS = 3

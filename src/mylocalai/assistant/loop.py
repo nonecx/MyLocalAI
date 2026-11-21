@@ -30,6 +30,7 @@ record_analysis 调用点注入）；计数面不可用时逐段退回 M4 前的
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -40,15 +41,15 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from mylocalai.llm import llm_cache
 from mylocalai.assistant import router as router_mod
 from mylocalai.assistant import (tools_authority, tools_chapters, tools_evidence,
-                                 tools_heat, tools_insights, tools_memory, tools_research,
-                                 tools_verify)
+                                 tools_guide, tools_heat, tools_insights, tools_memory,
+                                 tools_research, tools_source, tools_verify)
 from mylocalai.assistant.context import build_context
 from mylocalai.assistant.events import EventStream
 from mylocalai.assistant.fingerprint import DEFAULT_SHINGLE_SIZE
 from mylocalai.assistant.registry import (MAX_TEXT_LENGTH, ToolNotAllowed, ToolRegistry,
                                           ValidationError)
 
-__all__ = ["AssistantLoop", "action_payload"]
+__all__ = ["AssistantLoop", "action_payload", "prompts_warnings"]
 
 #: 分句假流式（§5.5）：按中英文句读切 delta，llm_client 零改动。
 _SENTENCE_RE = re.compile(r"[^。！？!?…\n]*[。！？!?…\n]+|[^。！？!?…\n]+$")
@@ -77,6 +78,9 @@ _CARD_TYPE = {
     # verify_authority → authority 卡（cards.js renderAuthority）
     "collect_research": "research",
     "verify_authority": "authority",
+    # 通用技能第四波：check_source → source 卡、guide_fact_check → guide 卡
+    "check_source": "source",
+    "guide_fact_check": "guide",
 }
 
 _ARGS_PREVIEW_WIDTH = 60
@@ -659,6 +663,63 @@ def _real_service(name: str, rules: Dict[str, Any],
                                    authority_config=load_authority_config())
         return _authority_skills
 
+    if name == "source_skills":
+        def _source_skills():
+            from mylocalai.assistant.skills.source import SourceSkills
+            from mylocalai.assistant.skills.source.pipeline import load_rules
+            from mylocalai.assistant.skills.collect_core import load_authority_config
+            from mylocalai.assistant.skills.transport import default_transport
+            from mylocalai.core.privacy import load_preferences
+            from mylocalai.llm import llm_client
+
+            cfg = (rules or {}).get("source_model") or {}
+            pipe_rules = load_rules()
+
+            def _llm(system: str, user: str) -> Any:
+                return llm_client.chat_json(system, user,
+                                            temperature=float(cfg.get("temperature", 0)),
+                                            max_tokens=int(cfg.get("max_tokens", 300)),
+                                            namespace=str(cfg.get("cache_namespace",
+                                                                  "assistant_source")))
+
+            # rules.json 是取页上限的唯一来源（同 research_skills/authority_skills 口径）。
+            transport = default_transport(
+                max_bytes=int(pipe_rules["max_page_bytes"]),
+                max_text_chars=int(pipe_rules["max_text_chars"]),
+                timeout_s=float(pipe_rules["io_timeout_s"]),
+                max_hops=int(pipe_rules["max_redirect_hops"]))
+
+            def _fetch(url, *, allowed_domains=None, cancel_check=None, deadline=None):
+                if not load_preferences().external_allowed("public-web"):
+                    return {"status": "error", "category": "consent_denied",
+                            "detail": "外部取页未授权", "url": url, "final_url": ""}
+                return transport.fetch(url, allowed_domains=allowed_domains,
+                                       cancel_check=cancel_check, deadline=deadline)
+
+            # 可选注入：history_fn=<信源战绩查询>、verified_pages=<已核验页面>；
+            # 判定复用 collect_core 的权威信号与类别函数，代码判定、模型不打分。
+            return SourceSkills(rules=pipe_rules, fetch_fn=_fetch, llm_fn=_llm,
+                                authority_config=load_authority_config())
+        return _source_skills
+
+    if name == "guide_skills":
+        def _guide_skills():
+            from mylocalai.assistant.skills.guide import GuideSkills
+            from mylocalai.llm import llm_client
+
+            cfg = (rules or {}).get("guide_model") or {}
+
+            def _llm(system: str, user: str) -> Any:
+                return llm_client.chat_json(system, user,
+                                            temperature=float(cfg.get("temperature", 0)),
+                                            max_tokens=int(cfg.get("max_tokens", 900)),
+                                            namespace=str(cfg.get("cache_namespace",
+                                                                  "assistant_guide")))
+
+            # 零检索零取页：GuideSkills 没有 search_fn/fetch_fn/transport 注入位。
+            return GuideSkills(llm_fn=_llm)
+        return _guide_skills
+
     if name == "route_llm":
         cfg = (rules or {}).get("route_model") or {}
 
@@ -704,6 +765,79 @@ def _pkg_json(name: str) -> Dict[str, Any]:
         return data if isinstance(data, dict) else {}
     except Exception:  # noqa: BLE001  配置写坏退空 dict（各键取代码内默认）
         return {}
+
+
+# ---------------------------------------------------------------------------
+# 对话层提示词装载（与 config/prompt_config.py 的 RUMOR_PROMPTS_* 机制同构）
+# ---------------------------------------------------------------------------
+#: ASSISTANT_PROMPTS_PATH       整套替换 prompts.json（不再以默认文件为底稿）
+#: ASSISTANT_PROMPTS_EXTRA_PATH 增量覆盖（深合并到当前配置上：字典递归、列表取并集）
+#: 任何一步失败（路径不存在 / JSON 写坏 / 根节点非对象）都降级为默认文件内容并留告警
+#: （prompts_warnings() 读取，口径同 prompt_config.warnings），不 print、不抛——
+#: 提示词加载失败绝不挡对话回合。无环境变量时与直接读 prompts.json 逐位一致。
+_PROMPTS_WARNINGS: Dict[str, str] = {}
+
+
+def prompts_warnings() -> List[str]:
+    """本次装载 assistant prompts.json 时出现的问题（为空表示一切正常）。"""
+    return list(_PROMPTS_WARNINGS.values())
+
+
+def _read_json_object(path: str) -> Dict[str, Any]:
+    """读一个根节点为对象的 JSON 文件；读不到/写坏/根非对象都抛（调用方降级）。"""
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, dict):
+        raise ValueError(f"配置根节点必须是对象，实际是 {type(data).__name__}")
+    return data
+
+
+def _merge_json(base: Dict[str, Any], over: Dict[str, Any]) -> Dict[str, Any]:
+    """深合并（与 config/config_loader.load_config 的合并同规）：字典递归；
+    列表取并集（保留 base 顺序、去重）；其余键覆盖。"""
+    out = copy.deepcopy(base)
+    for key, value in (over or {}).items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _merge_json(out[key], value)
+        elif isinstance(value, list) and isinstance(out.get(key), list):
+            out[key] = list(out[key]) + [x for x in value if x not in out[key]]
+        else:
+            out[key] = copy.deepcopy(value)
+    return out
+
+
+def _load_prompts() -> Dict[str, Any]:
+    """AssistantLoop.prompts 的缺省装载（环境变量覆盖见上方注释块）。
+
+    无 ASSISTANT_PROMPTS_PATH 时 = _pkg_json("prompts.json")，逐位一致；
+    替换文件坏了退默认文件内容，增量文件坏了忽略增量、保留当前配置，
+    两种情况都写 _PROMPTS_WARNINGS（按条形 key 存，同名只留最新一条）。
+    """
+    _PROMPTS_WARNINGS.clear()
+    full = str(os.environ.get("ASSISTANT_PROMPTS_PATH") or "").strip()
+    if full:
+        try:
+            data = _read_json_object(full)
+        except Exception as exc:  # noqa: BLE001  替换文件坏了 → 退默认，不挡对话
+            _PROMPTS_WARNINGS["prompts.json#replaced"] = (
+                f"ASSISTANT_PROMPTS_PATH 指向的替换文件读取失败（{full}）："
+                f"{type(exc).__name__}: {exc}，已改用默认 prompts.json")
+            data = _pkg_json("prompts.json")
+    else:
+        _PROMPTS_WARNINGS.pop("prompts.json#replaced", None)
+        data = _pkg_json("prompts.json")
+    extra = str(os.environ.get("ASSISTANT_PROMPTS_EXTRA_PATH") or "").strip()
+    if extra:
+        try:
+            data = _merge_json(data, _read_json_object(extra))
+            _PROMPTS_WARNINGS.pop("prompts.json#extra", None)
+        except Exception as exc:  # noqa: BLE001  增量坏了 → 忽略增量，不挡对话
+            _PROMPTS_WARNINGS["prompts.json#extra"] = (
+                f"ASSISTANT_PROMPTS_EXTRA_PATH 指向的增量文件读取失败（{extra}）："
+                f"{type(exc).__name__}: {exc}，已忽略增量")
+    else:
+        _PROMPTS_WARNINGS.pop("prompts.json#extra", None)
+    return data
 
 
 def action_payload(action: Any) -> Tuple[str, Dict[str, Any]]:
@@ -753,7 +887,7 @@ class AssistantLoop:
     @property
     def prompts(self) -> Dict[str, Any]:
         if self._prompts is None:
-            self._prompts = _pkg_json("prompts.json")
+            self._prompts = _load_prompts()
         return self._prompts
 
     @property
@@ -779,6 +913,11 @@ class AssistantLoop:
             # 路由枚举与 allowlist 同步补 "collect_research" / "verify_authority"。
             tools_research.register_all(reg, None)
             tools_authority.register_all(reg, None)
+            # 通用技能第四波：check_source 只评信源身份不判内容（读 1 页、不建档、
+            # 无分数），guide_fact_check 零检索教查证五步法；均 permission="read"。
+            # 路由枚举与 allowlist 同步补 "check_source" / "guide_fact_check"。
+            tools_source.register_all(reg, None)
+            tools_guide.register_all(reg, None)
             self._registry = reg
         return self._registry
 
