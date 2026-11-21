@@ -1,5 +1,7 @@
 <!--
 技能名：discover-sources（信源发现，取证三技能之二）
+分类：通用
+服务能力：evidence-research
 职责：给定领域/议题/地区，从信源目录里挑出该去哪查，并对每个候选给出身份与适用范围的判断依据。
 输入：阶段1 的领域结论（primary/secondary/region/labels）+ 信源目录候选清单（source_id/name/domain/tier/domains/regions）。
 输出（JSON，键名锁定）：{

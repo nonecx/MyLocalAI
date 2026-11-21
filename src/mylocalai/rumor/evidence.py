@@ -33,8 +33,14 @@ _SNIPPET_FOR_LLM = 180         # 送入立场判定的摘要长度
 _LLM_FULL_TEXT = 400           # 送入立场判定的全文长度
 _STANCE_BATCH = 5              # 立场判定分批大小：条数太多模型容易数错
 
-STANCE_SYSTEM_PROMPT = (
-    "你是事实核查助理。用户会给出一条待核主张和若干条搜索到的资料（按[序号]列出）。"
+# ---- 立场判定 System Prompt（内置默认；三段结构加在开头，判定锚点与 JSON 契约原样在后）----
+STANCE_SYSTEM_PROMPT_BUILTIN = (
+    "【角色身份】你是事实核查链的立场判定助理，负责判断每条资料对待核主张的态度。\n"
+    "【任务目标】你为谣言判定链的证据汇总环节达成可去重计数的立场标注："
+    "按资料序号输出 反驳/支持/无关 的 stances 数组。\n"
+    "【边界】你只输出封闭枚举（反驳/支持/无关），不解释立场倾向之外的内容；"
+    "拿不准时一律归“无关”。\n"
+    "用户会给出一条待核主张和若干条搜索到的资料（按[序号]列出）。"
     "请对每条资料判断它对待核主张的立场，只能取：反驳/支持/无关。\n"
     "判定锚点：资料直接指出主张内容是谣言、不实信息、存在误解→反驳；"
     "资料确认主张描述的事实属实→支持；资料只是同主题讨论、广告、词典页、"
@@ -43,6 +49,11 @@ STANCE_SYSTEM_PROMPT = (
     '请严格按照以下JSON格式输出，键名必须是 stances，数组按资料序号顺序、长度必须等于资料条数：\n'
     '{"stances": ["反驳", "支持", "无关"]}'
 )
+
+# ---- 生效值：配置里有就用配置的，否则用上面的内置默认（src/mylocalai/rumor/prompts.json） ----
+from mylocalai.config import prompt_config
+
+STANCE_SYSTEM_PROMPT = prompt_config.get_prompt("stance_system", STANCE_SYSTEM_PROMPT_BUILTIN)
 
 
 # ---------------------------------------------------------------------------
@@ -187,8 +198,14 @@ def _extract_anchors(claim: str) -> List[Dict[str, str]]:
     return out
 
 
-SCOPE_SYSTEM_PROMPT = (
-    "你是事实核查助理。请判断用户给出的待核主张指向的是\"某个具体事件\"还是\"某种泛泛的说法/现象\"。\n"
+# ---- 事件界定 System Prompt（内置默认；三段结构加在开头，字段要求与 JSON 契约原样在后）----
+SCOPE_SYSTEM_PROMPT_BUILTIN = (
+    "【角色身份】你是事实核查链的事件界定助理，负责判断待核主张指向具体事件还是泛现象。\n"
+    "【任务目标】你为证据检索的事件范围过滤环节达成判定依据："
+    "输出 scope（event/phenomenon）、事件一句话概述与 why。\n"
+    "【边界】你只做 event/phenomenon 的封闭判定与一句依据，不判断主张真假；"
+    "拿不准时按泛现象（phenomenon）处理。\n"
+    "请判断用户给出的待核主张指向的是\"某个具体事件\"还是\"某种泛泛的说法/现象\"。\n"
     "具体事件＝可以指认时间、地点、单位或人物（例如某地某时发生的投毒、某机构的某次通报）；"
     "泛现象＝对一类事物的普遍说法，时间地点都不特定（例如隔夜茶致癌、晚上吃姜等于吃砒霜、5G 辐射有害）。\n"
     "字段要求：\n"
@@ -199,8 +216,16 @@ SCOPE_SYSTEM_PROMPT = (
     '{"scope": "event", "event": "...", "why": "..."}'
 )
 
-EVENT_RELEVANCE_SYSTEM_PROMPT = (
-    "你是事实核查助理。用户会给出一个具体事件（含时间/地点/主体）和若干条搜索到的资料（按[序号]列出）。"
+SCOPE_SYSTEM_PROMPT = prompt_config.get_prompt("scope_system", SCOPE_SYSTEM_PROMPT_BUILTIN)
+
+# ---- 事件相关性判定 System Prompt（内置默认；三段结构加在开头，判定锚点与 JSON 契约原样在后）----
+EVENT_RELEVANCE_SYSTEM_PROMPT_BUILTIN = (
+    "【角色身份】你是事实核查链的事件相关性判定助理，负责逐条核对资料是否明确在讲给定事件。\n"
+    "【任务目标】你为证据检索的事件范围过滤环节达成逐条去留依据："
+    "输出与资料条数等长的 matches 数组（该事件/非该事件）。\n"
+    "【边界】你只输出“该事件/非该事件”的封闭判定，不做立场表态或真假判断；"
+    "拿不准时判“非该事件”。\n"
+    "用户会给出一个具体事件（含时间/地点/主体）和若干条搜索到的资料（按[序号]列出）。"
     "请逐条判断该资料是否**明确在讲这个事件**。\n"
     "判定锚点：资料提到该事件的时间、地点、单位或人物，讲的确实是同一件事→该事件；"
     "资料只是讨论同类现象、讲的是别处发生的同类事件、或者与该事件无关→非该事件。"
@@ -208,6 +233,9 @@ EVENT_RELEVANCE_SYSTEM_PROMPT = (
     '请严格按照以下JSON格式输出，matches 数组长度必须等于资料条数，元素只能取\"该事件\"或\"非该事件\"：\n'
     '{"matches": ["该事件", "非该事件"]}'
 )
+
+EVENT_RELEVANCE_SYSTEM_PROMPT = prompt_config.get_prompt(
+    "event_relevance_system", EVENT_RELEVANCE_SYSTEM_PROMPT_BUILTIN)
 
 
 def _tolerant_list(obj: Any) -> Optional[list]:

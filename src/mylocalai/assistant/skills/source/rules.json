@@ -1,0 +1,11 @@
+{
+  "_comment": "信源可信度速查的预算与开关。改这里不改代码：load_rules 会做类型校验，缺键/坏类型逐键回退内置默认，数值越界夹到安全区间，未知键丢弃。速查口径：只读 1 页不做深挖（max_pages=1）、时限取小值（比权威核验的 90s/10s 更紧）；本技能不检索（无 max_searches 键），计数类键（max_pages/max_llm_calls）由 collect_core.CollectBudget 记账。",
+  "max_input_chars": 500,
+  "max_pages": 1,
+  "max_llm_calls": 1,
+  "total_deadline_s": 20,
+  "io_timeout_s": 8,
+  "max_page_bytes": 1500000,
+  "max_text_chars": 20000,
+  "max_redirect_hops": 3
+}

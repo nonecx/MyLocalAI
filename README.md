@@ -57,15 +57,25 @@
 │   │   ├── router.py           意图路由（chat_json + 封闭枚举 + 四层防护链，绝不猜）
 │   │   ├── registry.py         工具注册表（schema 校验、权限分级、成本/延迟元数据）
 │   │   ├── tools_verify.py / tools_heat.py / tools_memory.py / tools_chapters.py
+│   │   ├── tools_evidence.py / tools_research.py / tools_authority.py
+│   │   │                       取证三技能 / 资料收集 / 权威核验（只读对话能力）
+│   │   ├── tools_source.py / tools_guide.py
+│   │   │                       信源可信度速查 / 辟谣方法指南（第四波只读对话能力）
 │   │   ├── tools_batch.py      材料批次编排（阶段 2：同源分组 + 逐条核查 + 双预算）
-│   │   └── tools_monitor.py    领域监测编排（阶段 3：授权闸 + 检索 + 变化摘要）
+│   │   ├── tools_monitor.py    领域监测编排（阶段 3：授权闸 + 检索 + 变化摘要）
 │   │   ├── fingerprint.py      话术指纹纯函数（归一化/shingle/Jaccard——谣言库秒回的地基）
 │   │   ├── reminders.py        被动提醒纯函数（档案年龄/热度变化 → 一行提示）
 │   │   ├── context.py          上下文窗口构建器（12k 字符预算、裁剪与摘要）
 │   │   ├── events.py           SSE 事件协议（封闭枚举：meta…done/error）
 │   │   ├── session_store.py    会话域三表读写（sessions/messages/tool_runs）
 │   │   ├── mcp_server.py       助手 MCP（python -m mylocalai.assistant.mcp_server）
-│   │   ├── prompts.json        人设与固定话术——改这里而非改代码
+│   │   ├── capabilities/       用户能力层：10 份人读 SKILL.md（头注释带 分类/适用角色，
+│   │   │                       不注入模型；机器契约唯一来源=registry+对应 pipeline）
+│   │   ├── skills/             技能执行层（SKILL.md 注入模型，注释头带 分类/服务能力）：
+│   │   │                       取证三技能 domain/sources/evidence、资料收集 research/、
+│   │   │                       权威核验 authority/、信源速查 source/、辟谣指南 guide/
+│   │   ├── prompts.json        人设与固定话术（system 类提示词带 角色/目标/边界 三段结构，
+│   │   │                       支持 ASSISTANT_PROMPTS_PATH/_EXTRA_PATH 覆盖）——改这里而非改代码
 │   │   └── assistant_rules.json  路由模型/上限/预算/指纹阈值/信源画像阈值/拒绝词表——改这里而非改代码
 │   ├── web/                    FastAPI 网站 + static/（src/mylocalai/web/app.py）
 │   │   ├── app.py              REST API 全貌（分析/关注度/对话/会话/档案/画像/Profile/批次/监测）+ lifespan 调度
@@ -263,7 +273,10 @@ python -m mylocalai.cli --attention-online "某段待分析的文本"
   抬分锚点、稳定性护栏、话术特征权重（`markers`）
 - `src/mylocalai/config/sources_registry.json` —— 信源名单、站名表、`reliable_tiers` / `fetch_tiers` /
   `link_tiers` / `channel_score`（按档名声明，改档名不再静默失效）
-- `src/mylocalai/rumor/prompts.json` —— 三模块 System Prompt、报告模板、枚举白名单（2026-10-22 修复 G8）
+- `src/mylocalai/rumor/prompts.json` —— 三模块与报告 System Prompt、谣言 Agent 引擎链 8 段提示词
+  （agent_system / claims_system / stance_system / scope_system / event_relevance_system /
+  opinions_arguments_system / opinions_cluster_system / opinions_contradiction_system，
+  2026-11-21 外置，classic 同款 get_prompt + 内置兜底）、枚举白名单（2026-10-22 修复 G8）
 - `src/mylocalai/llm/providers.json` —— 提供方表（密钥/地址/模型名成组绑定 + 能否关思维链，修复 G4）
 - `src/mylocalai/attention/attn_rules.json` —— 关注度公式参数、档位表、深读阈值（2026-10-26）
 - `src/mylocalai/attention/deep_read_rules.json` —— 深读触发规则（absolute/quantile/change_rate/any ×
@@ -271,10 +284,13 @@ python -m mylocalai.cli --attention-online "某段待分析的文本"
 - `src/mylocalai/attention/society_issues.json` —— 封闭议题清单（40 项，LLM 只能从中选 `issue_tags`）
 - `src/mylocalai/attention/prompts.json` —— 深读受控生成提示词（system 硬约束 + few-shot 正反对比）
 用 `RUMOR_RULES_PATH` / `RUMOR_SOURCES_PATH` / `RUMOR_PROMPTS_PATH` / `LLM_PROVIDERS_PATH` /
-`DEEP_READ_RULES_PATH` / `DEEP_READ_ISSUES_PATH` / `DEEP_READ_PROMPTS_PATH`
+`DEEP_READ_RULES_PATH` / `DEEP_READ_ISSUES_PATH` / `DEEP_READ_PROMPTS_PATH` /
+`ASSISTANT_PROMPTS_PATH`（对话层人设整套替换）/ `ASSISTANT_PROMPTS_EXTRA_PATH`
+（增量覆盖，字典深合并、列表并集去重）
 可整套替换，用对应的 `_EXTRA_PATH` 可只做增量。配置写坏只退回默认值并留告警
 （`rules.load_warnings()` / `prompt_config.warnings()` / `llm_client.provider_warnings()` /
-`deep_read.load_rules()` / `deep_read.load_issues()` / `deep_read.load_prompts()`），
+`deep_read.load_rules()` / `deep_read.load_issues()` / `deep_read.load_prompts()` /
+`loop.prompts_warnings()`），
 **既不崩、也不会把官方来源静默降级**：已知结构（`tiers`/`official_sites`/`commercial_sites`/
 档位角色、阈值/封顶/抬分锚点/稳定性/话术权重、提示词各段）在合并后会做类型校验，
 不合规的段退回内置默认并留下告警。
@@ -324,7 +340,9 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 1627 个用例（unittest discover 全量，2026-11-21 信息收集/权威核验双技能落地后实测；
+离线套件共 1682 个用例（unittest discover 全量，2026-11-21 信源可信度速查/辟谣方法指南
+两条通用技能与 skill 分类体系落地后实测，含 `tests/test_source_skills.py` 30 例、
+`tests/test_guide_skills.py` 23 例与 `tests/test_role_prompts.py` 新增分类对拍 2 例；
 **M4 起由 `tests.test_readme_counts` 自动校验此数字与 mock 闸门条数，改动后须同步回写**）：
 M1-M3 的全部回归（详见 git 历史），加上 M4 新增模块：
 **成本真实计数**（llm_client 进程级计数器：真实上游调用数 + usage tokens，缓存命中/
@@ -420,6 +438,9 @@ CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
 - `docs/信息收集与权威核验技能-2026-11-20.md` —— 资料收集（collect_research）与权威核验
   （verify_authority）的实施规格：双流水线、共享采集底座、权威类别与动态核验信号、
   balance/lean 决策表与"1+3"输出口径、预算/状态/失败矩阵与测试矩阵。
+- `docs/Skill分类与提示词规范-v1.0.md` —— skill 通用/专用分类体系（按角色绑定）、
+  提示词【角色身份/任务目标/边界】三段结构、谣言引擎链提示词外置与
+  ASSISTANT_PROMPTS_PATH 覆盖机制、信源可信度速查/辟谣方法指南两条新能力的实施记录。
 - `src/mylocalai/rumor/README.md` —— 谣言 Agent 的架构、证据本、受控浏览、MCP 与降级行为。
 - `my_website/README.md` —— 展示网站的启动方式与页面功能。
 
@@ -503,6 +524,33 @@ CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
   **判定语义与角色无关**（RumorAgent 引擎提示词保持共享，同一说法在任何工作区同结论）。
   角色 ↔ 能力 ↔ Skill ↔ 通道的映射总表与防漂移测试见
   `docs/用户角色与Profile规格-v1.0.md` §8 与 `tests/test_role_prompts.py`。
+- **Skill 通用/专用分类**（2026-11-21）：面向用户的能力十项按角色绑定分两档——**通用**
+  （横向，任何工作区可用：证据研究 / 资料收集 / 权威核验 / 话题理解 / 言论理解 /
+  信源可信度速查 / 辟谣方法指南）与**专用**（角色主能力：事实核查→普通用户 /
+  材料分析→分析师 / 领域监测→监测员）。分类登记在各能力 SKILL.md 头注释
+  （`分类` / `适用角色`）与执行层 SKILL.md 注释头（`分类` / `服务能力`），
+  `tests/test_role_prompts.py` 做封闭枚举与映射对拍防漂移；新增能力先定分类再登记。
+- **信源可信度速查与辟谣方法指南**（2026-11-21 第四波只读对话能力，不建档、无分数；
+  详见 `docs/Skill分类与提示词规范-v1.0.md`）：
+  - **`check_source`**（query；"这个网站可信吗 / xx 机构是什么背景"）：单源可信度速查——
+    只评信源身份不判内容真假，读 1 页后由代码信号判定（目录锚点 / 官方后缀 /
+    正文官方标记 / 多来源交叉提及 ≥2），沿用权威核验"1+3"口径：有决定性信号才说
+    "官方/权威"，否则只给倾向或"未核验"；档案里有该信源战绩则附摘要；页面不可达
+    如实降级。source 卡结构化呈现信号、依据、战绩与限制。
+  - **`guide_fact_check`**（question；"怎么识别谣言 / 我自己怎么查证"）：辟谣方法指南——
+    零检索零取页纯知识能力，代码锁定的查证五步法（看出处 → 交叉验证 → 查原始引用 →
+    识别情绪化标题与断言强度 → 理解证据等级）；模型讲解含 URL/真假判定词整条丢弃、
+    退内置五步法模板（state=degraded 如实标注）；核查具体说法引导到 verify_claim。
+- **提示词三段结构与引擎链外置**（2026-11-21）：全部 system 类提示词补齐
+  【角色身份】【任务目标】【边界】开头三段（assistant 的 router/narrate/summary、
+  谣言 Agent 引擎链 8 段、classic 四段、attention 深读、执行层 SKILL.md 正文），
+  行为规则/字段要求/JSON 契约逐字保留、判定语义不变。谣言引擎链 8 段提示词从硬编码
+  外置到 `rumor/prompts.json`（`agent_system` 等 8 键，classic 同款 get_prompt + 内置兜底，
+  `RUMOR_PROMPTS_PATH/_EXTRA_PATH` 继续生效）；`assistant/prompts.json` 支持
+  `ASSISTANT_PROMPTS_PATH`（整套替换）与 `ASSISTANT_PROMPTS_EXTRA_PATH`（增量深合并）
+  环境变量覆盖，坏配置降级留 `loop.prompts_warnings()`；attention 旧版文本口径
+  `attn_deep_read.json` 标注 deprecated（运行时仅降级模板段被消费，受控版见
+  `attention/prompts.json`）。
 - **MCP 同期交付**：见下节。
 
 ## 记忆与完整性（2026-10-31，M3）

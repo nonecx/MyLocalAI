@@ -1,5 +1,7 @@
 <!--
 技能名：authority-adjudicate（权威核验的受约束分析，阶段4）
+分类：通用
+服务能力：authority-verification
 职责：在代码已经算出 balance/lean/conclusion 之后，逐主张写一段"证据能支撑到什么程度"的分析；只转述证据，不升级判断。
 输入：主张清单 + 每条主张的代码结论（balance/lean/conclusion）+ 证据清单（evidence_id/逐字引文/来源等级/核验方式）。
 输出（JSON，键名锁定）：{"analysis":[{"claim_id":"<主张id>","text":"<受约束分析>","evidence_ids":["<证据id>"]}]}

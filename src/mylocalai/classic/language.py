@@ -31,8 +31,14 @@ from typing import Any, Dict
 from mylocalai.llm.llm_client import chat_json
 
 # ---- 情感分析 System Prompt（枚举锁死）----
+# 三段结构（角色身份/任务目标/边界）加在开头；字段要求与 JSON 契约原样保留在后。
 EMOTION_SYSTEM_PROMPT_BUILTIN = (
-    "你是一名网络言论情感分析专家。请分析用户提供的文本并输出JSON。\n"
+    "【角色身份】你是事实核查链的情绪底色分析专家，负责给网络言论归类情感倾向并量化情绪化强度。\n"
+    "【任务目标】你为谣言判定链的核心裁判规则引擎达成可计算的三字段JSON："
+    "emotion_tendency、emotion_score（0-10）与 keywords。\n"
+    "【边界】你只按文本特征归类与评级，不判断言论真假；强度拿不准时往低档给分，"
+    "不输出枚举之外的倾向。\n"
+    "请分析用户提供的文本并输出JSON。\n"
     "字段要求：\n"
     "1. emotion_tendency：情感倾向，只能取以下之一："
     "冷静客观/积极宏观/情绪化宣泄/极度负面/恶意辱骂\n"
@@ -47,8 +53,14 @@ EMOTION_SYSTEM_PROMPT_BUILTIN = (
 )
 
 # ---- 攻击性分析 System Prompt（枚举锁死）----
+# 三段结构（角色身份/任务目标/边界）加在开头；字段要求与 JSON 契约原样保留在后。
 AGGRESSION_SYSTEM_PROMPT_BUILTIN = (
-    "你是一名网络言论攻击性分析专家。请分析用户提供的文本并输出JSON。\n"
+    "【角色身份】你是事实核查链的攻击性分析专家，负责识别网络言论的攻击对象、攻击强度与攻击类型。\n"
+    "【任务目标】你为谣言判定链的核心裁判规则引擎达成可计算的三字段JSON："
+    "attack_target、aggression_level 与 attack_type。\n"
+    "【边界】你只按文本特征定级，不判断言论真假；拿不准时攻击性从低处理（避免误伤），"
+    "不输出枚举之外的取值。\n"
+    "请分析用户提供的文本并输出JSON。\n"
     "字段要求（取值必须严格遵守）：\n"
     "1. attack_target：攻击对象，只能取：针对个人/针对群体/针对事件/无\n"
     "2. aggression_level：攻击性等级，只能取：高/中/低\n"

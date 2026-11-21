@@ -53,6 +53,9 @@ from mylocalai.attention import deep_read_guard as _guard
 
 # 深读**文本口径**（旧版 system_prompt + template）外置到 attn_deep_read.json。
 # 保留原路径名不变：既有调用方与测试按 RULES_PATH 读它，改名即破坏对外行为。
+# deprecated：旧版三段式 system_prompt 已被受控生成的新版提示词取代（见 prompts.json
+# 的 deep_read_system）。本文件仍在运行时被 _load_rules() 读取（_template_fallback
+# 只消费其中的 template 段），system_prompt 段仅为向后兼容保留，受控版见 prompts.json。
 RULES_PATH: Path = Path(__file__).resolve().parent / "attn_deep_read.json"
 
 # 深读**规则**（触发口径 + 受控生成参数 + 护栏禁词）外置到 deep_read_rules.json。
@@ -134,8 +137,12 @@ DEFAULT_ISSUES: Dict[str, Any] = {
 
 # ---- 内置默认：受控生成提示词（文件缺失/写坏时兜底）----
 # 与 prompts.json 的 deep_read_system / deep_read_fewshot 对应。
+# 三段结构（角色身份/任务目标/边界）加在开头；9 条硬规则与输出 schema 原样保留在后。
 DEEP_READ_SYSTEM_PROMPT = """\
-你是社会议题分析助手。严格按以下规则工作：
+【角色身份】你是事实核查链的社会议题受控分析助手，负责把高关注度话题做成受控的结构化社会议题分析。
+【任务目标】你为关注度深读环节达成带证据编号的结构化JSON（议题标签/张力/现象/反方解读/边界/不确定性），全部判断可溯源。
+【边界】你只做受限生成：能选就不让编（issue_tags/level/confidence 全部封闭取值），能填就不让写（evidence_id 只引用给定编号）；证据不足或话题不适合时输出 {"applicable": false}，不硬作分析。
+严格按以下规则工作：
 1. 只能从给定议题清单中选择 issue_tags，不得自创 id；清单外的一律归为 other。
 2. 社会问题只能表述为「A 与 B 之间的张力」，A/B 取自所选议题的 tension 提示；
    禁止写成因果归因（"因为 X 所以 Y"）。
@@ -662,10 +669,12 @@ DEEP_READ_TEMPLATE = """\
 不应被理解为对受众规模的精确断言。
 """
 
-# 旧版三段式 system（**仅作向后兼容保留**：既有调用方与 tests/test_deep_read.py
-# 按 DEEP_READ_SYSTEM_PROMPT 这个名字取它，attn_deep_read.json 也逐字存着它）。
-# 受控生成用的新版提示词是上面第 130 行的 `DEEP_READ_SYSTEM_PROMPT`——
-# 两个常量同名会互相覆盖，所以这里显式改名，并让旧名指向旧版（保持对外行为不变）。
+# 旧版三段式 system（**deprecated，仅作向后兼容保留**：tests/test_deep_read.py 按
+# _LEGACY_DEEP_READ_SYSTEM_PROMPT 这个名字取它，attn_deep_read.json 也逐字存着它）。
+# 受控生成用的新版提示词是上面 `DEEP_READ_SYSTEM_PROMPT`（prompts.json 的
+# deep_read_system 段，三段结构版）——两个常量同名会互相覆盖，所以这里显式改名。
+# 运行时链路（_template_fallback）只消费 _load_rules() 返回的 template 段；
+# system_prompt 段的值没有任何运行时消费方，仅为兼容旧调用方与测试保留。
 _LEGACY_DEEP_READ_SYSTEM_PROMPT = """\
 你是一名社会心理与舆情分析专家。用户会给你一个「高关注度话题」及其关注度数据，
 请围绕它写一段中文解读，严格按以下三节输出，每节 2-4 条要点：

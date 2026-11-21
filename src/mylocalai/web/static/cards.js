@@ -1253,6 +1253,128 @@
       </div>`;
   }
 
+  /* ---------- 10. 信源速查卡（check_source：单源可信度画像，代码判定） ----------
+     由后端 tools_source 产出：card = {card_type:"source", status, task_status, as_of,
+     degraded, query, resolved{kind,url,host,name,catalog,catalog_anchor,source_id,tier},
+     state, state_label, authority_category, category_label, verified, basis, signals,
+     history, summary, limits, gaps, errors, counts{searches,pages,llm_calls}}。
+     口径诚实铁律：verified/category/signals 全部由代码算出，这里只做中文文字徽章
+     （绿=信源身份已核实 / 琥珀=未核验或仅倾向），不显示任何数值分；"已核实"只指
+     信源身份、永远不指内容。 */
+  const SOURCE_SIGNAL_META = {
+    official_suffix: "官方域名后缀",
+    official_marker: "正文官方标记",
+    inbound_link: "已核验站点直链",
+    cross_mention: "多来源交叉提及",
+  };
+
+  function renderSource(c) {
+    c = cardObj(c);
+    const counts = cardObj(c.counts);
+    const resolved = cardObj(c.resolved);
+    const signals = cardList(c.signals);
+    const limits = cardList(c.limits);
+    const gaps = cardList(c.gaps);
+    const errors = cardList(c.errors);
+    const history = (c.history && typeof c.history === "object"
+      && Object.keys(c.history).length) ? c.history : null;
+    const verified = !!c.verified;
+    const verMeta = verified
+      ? { cls: "green", text: "信源身份已核实" }
+      : { cls: "amber", text: "未核验 / 仅倾向" };
+    const stateText = String(c.state_label || c.state || "未知");
+    const categoryText = String(c.category_label || c.authority_category || "未知");
+    const statusText = EVIDENCE_STATUS[String(c.status || "")] || String(c.status || "未知");
+    const taskText = EVIDENCE_TASK[String(c.task_status || "")] || "";
+    const kindText = ({ url: "网址", domain: "域名", name: "已登记机构名" })[String(resolved.kind || "")] || "未识别";
+    const url = safeUrl(resolved.url);
+    const targetText = escapeHtml(String(resolved.host || resolved.name || "（未识别）"));
+    const targetHtml = url
+      ? `<a href="${url}" target="_blank" rel="noopener nofollow">${targetText}</a>`
+      : targetText;
+    const signalHtml = signals.length
+      ? `<ul class="chat-ev-list">${signals.map((s) =>
+          `<li><span class="chat-ev-stance">${escapeHtml(SOURCE_SIGNAL_META[String(s)] || String(s))}</span></li>`).join("")}</ul>`
+      : '<p class="chat-insight-sub muted">无代码信号：陌生来源不自我认证，只作背景不作结论。</p>';
+    const historyHtml = history
+      ? `<p class="chat-ev-url">历史战绩：${escapeHtml(Object.keys(history).slice(0, 4)
+          .map((k) => `${k}=${String(history[k])}`).join("；"))}</p>`
+      : '<p class="chat-ev-url">历史战绩：无记录</p>';
+    const summaryText = String(c.summary || "");
+    const summaryHtml = summaryText
+      ? `<div class="chat-auth-analysis"><div class="chat-auth-analysis-item"><span class="chat-auth-analysis-label">流水线判定摘要（原文）</span>` +
+        summaryText.split(/\r?\n/).filter((l) => String(l).trim())
+          .map((l) => `<p>${escapeHtml(String(l))}</p>`).join("") + "</div></div>"
+      : "";
+    const limitHtml = limits.length
+      ? `<div class="chat-auth-section-title">本轮的限制</div>` +
+        `<ul class="chat-auth-limits">${limits.map((x) => `<li>${escapeHtml(String(x))}</li>`).join("")}</ul>`
+      : "";
+
+    return `
+      <div class="chat-card chat-card-source">
+        <div class="chat-card-title">🔎 信源速查<span class="badge gray">只评信源 · 不判内容 · 无分数</span>${degradedBadge(c)}</div>
+        <div class="chat-badges">
+          <span class="badge gray">${escapeHtml(statusText)}</span>
+          ${taskText ? `<span class="badge gray">${escapeHtml(taskText)}</span>` : ""}
+          <span class="badge ${verMeta.cls}">${escapeHtml(verMeta.text)}</span>
+          <span class="badge gray">权威类别：${escapeHtml(categoryText)}</span>
+          <span class="badge gray">读取状态：${escapeHtml(stateText)}</span>
+        </div>
+        <p class="chat-insight-sub">输入：${escapeHtml(String(c.query || "（未记录）"))}（按${escapeHtml(kindText)}解析 → ${targetHtml}）</p>
+        <div class="chat-auth-section-title">代码信号（判定依据）</div>
+        ${signalHtml}
+        ${c.basis ? `<p class="chat-ev-url">依据：${escapeHtml(String(c.basis))}</p>` : ""}
+        ${historyHtml}
+        ${summaryHtml}
+        ${limitHtml}
+        ${cardIssueFold(gaps, errors)}
+        <p class="chat-insight-note muted">已执行 ${countText(counts.searches)} 次搜索（本技能不检索）· ${countText(counts.pages)} 次读页 · ${countText(counts.llm_calls)} 次模型调用。判定全部由代码完成；"已核实"只指信源身份、不指内容——要核查具体说法请用事实核查 / 权威核验。</p>
+        ${asOfLine(c.as_of)}
+      </div>`;
+  }
+
+  /* ---------- 11. 辟谣方法指南卡（guide_fact_check：零检索纯知识讲解） ----------
+     由后端 tools_guide 产出：card = {card_type:"guide", status, task_status, as_of,
+     degraded, question, state, answer, steps, follow_up_hint, gaps, errors,
+     counts{searches,pages,llm_calls}}。
+     steps 是代码锁定的查证五步法（不在前端改口径）；answer 逐字透传流水线产物；
+     state=degraded 表示模型讲解降级、内置模板兜底，如实标注。 */
+  function renderGuide(c) {
+    c = cardObj(c);
+    const counts = cardObj(c.counts);
+    const steps = cardList(c.steps);
+    const gaps = cardList(c.gaps);
+    const errors = cardList(c.errors);
+    const statusText = EVIDENCE_STATUS[String(c.status || "")] || String(c.status || "未知");
+    const degradedGuide = String(c.state || "") === "degraded";
+    const stepHtml = steps.length
+      ? `<ol class="chat-auth-limits">${steps.map((s) => `<li>${escapeHtml(String(s))}</li>`).join("")}</ol>`
+      : '<p class="chat-insight-sub muted">（五步法清单缺失，属异常出口）</p>';
+    const answerText = String(c.answer || "");
+    const answerHtml = answerText
+      ? `<div class="chat-auth-section-title">讲解</div>` +
+        answerText.split(/\r?\n/).filter((l) => String(l).trim())
+          .map((l) => `<p>${escapeHtml(String(l))}</p>`).join("")
+      : "";
+    return `
+      <div class="chat-card chat-card-guide">
+        <div class="chat-card-title">🧭 辟谣方法指南<span class="badge gray">只教方法 · 不下结论 · 无分数</span>${degradedBadge(c)}</div>
+        <div class="chat-badges">
+          <span class="badge gray">${escapeHtml(statusText)}</span>
+          ${degradedGuide ? '<span class="badge amber">模型讲解降级（内置五步法模板兜底）</span>' : ""}
+        </div>
+        <p class="chat-insight-sub">问题：${escapeHtml(String(c.question || "（未记录）"))}</p>
+        <div class="chat-auth-section-title">查证五步法</div>
+        ${stepHtml}
+        ${answerHtml}
+        ${c.follow_up_hint ? `<p class="chat-insight-note">下一步：${escapeHtml(String(c.follow_up_hint))}</p>` : ""}
+        ${cardIssueFold(gaps, errors)}
+        <p class="chat-insight-note muted">已执行 ${countText(counts.llm_calls)} 次模型调用；检索 0 次、读页 0 次（本技能零检索零取页）。本卡只教方法，不对具体说法下真假结论——要核查具体说法请用事实核查。</p>
+        ${asOfLine(c.as_of)}
+      </div>`;
+  }
+
   /* ---------- 分发：优先 claim_answer，其次保留既有业务卡片兼容 ---------- */
   function renderCard(payload) {
     if (!payload || typeof payload !== "object") return "";
@@ -1264,6 +1386,8 @@
     if (type === "evidence") return renderEvidence(payload);
     if (type === "research") return renderResearch(payload);
     if (type === "authority") return renderAuthority(payload);
+    if (type === "source") return renderSource(payload);
+    if (type === "guide") return renderGuide(payload);
     if (type === "batch_summary") return renderBatchSummary(payload);
     if (type === "monitor_change") return renderMonitorChange(payload);
     if (type === "conclusion") return renderConclusion(payload);
@@ -1296,6 +1420,7 @@
   window.ChatCards = {
     renderCard, renderClaimAnswer, renderConclusion, renderSpeech, renderHeat,
     renderInsights, renderEvidence, renderResearch, renderAuthority,
+    renderSource, renderGuide,
     renderBatchSummary, renderMonitorChange,
     mountCard, escapeHtml,
   };
