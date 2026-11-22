@@ -245,7 +245,7 @@ def discover_provider(pid: str = Path(..., min_length=1),
         raise HTTPException(status_code=403, detail=(
             f"未获授权向提供方 {pid!r} 外发「获取可用模型」请求"
             f"（目标 {provider['base_url']}）：请先在「隐私与授权」里开启外部处理，"
-            f"并勾选该提供方。后端原文：{exc}")) from exc
+            f"并勾选该提供方（保存后立即生效，无需重启服务）。后端原文：{exc}")) from exc
     except OSError as exc:
         # 注册表内部已把网络类异常翻成 error 字段，这里只是别让意外形状漏成裸 500
         raise HTTPException(

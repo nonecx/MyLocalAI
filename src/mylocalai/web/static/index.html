@@ -101,9 +101,10 @@
     </div>
   </div>
 
-  <!-- 设置弹层（模型管理）：骨架只放容器，内容由 settings.js 渲染；
+  <!-- 设置弹层（模型管理 + 隐私与授权）：骨架只放容器，内容由 settings.js 渲染；
        关闭途径三条（关闭按钮 / 点遮罩 / Esc）与焦点进出在 shell.js + settings.js 里。
-       左栏导航默认选中「模型」；「隐私与授权」本期只给说明与跳转。 -->
+       左栏导航默认选中「模型」；「隐私与授权」是可操作面板（外部处理总开关 +
+       提供方勾选 + 保存，保存后立即生效、无需重启服务），骨架与说明文字也在 settings.js。 -->
   <div id="settingsDialog" class="settings-dialog hidden" role="dialog" aria-modal="true"
     aria-labelledby="settingsTitle">
     <div class="settings-dialog-card">

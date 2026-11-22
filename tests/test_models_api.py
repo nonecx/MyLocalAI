@@ -563,6 +563,52 @@ class PayloadValidationApiTest(ModelsApiTestBase):
         self.assertIn("ID", resp.json()["detail"])
 
 
+class PrivacyPreferencesApiTest(ModelsApiTestBase):
+    """PUT /api/privacy/preferences（设置面板「隐私与授权」保存）：成功视图 + 400 校验。
+
+    覆盖 HTTP 层契约（web/privacy_api.py）；校验规则本体在 core/privacy.py 的
+    _validated。夹具沿用 ModelsApiTestBase：偏好文件重定向到临时目录，
+    绝不碰真实 data/。
+    """
+
+    def _payload(self, **overrides) -> dict:
+        raw = json.loads(json.dumps(DEFAULT_PREFERENCES))
+        raw.update(overrides)
+        return raw
+
+    def test_put_preferences_saves_and_returns_view_with_warning(self):
+        """保存成功 → 200，返回视图含 warning 字段；GET 读回磁盘现状；llm 缓存被重置。"""
+        from mylocalai.web import privacy_api
+        payload = self._payload(external_processing_enabled=True,
+                                external_processing_providers=["acme", "deepseek"])
+        with mock.patch.object(privacy_api.llm_client, "reset_cache") as reset:
+            resp = self.client.put("/api/privacy/preferences", json=payload)
+        self.assertEqual(200, resp.status_code, resp.text)
+        reset.assert_called_once()          # 保存后自动 reset_cache：面板"保存即生效"的根据
+        view = resp.json()
+        for key in ("schema_version", "save_enabled", "retention_days",
+                    "external_processing_enabled", "external_processing_providers", "warning"):
+            self.assertIn(key, view, f"PUT /api/privacy/preferences 响应缺少 {key}")
+        self.assertTrue(view["external_processing_enabled"])
+        self.assertEqual(["acme", "deepseek"], view["external_processing_providers"])
+        self.assertEqual("", view["warning"], "写盘正常的保存成功路径 warning 应为空")
+
+        # GET 读回的是磁盘现状（同一份临时文件里的偏好）
+        got = self.client.get("/api/privacy/preferences")
+        self.assertEqual(200, got.status_code, got.text)
+        self.assertEqual(view["external_processing_providers"],
+                         got.json()["external_processing_providers"])
+
+    def test_put_preferences_rejects_providers_while_external_disabled(self):
+        """总开关关闭 + 提供方非空 → 400（fail-closed），且不写盘。"""
+        payload = self._payload(external_processing_enabled=False,
+                                external_processing_providers=["acme"])
+        resp = self.client.put("/api/privacy/preferences", json=payload)
+        self.assertEqual(400, resp.status_code, resp.text)
+        self.assertIn("external processing is disabled", resp.json()["detail"])
+        self.assertFalse(self.prefs_path.exists(), "校验失败的请求不该写盘")
+
+
 class RouteRegistrationTest(ModelsApiTestBase):
     """路由表自洽：规格 §3.2 的九个端点真的注册进了 app（含方法）。"""
 

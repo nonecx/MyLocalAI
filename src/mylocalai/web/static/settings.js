@@ -1,5 +1,5 @@
 /* ============================================================
-   settings.js —— 设置弹层（本期只有「模型」面板 + 隐私说明页）
+   settings.js —— 设置弹层（「模型」面板 + 可操作的「隐私与授权」面板）
    与 shell.js / chat.js 同风格：普通 <script>、无框架、无构建步骤。
    职责：
      - 对外只暴露 window.SettingsPanel = { open, close, isOpen }，
@@ -9,6 +9,9 @@
        API 密钥 / 启用）+ 保存 / 设为当前 / 删除；
      - 模型目录：卡片式（上下文窗口 / 最大输出 token / 输入类型 /
        推理等级档位）+ 添加模型 / 保存模型目录 / 获取可用模型 / 恢复默认模型；
+     - 隐私与授权：外部处理总开关 + 提供方勾选清单 + 保存（PUT
+       /api/privacy/preferences 完整载荷，save_enabled / retention_days 按
+       GET 到的原值回传），保存后立即生效、无需重启服务；
      - 所有 HTTP 路径集中在 SETTINGS_API，与 web/models_api.py 逐条对应，
        tests/test_models_ui.py 会把它和后端路由表做自洽比对；
      - 写操作成功后一律重新 GET /api/models 全量刷新（以磁盘现状为准，
@@ -180,6 +183,7 @@
     creating: false,   // true = 正在填「新建提供方」表单（此时 selectedPid 为 null）
     models: [],        // 当前提供方的模型草稿（含新增未保存的卡）
     discover: null,    // 最近一次 /discover 结果 { pid, baseUrl, count, error, models[] }
+    privacy: null,     // 隐私偏好 { data, error }：进「隐私与授权」时 GET，保存后用 PUT 响应刷新
     busy: false,       // 有请求在跑：挡住重复点击
     lastFocus: null,   // 打开弹层前的焦点，关闭时还回去
   };
@@ -268,6 +272,7 @@
       if (trigger) trigger.setAttribute("aria-expanded", "true");
       setActiveNav(state.tab);
       showStatus("");
+      state.privacy = null;             // 每次打开都重新 GET 隐私偏好：看到的一定是磁盘现状
       renderPane();                     // 先出骨架，避免打开后一片空白等网络
       const closeBtn = $("#settingsCloseBtn");
       if (closeBtn) closeBtn.focus();    // 焦点进弹层（与 aboutDialog 一致）
@@ -941,7 +946,12 @@
     return section;
   }
 
-  /* ---------- 隐私说明页 ---------- */
+  /* ---------- 隐私与授权面板（总开关 + 提供方勾选 + 保存即生效） ----------
+     偏好来自 GET /api/privacy/preferences（state.privacy 缓存，打开弹层即重置）；
+     提供方清单直接用 GET /api/models 载荷里的 state.data.providers（id/display_name）。
+     保存 = PUT 完整载荷：外部处理两字段用面板草稿，save_enabled / retention_days
+     本期不在面板里改、按 GET 到的原值回传；成功后用 PUT 响应重渲染（含最新 warning），
+     400 时把后端 detail 原文显示在状态区。 */
   function buildPrivacyPane() {
     const wrap = el("div", "settings-privacy");
     const section = el("section", "settings-section");
@@ -954,16 +964,154 @@
     link.target = "_blank";
     link.rel = "noopener noreferrer";
     section.appendChild(link);
+
+    /* 首次渲染先出骨架，异步 GET 完成后 renderPane 换成控件（避免 renderPane→GET→renderPane 死循环） */
+    if (!state.privacy) {
+      section.appendChild(el("p", "settings-empty", "正在载入隐私偏好…"));
+      wrap.appendChild(section);
+      loadPrivacyPreferences();
+      return wrap;
+    }
+    if (state.privacy.error) {
+      section.appendChild(el("p", "settings-empty", "隐私偏好载入失败：" + state.privacy.error));
+      const retry = el("div", "settings-actions");
+      retry.appendChild(button("重新载入", "btn-ghost settings-btn-sm", () => {
+        state.privacy = null;
+        renderPane();
+      }, "重新载入隐私偏好"));
+      section.appendChild(retry);
+      wrap.appendChild(section);
+      return wrap;
+    }
+
+    const prefs = state.privacy.data;
+    if (prefs.warning) {
+      /* 复用配置读取告警的样式（settings-notice）：坏文件 fail-closed 的原因要给人看 */
+      const warn = el("div", "settings-notice");
+      warn.appendChild(el("strong", null, "隐私偏好告警："));
+      warn.appendChild(el("span", null, String(prefs.warning)));
+      section.appendChild(warn);
+    }
+
+    /* 草稿只活在本次渲染内：切换 Tab 或保存成功重渲染都会回到服务端现状 */
+    const draft = {
+      enabled: !!prefs.external_processing_enabled,
+      providers: (Array.isArray(prefs.external_processing_providers)
+        ? prefs.external_processing_providers : []).map(String),
+    };
+
+    /* ① 外部处理总开关 */
+    const toggleGroup = el("div", "settings-check-group");
+    const toggle = checkboxInput(draft.enabled);
+    toggle.id = "settingsPrivacyExternalToggle";
+    const toggleLabel = el("label", "settings-check settings-check-strong");
+    toggleLabel.appendChild(toggle);
+    toggleLabel.appendChild(el("span", null, "允许外部处理（外发请求）"));
+    toggleGroup.appendChild(toggleLabel);
+    section.appendChild(toggleGroup);
     section.appendChild(el("p", "settings-hint",
-      "本弹层只做说明与跳转：修改隐私偏好需要 PUT " + SETTINGS_API.privacyPreferences
-      + "（后续版本的隐私面板再做），本期不在这里写隐私配置。"));
+      "总开关关闭时下方提供方全部禁用并清空勾选（后端不允许「开关关着还授权提供方」）；"
+      + "打开并勾选后，该提供方的「获取可用模型」等外发请求才被放行。"));
+
+    /* ② 提供方勾选清单（display_name + id；总开关关闭时禁用并清空） */
+    section.appendChild(el("div", "settings-field-label", "允许外发的提供方"));
+    const list = el("ul", "settings-discover-list");
+    const boxes = [];
+    const providers = state.data && Array.isArray(state.data.providers) ? state.data.providers : [];
+    if (!providers.length) {
+      list.appendChild(el("li", "settings-empty", "还没有提供方：请先在「模型」页添加提供方，再回来勾选。"));
+    }
+    providers.forEach((provider) => {
+      const item = el("li", "settings-discover-item");
+      const cb = checkboxInput(draft.providers.indexOf(String(provider.id)) >= 0);
+      cb.disabled = !draft.enabled;
+      boxes.push(cb);
+      cb.addEventListener("change", () => {
+        const pid = String(provider.id);
+        if (cb.checked) {
+          if (draft.providers.indexOf(pid) < 0) draft.providers.push(pid);
+        } else {
+          draft.providers = draft.providers.filter((id) => id !== pid);
+        }
+      });
+      const label = el("label", "settings-check");
+      label.appendChild(cb);
+      label.appendChild(el("span", "settings-discover-id", provider.display_name || provider.id || "未知"));
+      label.appendChild(el("span", "settings-discover-owner", provider.id || "未知"));
+      item.appendChild(label);
+      list.appendChild(item);
+    });
+    section.appendChild(list);
+
+    toggle.addEventListener("change", () => {
+      draft.enabled = toggle.checked;
+      if (!draft.enabled) draft.providers = [];     // 开关关闭 = 清空勾选（与后端校验一致）
+      boxes.forEach((box) => {
+        box.disabled = !draft.enabled;
+        if (!draft.enabled) box.checked = false;
+      });
+    });
+
+    /* ③ 保存 + ④ 只读 JSON 链接与本地放行提示已在上方保留 */
+    const actions = el("div", "settings-actions");
+    actions.appendChild(button("保存隐私授权", "btn-primary settings-btn-sm",
+      () => savePrivacyPreferences(draft), "保存隐私授权"));
+    section.appendChild(actions);
+    section.appendChild(el("p", "settings-hint",
+      "保存 = PUT " + SETTINGS_API.privacyPreferences + "（完整载荷：外部处理两字段用上面的勾选状态，"
+      + "数据保留三项按当前值原样回传，本期不在面板里修改保留策略）。"
+      + "保存后立即生效，无需重启服务；localhost / 127.0.0.1 / ::1 的提供方视为本地，无需勾选即可调用。"));
     wrap.appendChild(section);
     return wrap;
+  }
+
+  async function loadPrivacyPreferences() {
+    try {
+      const data = await request("GET", SETTINGS_API.privacyPreferences);
+      state.privacy = { data: data, error: "" };
+    } catch (err) {
+      state.privacy = { data: null, error: err.message };
+    }
+    if (state.tab === "privacy") renderPane();      // 用户可能已切走：不在别的 Tab 上抢渲染
   }
 
   /* ============================================================
      九、写操作：每一处都"先落盘、再全量刷新"
      ============================================================ */
+
+  /* 例外：隐私偏好不在 GET /api/models 载荷里，无法靠 loadAll() 刷新——
+     保存成功后直接把 PUT 响应（含最新 warning）写回 state.privacy 并重渲染。
+     save_enabled / retention_days 按 GET 到的原值回传：面板本期不提供保留策略编辑，
+     也不该在保存授权时"顺手"改掉用户没看到的保留天数。 */
+  async function savePrivacyPreferences(draft) {
+    if (state.busy) return;
+    const prefs = state.privacy && state.privacy.data ? state.privacy.data : null;
+    if (!prefs) {
+      showStatus("error", "隐私偏好尚未载入：等载入完成后再保存。");
+      return;
+    }
+    const body = {
+      save_enabled: Object.assign({}, prefs.save_enabled),
+      retention_days: Object.assign({}, prefs.retention_days),
+      external_processing_enabled: !!draft.enabled,
+      external_processing_providers: draft.providers.slice(),
+    };
+    setBusy(true);
+    try {
+      const saved = await request("PUT", SETTINGS_API.privacyPreferences, body);
+      state.privacy = { data: saved, error: "" };
+      const warning = saved && saved.warning ? String(saved.warning) : "";
+      showStatus(warning ? "warn" : "ok",
+        warning ? "已保存隐私授权，但后端提示：" + warning
+                : "已保存隐私授权：立即生效，无需重启服务。");
+      renderPane();
+    } catch (err) {
+      showStatus("error", err.message);   // 400 时后端 detail 原文已由 request() 拼进消息
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function saveProvider(provider) {
     if (state.busy) return;
     const isNew = !provider;
