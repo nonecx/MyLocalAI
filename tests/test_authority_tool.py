@@ -250,7 +250,8 @@ class TestRegistrationAndValidation(AuthorityToolTestBase):
                                     "args": {"text": TEXT, "junk": 1}})
         self.assertEqual(plan["kind"], "tools")
         self.assertEqual(plan["steps"],
-                         [{"action": "verify_authority", "args": {"text": TEXT}}])
+                         [{"action": "verify_authority", "args": {"text": TEXT},
+                           "step_id": "verify_authority:1", "extra_step_ids": []}])
 
     def test_resolve_action_rejects_write_tools(self):
         """对照：写工具（verify_claim）走结构化通道一律 ToolNotAllowed——写档案必须走

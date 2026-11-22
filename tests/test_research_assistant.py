@@ -191,7 +191,8 @@ class TestRegistrationAndValidation(EvidenceToolTestBase):
                                     "args": {"text": EVIDENCE_TEXT, "junk": 1}})
         self.assertEqual(plan["kind"], "tools")
         self.assertEqual(plan["steps"],
-                         [{"action": "collect_evidence", "args": {"text": EVIDENCE_TEXT}}])
+                         [{"action": "collect_evidence", "args": {"text": EVIDENCE_TEXT},
+                           "step_id": "collect_evidence:1", "extra_step_ids": []}])
 
     def test_resolve_action_rejects_write_tools(self):
         """对照：写工具（verify_claim）走结构化通道一律 ToolNotAllowed——写档案必须走

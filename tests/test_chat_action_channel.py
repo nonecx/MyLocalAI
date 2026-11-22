@@ -280,10 +280,17 @@ class TestLoopResolveActionContract(ChatActionTestBase):
         plan = self.loop.resolve_action({"name": "compute_heat",
                                          "args": {"x": 1, "y": 2, "z": 3, "bogus": 9}})
         self.assertEqual(plan["kind"], "tools")
+        # 编排层（规格 §3）：计划带 plan_id/capability_id；steps 附 step_id/extra_step_ids
+        # （单步能力折叠后恒单元素、无额外 phase 步），args 仍过 schema 规整。
+        self.assertEqual(plan["capability_id"], "topic-understanding")
+        self.assertTrue(str(plan["plan_id"]))
         self.assertEqual(plan["steps"], [{"action": "compute_heat",
-                                          "args": {"x": 1.0, "y": 2.0, "z": 3.0}}])
+                                          "args": {"x": 1.0, "y": 2.0, "z": 3.0},
+                                          "step_id": "compute_heat:1",
+                                          "extra_step_ids": []}])
         plan = self.loop.resolve_action({"name": "insights", "args": {"kind": "WEEKLY"}})
         self.assertEqual(plan["steps"][0]["args"], {"kind": "weekly"})
+        self.assertIsNone(plan["capability_id"])   # 横向工具不注册为能力
 
     def test_write_tools_raise_tool_not_allowed(self):
         for spec in self.loop.registry.catalog():

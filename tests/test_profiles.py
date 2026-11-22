@@ -399,12 +399,13 @@ class TestLoopRolePresentation(unittest.TestCase):
         payload = json.loads(stored[-1]["content"])
         self.assertNotIn("risk_score", payload["card"])
 
-    def test_full_role_card_keeps_risk_score(self):
-        """full 角色（默认档案）：卡片与加角色分家前逐位一致（有 risk_score）。"""
+    def test_full_role_card_also_hides_risk_score(self):
+        """full 角色（默认档案）：2026-11-22 全角色去数值——对话卡同样无 risk_score；
+        presentation 简化语气仍是 layperson 专属（full 不打 simple）。"""
         sid = self.sessions.create_session("全能力会话")
         _out, cards = self._turn(sid)
         card = cards[0]["card"]
-        self.assertEqual(card.get("risk_score"), 62)
+        self.assertNotIn("risk_score", card)
         self.assertNotEqual(card.get("presentation"), "simple")
 
     def test_dossier_lands_in_session_profile(self):
