@@ -141,6 +141,11 @@ cp .env.example .env        # Windows PowerShell: Copy-Item .env.example .env
 `LLM_PROVIDER`；密钥与提供方不匹配时启动自检会直接报错，不会静默把请求发到别家。
 完整变量说明见 `.env.example` 与 `src/mylocalai/rumor/README.md`。
 
+除了改 `.env`，也可以在网页上配置：顶栏「设置」→「模型」Tab 维护提供方、模型目录与
+密钥（保存在本机 `data/model_secrets.json`，接口只回掩码）。该 Tab 顶部有一张**密钥
+体检卡**，显示当前运行时密钥来源——环境变量 / 设置面板保存 / 未配置；未配置时分析
+链路将以降级模式运行、证据发现不可用，卡片会直接提示先选提供方并填密钥。
+
 ## 两条分析路径
 
 | | classic（网站默认 / `main.py`） | agent（谣言识别） |
@@ -351,7 +356,7 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 1761 个用例（unittest discover 全量，2026-11-22 角色 Agent 工作流（编排引擎 +
+离线套件共 1764 个用例（unittest discover 全量，2026-11-22 角色 Agent 工作流（编排引擎 +
 角色工具白名单 + 全面去数值）落地后实测，含编排层 `tests/test_workflow_engine.py` 20 例、
 `tests/test_workflow_claim.py` 13 例、角色白名单 `tests/test_role_allowlists.py` 38 例与
 跨层对拍 `tests/test_workflow_integration.py` 5 例，以及隐私与授权可操作面板的
