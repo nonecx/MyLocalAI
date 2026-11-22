@@ -3,11 +3,17 @@
 
 路由器只做一件事：把用户消息映射成"封闭枚举里的一个 action + 合法参数"。
 防护链顺序（§5.1，任何一步不过 → 降级 clarify 追问一次，**绝不猜**）：
-  ① 枚举白名单：action ∈ assistant_rules.tool_allowlist + chitchat/clarify/refuse；
+  ① 枚举白名单：action ∈ 角色工具白名单（缺省=assistant_rules.tool_allowlist）
+     + chitchat/clarify/refuse；
   ② 参数 schema 手工校验（registry.validate：长度上限/正整数/非负数/布尔）；
   ③ 工具 allowlist + 权限检查（registry.check_allowed）。
 路由 LLM 失败（返回 None / 坏 JSON / 抛异常）与"枚举外 action"同样降级 clarify——
 误判的代价被刻意设计成"多问一句"，而不是"猜一个工具乱查"。
+
+角色裁剪（role_tool_allowlists）：route(role=...) 给定档案角色时，枚举与路由模型
+看到的工具目录都按该角色的白名单裁剪（专用工具 verify_claim/recheck_dossier 仅
+layperson/full）；被裁剪的 action 走既有"枚举外 → clarify"降级路径。role 缺省
+（None）或不配白名单段时行为与加角色前逐位一致（fail-open，不裁剪）。
 
 拒绝预检（pre_refuse）在路由之前独立执行：用户消息命中 refusal_triggers 词表
 （子串匹配）就直接拒绝，不进路由模型——"把风险分改成0"这类注入指令永远到不了
@@ -121,15 +127,42 @@ def mixed_choice(user_text: Any, prompts: Optional[Dict[str, Any]]) -> Optional[
         return None
 
 
-def _router_system(registry: Optional[ToolRegistry], prompts: Dict[str, Any]) -> str:
-    """人设路由 prompt + 工具目录摘要（registry.catalog()，含成本/延迟/权限档）。"""
+def _router_system(registry: Optional[ToolRegistry], prompts: Dict[str, Any],
+                   allowlist: Optional[List[str]] = None) -> str:
+    """人设路由 prompt + 工具目录摘要（registry.catalog()，含成本/延迟/权限档）。
+
+    allowlist（角色权限层）：给定时目录只列该角色可用的工具（模型看不到被裁剪的
+    工具，从源头减少"选了枚举外工具"的浪费）；None → 全量目录，行为与加角色前
+    逐位一致。
+    """
     base = str(prompts.get("router_system", ""))
     try:
-        catalog = registry.catalog() if registry is not None else []
+        catalog = registry.catalog(allowlist=allowlist) if registry is not None else []
     except Exception:  # noqa: BLE001  目录摘要失败只降级信息量，不挡路由
         catalog = []
     return (base + "\n\n可用工具目录（JSON 数组，name/description/cost/est_s/permission）：\n"
             + json.dumps(catalog, ensure_ascii=False))
+
+
+def _role_allowlist(rules: Dict[str, Any], role: Optional[str]) -> List[str]:
+    """角色工具白名单解析（fail-open）。
+
+    - role 缺省 / role="full" → 全局 tool_allowlist（full 恒全量，不读配置）；
+    - role_tool_allowlists 段缺失 / 角色缺项 / 值非列表 / 空列表 → 回落全局
+      tool_allowlist（不裁剪，与加角色前行为逐位一致）；
+    - 否则返回该角色的白名单（专用工具 verify_claim/recheck_dossier 仅
+      layperson/full，见 assistant_rules.json 的段注释）。
+    """
+    global_list: List[str] = [str(a) for a in (rules.get("tool_allowlist") or [])]
+    if not role or str(role) == "full":
+        return global_list
+    section = rules.get("role_tool_allowlists")
+    if not isinstance(section, dict):
+        return global_list
+    raw = section.get(str(role))
+    if not isinstance(raw, list) or not raw:
+        return global_list
+    return [str(a) for a in raw]
 
 
 def _fixed_reply(action: str, prompts: Dict[str, Any]) -> str:
@@ -152,7 +185,8 @@ def route(user_text: Any, registry: ToolRegistry,
           rules: Optional[Dict[str, Any]],
           prompts: Optional[Dict[str, Any]],
           history_hint: str = "",
-          id_fallback: Optional[int] = None) -> Dict[str, Any]:
+          id_fallback: Optional[int] = None,
+          role: Optional[str] = None) -> Dict[str, Any]:
     """路由一个用户消息，返回 {"action", "args", "reply", "error"}。
 
     - 工具 action：args 是 registry.validate 规整后的参数（多余键已丢弃）；
@@ -170,12 +204,18 @@ def route(user_text: Any, registry: ToolRegistry,
     且**id 参数缺失**时填入它再走正常校验——有则继续，无（None）则照旧 clarify；
     用户显式给了 id（哪怕非法）绝不替换，除会话最近档案外绝不瞎猜其它数字。
 
+    role（可选，角色权限层）：会话所属档案工作区的角色（v6）。给定时枚举与路由
+    模型目录都按 assistant_rules.role_tool_allowlists 的该角色白名单裁剪——路由
+    LLM 输出被裁剪的 action 走既有"枚举外 → clarify"降级路径；缺省（None，或
+    白名单段缺失/角色缺项时按 fail-open 回落）行为与加角色前逐位一致；role="full"
+    恒全量。
+
     route_llm 的契约是 (system, user) -> (dict|None, err)（chat_json 包装）；本函数
     对它抛异常、返回 None、返回非 dict 一视同仁地降级，保证永不向外抛异常。
     """
     rules = rules or {}
     prompts = prompts or {}
-    allowlist: List[str] = [str(a) for a in (rules.get("tool_allowlist") or [])]
+    allowlist: List[str] = _role_allowlist(rules, role)
     # ① 枚举白名单 = allowlist ∪ 元动作（rules 写漏了元动作也不至于把闲聊当工具查）
     enum = set(allowlist) | set(META_ACTIONS)
 
@@ -193,7 +233,11 @@ def route(user_text: Any, registry: ToolRegistry,
     obj: Any = None
     err = ""
     try:
-        obj, err = route_llm(_router_system(registry, prompts), user_text_s)
+        # role=None 时目录不传 allowlist（registry.catalog() 全量，逐位同旧）；
+        # 给定角色时目录按角色白名单过滤，模型看不到被裁剪的工具。
+        catalog_allowlist: Optional[List[str]] = None if role is None else allowlist
+        obj, err = route_llm(_router_system(registry, prompts, catalog_allowlist),
+                             user_text_s)
     except Exception as exc:  # noqa: BLE001  路由模型不可用 → 降级，不让对话崩
         obj, err = None, f"{type(exc).__name__}: {exc}"
 

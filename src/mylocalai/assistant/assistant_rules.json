@@ -73,6 +73,37 @@
     "collect_research", "verify_authority", "check_source", "guide_fact_check",
     "chitchat", "clarify", "refuse"
   ],
+  "role_tool_allowlists": {
+    "_comment": "按 skill 分类裁剪的角色工具白名单：横向工具与通用 7 能力工具全角色可用；专用工具 verify_claim/recheck_dossier 仅 layperson/full（单条说法核查是普通用户工作区的主责）。缺段/缺角色/非列表/空 → 代码回落全局 tool_allowlist（fail-open，不裁剪）；full 恒全量。路由枚举=角色白名单∪chitchat/clarify/refuse，路由模型目录只展示该角色可用的工具。",
+    "layperson": [
+      "verify_claim", "recheck_dossier", "analyze_speech", "check_heat",
+      "compute_heat", "list_dossiers", "get_dossier", "export_card",
+      "search_web", "read_opinions", "deep_read", "insights", "collect_evidence",
+      "collect_research", "verify_authority", "check_source", "guide_fact_check",
+      "chitchat", "clarify", "refuse"
+    ],
+    "analyst": [
+      "analyze_speech", "check_heat", "compute_heat", "list_dossiers",
+      "get_dossier", "export_card", "search_web", "read_opinions", "deep_read",
+      "insights", "collect_evidence", "collect_research", "verify_authority",
+      "check_source", "guide_fact_check",
+      "chitchat", "clarify", "refuse"
+    ],
+    "monitor": [
+      "analyze_speech", "check_heat", "compute_heat", "list_dossiers",
+      "get_dossier", "export_card", "search_web", "read_opinions", "deep_read",
+      "insights", "collect_evidence", "collect_research", "verify_authority",
+      "check_source", "guide_fact_check",
+      "chitchat", "clarify", "refuse"
+    ],
+    "full": [
+      "verify_claim", "recheck_dossier", "analyze_speech", "check_heat",
+      "compute_heat", "list_dossiers", "get_dossier", "export_card",
+      "search_web", "read_opinions", "deep_read", "insights",
+      "collect_evidence", "collect_research", "verify_authority", "check_source",
+      "guide_fact_check", "chitchat", "clarify", "refuse"
+    ]
+  },
   "refusal_triggers": [
     "帮我编造谣言", "编写假消息", "伪装成真实消息", "批量生成谣言",
     "帮我写个钓鱼", "伪造官方通报", "改一下分数", "把风险分改成",

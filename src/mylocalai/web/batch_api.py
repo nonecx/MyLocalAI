@@ -7,6 +7,11 @@
   GET  /api/batch/{id}           批次详情 + 条目 + 汇总
   GET  /api/batch/{id}/stream    SSE 进度（meta/status/progress/card/narrative/done/error）
 
+角色闸（v6 角色权限层）：写/运行端点（POST /api/batch）要求当前激活档案的
+role ∈ {analyst, full}——材料批次是"专业用户·材料分析"工作区的面板能力；
+其余角色 403（诚实中文 detail，不猜不绕）。读端点（GET）不做角色闸，只按
+profile_id 归属分家。
+
 并发：MAX_CONCURRENT_BATCHES（rules.batch.max_concurrent，缺省 2）个信号量，
 超限 503 + Retry-After——与 /api/analyze 的 _Slot 同模式，批量最坏可跑 15 分钟，
 不能把线程池和档案库写堵死。
@@ -82,6 +87,33 @@ def _active_profile_id() -> Optional[int]:
         return int(pid) if pid else None
     except Exception:  # noqa: BLE001  激活态读失败不过滤（安全退化）
         return None
+
+
+#: 材料批次面板的角色闸（语义基线）：写/运行端点仅 analyst（专业用户·材料分析）
+#: 与 full。layperson/monitor 403。
+_BATCH_PANEL_ROLES = ("analyst", "full")
+
+
+def _active_role() -> str:
+    """当前激活档案工作区的角色（沿 web 层 profiles store 单例读，同一数据源）。
+
+    读不到（store 不可用/旧库/档案缺失）→ "full" 不裁剪——与
+    ProfileStore.role_of 的缺省口径一致（fail-open，与既有降级文化同向）。
+    """
+    try:
+        from mylocalai.web.profiles_api import get_profile_store
+        return get_profile_store().role_of(_active_profile_id())
+    except Exception:  # noqa: BLE001  角色读不到不裁剪（安全退化）
+        return "full"
+
+
+def _require_panel_role(roles: tuple, message: str) -> None:
+    """面板服务端角色闸：当前激活档案的角色不在 roles → 403（诚实中文 detail）。
+
+    只用于写/运行端点；读端点按 profile_id 归属分家，不做角色闸。
+    """
+    if _active_role() not in roles:
+        raise HTTPException(status_code=403, detail=message)
 
 
 def _concurrency() -> int:
@@ -166,7 +198,12 @@ def _normalize_items(raw_items: List[Any]) -> List[Dict[str, str]]:
 
 @router.post("/api/batch")
 def batch_create(req: BatchCreateRequest) -> Dict[str, Any]:
-    """建批次并后台开跑。条目形状/超限 → 400；并发名额不足 → 503。"""
+    """建批次并后台开跑。角色不符 → 403；条目形状/超限 → 400；并发名额不足 → 503。"""
+    # 角色闸最先（不消耗并发名额、不泄露条目校验细节给无权限角色）
+    _require_panel_role(
+        _BATCH_PANEL_ROLES,
+        "材料批次面板仅对专业用户·材料分析工作区开放（当前工作区角色无此权限），"
+        "请切换档案工作区后再试")
     try:
         items = _normalize_items(req.items)
     except ValueError as exc:
