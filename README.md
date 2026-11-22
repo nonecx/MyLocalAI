@@ -117,8 +117,11 @@ cp .env.example .env        # Windows PowerShell: Copy-Item .env.example .env
 
 # 2b. 首次运行授权（默认 fail-closed，不授权就不落盘、不外发）
 #     保存三类数据 + 授权外部提供方，均在 data/privacy_preferences.json（不入库，见下）
+#     网页端：顶栏「设置」→「隐私与授权」→ 开「允许外部处理」总开关、勾选提供方
+#     →「保存隐私授权」；保存后立即生效、无需重启服务；localhost / 127.0.0.1 / ::1
+#     的提供方视为本地、自动放行；数据保留三项本期不在面板里改（保存时原值回传）
 #     GET  /api/privacy/preferences   查看当前授权
-#     PUT  /api/privacy/preferences   设置（网页端调用或 curl 均可）
+#     PUT  /api/privacy/preferences   设置（面板保存走这条；也可 curl 直调）
 
 # 3. 自检 + 跑一次分析
 .venv/Scripts/python.exe tests/smoke_api.py            # 配置自检 + 连通性
@@ -353,10 +356,11 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 1761 个用例（unittest discover 全量，2026-11-22 角色 Agent 工作流（编排引擎 +
+离线套件共 1764 个用例（unittest discover 全量，2026-11-22 角色 Agent 工作流（编排引擎 +
 角色工具白名单 + 全面去数值）落地后实测，含编排层 `tests/test_workflow_engine.py` 20 例、
 `tests/test_workflow_claim.py` 13 例、角色白名单 `tests/test_role_allowlists.py` 38 例与
-跨层对拍 `tests/test_workflow_integration.py` 5 例；**M4 起由 `tests.test_readme_counts`
+跨层对拍 `tests/test_workflow_integration.py` 5 例，以及隐私与授权可操作面板的
+UI 契约与 PUT /api/privacy/preferences 接口用例；**M4 起由 `tests.test_readme_counts`
 自动校验此数字与 mock 闸门条数，改动后须同步回写**）：
 M1-M3 的全部回归（详见 git 历史），加上 M4 新增模块：
 **成本真实计数**（llm_client 进程级计数器：真实上游调用数 + usage tokens，缓存命中/

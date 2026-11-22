@@ -275,6 +275,48 @@ class SettingsUiStructureTest(unittest.TestCase):
         self.assertIn("showStatus(\"error\", err.message)", js)
         self.assertIn("payload.detail", js, "错误必须把后端 detail 原文拿出来显示")
 
+    def test_privacy_pane_is_operable(self):
+        """「隐私与授权」面板可操作：总开关 + 提供方勾选 + 保存（PUT 完整载荷）。
+
+        锁定四件事：
+          1. GET /api/privacy/preferences 取当前偏好，打开弹层即重置缓存重新拉取；
+          2. 面板有总开关 / 提供方勾选清单 / 「保存隐私授权」按钮的代码特征，
+             且总开关关闭时禁用并清空勾选（与后端校验规则一致）；
+          3. PUT 载荷把 GET 到的 save_enabled / retention_days 原值合并进去
+             （接口要求完整载荷，面板本期不改保留策略）；
+          4. 响应里 warning 非空时用既有 settings-notice 告警样式显示。
+        """
+        js = self.js
+        # ① 偏好拉取
+        self.assertIn('request("GET", SETTINGS_API.privacyPreferences)', js,
+                      "隐私面板应 GET /api/privacy/preferences 取当前偏好")
+        self.assertIn("state.privacy = null;", js, "打开弹层应重置缓存以重新拉取偏好")
+        # ② 控件特征：总开关 / 提供方清单 / 保存按钮
+        for text in ("允许外部处理（外发请求）", "允许外发的提供方", "保存隐私授权",
+                     "正在载入隐私偏好…", "还没有提供方：请先在「模型」页添加提供方"):
+            self.assertIn(text, js, f"隐私面板缺少控件/提示文案：{text}")
+        self.assertIn('toggle.id = "settingsPrivacyExternalToggle"', js)
+        self.assertIn("cb.disabled = !draft.enabled;", js, "总开关关闭时提供方勾选框应禁用")
+        self.assertIn("draft.providers = [];", js,
+                      "总开关关闭时应清空提供方勾选（后端禁止开关关着还授权提供方）")
+        # ③ PUT 完整载荷：外部处理两字段 + 原样回传的 save_enabled / retention_days
+        self.assertIn('request("PUT", SETTINGS_API.privacyPreferences, body)',
+                      js, "保存隐私授权应 PUT /api/privacy/preferences")
+        self.assertIn("save_enabled: Object.assign({}, prefs.save_enabled)", js,
+                      "PUT 载荷应合并 GET 到的 save_enabled 原值")
+        self.assertIn("retention_days: Object.assign({}, prefs.retention_days)", js,
+                      "PUT 载荷应合并 GET 到的 retention_days 原值")
+        self.assertIn("external_processing_enabled: !!draft.enabled", js)
+        self.assertIn("external_processing_providers: draft.providers.slice()", js)
+        # ④ 告警展示：warning 非空时复用既有告警样式（settings-notice）
+        self.assertIn("隐私偏好告警：", js)
+        self.assertIn('el("div", "settings-notice")', js, "warning 应复用 settings-notice 告警样式")
+        # 跨文件契约：面板用到的 settings-* 类在 settings.css 都有定义（防面板裸奔）
+        for css_class in ("settings-check-group", "settings-check-strong", "settings-field-label",
+                          "settings-discover-list", "settings-discover-item", "settings-notice"):
+            self.assertIn("." + css_class, self.css,
+                          f"settings.css 缺少隐私面板用到的类：{css_class}")
+
 
 class SettingsApiContractTest(unittest.TestCase):
     """前后端路径自洽 + 写操作动词与规格 §3.2 表格逐条一致。"""
@@ -310,7 +352,7 @@ class SettingsApiContractTest(unittest.TestCase):
                           f"SETTINGS_API.{name} = {template} 不在后端路由表里：{sorted(shapes)}")
 
     def test_privacy_path_exists_in_privacy_api(self):
-        """隐私说明页的跳转地址 /api/privacy/preferences 确实存在（只读链接，前端不写）。"""
+        """隐私面板读写的地址 /api/privacy/preferences 确实存在（GET 取偏好 + PUT 保存）。"""
         self.assertIn("privacyPreferences", self.api)
         if not PRIVACY_API.is_file():
             self.skipTest("privacy_api.py 不存在，跳过隐私路径断言")
@@ -318,7 +360,11 @@ class SettingsApiContractTest(unittest.TestCase):
         self.assertIn(_shape(self.api["privacyPreferences"]), shapes)
 
     def test_http_methods_match_contract_table(self):
-        """(HTTP 方法, 路径模板) 与规格 §3.2 表格逐条对应，多一条少一条都算不一致。"""
+        """(HTTP 方法, 路径模板) 与规格 §3.2 表格逐条对应，多一条少一条都算不一致。
+
+        隐私面板两条也纳入契约：GET /api/privacy/preferences 取偏好、
+        PUT /api/privacy/preferences 保存（路由在 web/privacy_api.py）。
+        """
         expected = {
             ("GET", "models"),
             ("POST", "providers"),
@@ -330,6 +376,8 @@ class SettingsApiContractTest(unittest.TestCase):
             ("POST", "providerModels"),
             ("DELETE", "providerModel"),
             ("POST", "providerModelsRestore"),
+            ("GET", "privacyPreferences"),
+            ("PUT", "privacyPreferences"),
         }
         found = set(re.findall(
             r'request\(\s*"(GET|POST|PUT|DELETE)"\s*,\s*apiPath\(\s*SETTINGS_API\.(\w+)', self.js))
@@ -392,7 +440,9 @@ class SettingsConsumedFieldsTest(unittest.TestCase):
 
     #: 规格 §3.1 / §3.3 出现的响应字段（含 limits、model view 内层字段、protocols 的
     #: runtime_supported 与 runtime 段的 key_source，词面 env|stored|none 见规格 §2.1），
-    #: 外加 §3.2 请求体字段 api_key（写密钥时前端要发这个键）
+    #: 外加 §3.2 请求体字段 api_key（写密钥时前端要发这个键）；隐私面板消费的 5 个字段
+    #: 来自 web/privacy_api.py GET/PUT /api/privacy/preferences 的响应视图
+    #: （PrivacyPreferences.as_dict() + warning）
     DOCUMENTED = {
         "schema_version", "providers", "warnings", "protocols", "input_types",
         "reasoning_tiers", "limits", "max_providers", "max_models_per_provider",
@@ -400,6 +450,8 @@ class SettingsConsumedFieldsTest(unittest.TestCase):
         "display_name", "base_url", "protocol_runtime_supported", "runtime_supported",
         "key_env", "key_source", "api_key", "api_key_set", "api_key_source", "api_key_masked", "is_active",
         "default_models", "context_window", "active_tier", "api_value", "owned_by",
+        "save_enabled", "retention_days", "external_processing_enabled",
+        "external_processing_providers", "warning",
     }
 
     @classmethod
