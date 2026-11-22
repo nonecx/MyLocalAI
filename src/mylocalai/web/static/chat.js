@@ -640,6 +640,54 @@
     return na !== nb;
   }
 
+  /* 打分依据折叠区（P2-1，docs/优化方案-2026-11-22.md）：数据源是
+     GET /api/dossiers/{id} → conclusions[].raw_verdict（store.conclusions 已把
+     JSON 还原成对象）。raw_verdict.signals 是 verdict.assess() 确定性打分的逐项
+     依据（"标签：命中词、命中词（±分值）"，只有命中的项才会进列表），
+     score_breakdown 是五类分项分值——正是"为什么是这个分"。
+     口径诚实：dossier_markers 表的结构化 hits（label/hits/points 原始 JSON）
+     目前不在任何前端可达接口里，这里展示的是同一打分链路随结论落库的 signals，
+     不猜字段、不补造；没有任何依据（旧档案 / 言论土壤四档路径）整块不画。 */
+  function latestScoreBasis(c) {
+    const rows = Array.isArray(c && c.conclusions) ? c.conclusions : [];
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const row = rows[i] || {};
+      const raw = (row.raw_verdict && typeof row.raw_verdict === "object")
+        ? row.raw_verdict : null;
+      if (!raw) continue;
+      const signals = Array.isArray(raw.signals)
+        ? raw.signals.map((s) => String(s || "").trim()).filter(Boolean) : [];
+      const breakdown = (raw.score_breakdown && typeof raw.score_breakdown === "object")
+        ? raw.score_breakdown : null;
+      if (signals.length || (breakdown && Object.keys(breakdown).length)) {
+        return { version: row.version, signals: signals, breakdown: breakdown };
+      }
+    }
+    return null;
+  }
+
+  function renderScoreBasis(c) {
+    const basis = latestScoreBasis(c);
+    if (!basis) return "";
+    /* 分项分值只列有贡献（非 0）的项；0 分项与未命中信号一样不画，
+       "没列出的项不加分"由底部 note 统一说明。 */
+    const breakdown = basis.breakdown || {};
+    const bits = Object.keys(breakdown).map((k) => ({ k: k, n: Number(breakdown[k]) }))
+      .filter((x) => Number.isFinite(x.n) && x.n !== 0)
+      .map((x) => `${escapeHtml(String(x.k))} ${escapeHtml(String(x.n))}`);
+    const breakdownRow = bits.length
+      ? `<div class="dim-row"><span class="k">分项分值</span><span class="v">${bits.join(" · ")}</span></div>` : "";
+    const items = basis.signals.map((s) => `<li>${escapeHtml(s)}</li>`).join("");
+    if (!breakdownRow && !items) return "";   // 全零 breakdown 且无信号：没有任何依据可画
+    const ver = (basis.version === null || basis.version === undefined) ? "?" : String(basis.version);
+    return `<details class="chat-evidence-fold chat-score-basis">
+      <summary>打分依据（第 ${escapeHtml(ver)} 版结论，确定性打分逐项加分）</summary>
+      ${breakdownRow ? `<div class="chat-dims">${breakdownRow}</div>` : ""}
+      ${items ? `<ul class="chat-score-basis-list">${items}</ul>` : ""}
+      <p class="chat-insight-note muted">以上为规则引擎的逐项依据（话术标记 + 情绪/逻辑/无来源声明/证据核实，零 LLM）；没列出的项未命中、不加分。</p>
+    </details>`;
+  }
+
   /* 1. 结论版本对比表：标签/分数/as_of 相对上一版有变化的行高亮 */
   function renderConclusionChapter(c) {
     c = c || {};
@@ -664,7 +712,8 @@
     return `<table class="chat-versions-table">
         <thead><tr><th>版本</th><th>标签</th><th>风险分</th><th>as_of</th></tr></thead>
         <tbody>${rows}</tbody></table>
-      <div class="chat-badges">${badges}${degraded}</div>`;
+      <div class="chat-badges">${badges}${degraded}</div>
+      ${renderScoreBasis(c)}`;
   }
 
   /* 2. 证据批次折叠列表（details 原生折叠） */

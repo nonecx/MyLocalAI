@@ -326,6 +326,13 @@ python -m mylocalai.cli --attention-online "某段待分析的文本"
   五区任一接口失败时显示"数据加载失败 + 点击重试"，与"暂无数据"严格区分；信息流条目
   的原文链接一律过 safeUrl 白名单（仅 http/https，`javascript:`/`data:` 等伪协议落 `#`）；
   筛选 chips、抽屉、条目与监控词行均支持键盘操作与 aria 状态。
+- **检索源结构化升级（2026-11-22）**：除爬虫式引擎外支持 **API 型搜索源**（内置 Bing Web
+  Search API / 博查 API 定义，配置外置 `retrieval/search_sources.json`，密钥走
+  `BING_SEARCH_API_KEY`/`BOCHA_API_KEY` 环境变量，未配置自动跳过并计 skipped）——中文
+  搜索引擎反爬导致爬虫源 0 结果时，API 源/RSS 源是取证与巡检的可靠替补；每源
+  `consecutive_failures` 健康计数，连续失败 ≥ 阈值（默认 3，可配）自动跳过一次并降温、
+  成功即回归；多源结果按 URL 归一去重融合；查询级进程内缓存（TTL 300s 可配，只缓存
+  完全成功结果，未授权时连缓存都不查）。
 - 完整口径（架构/数据模型/算法/降级矩阵/测试）：`docs/监测平台规格-2026-11-20.md`。
 
 ## 判定口径可配置
@@ -373,7 +380,9 @@ python -m mylocalai.cli --attention-online "某段待分析的文本"
 | 空输入仍打大模型 | `judge()` 对空/纯空白输入直接短路返回本地结论，**一次 API 都不调**（改造前还会走一次报告生成） |
 | 配置写坏静默生效 | 阈值/封顶/抬分锚点/信源名单写坏时退回默认并留告警（`rules.load_warnings()`）；"整套替换漏段"与"增量文件读取失败"两类告警不会再被形状校验抹掉 |
 | 不同链路复用同一份 LLM 缓存互相串结果 | `llm_client.chat_text/chat_json` 支持 `namespace` 缓存分区名；深读用 `attn_deep_read`，与主分析算出不同缓存键（分区名为空时键与加参数前逐字节相同，不悄悄换掉全部缓存） |
-| 降级了但看不出来 | `/api/health` 增加 `llm{usable, provider, model, base_url, error}`；classic 的分析记录带 `degraded_components`（哪些组件不可用、报告是否走了本地模板回退） |
+| 降级了但看不出来 | `/api/health` 增加 `llm{usable, provider, model, base_url, error}`；classic 的分析记录带 `degraded_components`（哪些组件不可用、报告是否走了本地模板回退）；顶栏状态 chip 显示"模型未配置"警示、设置弹层模型 Tab 顶部有密钥体检卡（key_source 三态）——降级原因一眼可见 |
+| 上游返回空 content | 连续空 content 计数器（非空清零），`/api/health` 的 `llm.empty_content_streak` 暴露——"LongCat 空 content 前科"变成可观测指标 |
+| 备用链从未演练 | `LLM_FALLBACKS` 备用链有打桩演练测试（主链 5xx → 备用链接管、非法名过滤/前向去重）；LLM_PROVIDER 优先级：环境变量 → 设置面板注册表 active → 内置表（面板"设为当前"后需 `.env` 的 `LLM_PROVIDER` 与其一致，或留空交给注册表） |
 | 英文/非 UTF-8 控制台打印中文崩溃 | 各命令行入口统一 `force_utf8_stdio()`（`errors="replace"`） |
 
 ## 测试
@@ -398,7 +407,7 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 1723 个用例（unittest discover 全量，2026-11-22 检索源结构化升级（API 型搜索源 + 源测试）后实测；
+离线套件共 1762 个用例（unittest discover 全量，2026-11-22 优化方案落地（检索 API 源 23+融合 15、注入回归 11、LLM 韧性 10、异步窗口回归 3、领域推断测试隔离）后实测；
 **M4 起由 `tests.test_readme_counts` 自动校验此数字与 mock 闸门条数，改动后须同步回写**）：
 M1-M3 的全部回归（详见 git 历史），加上 M4 新增模块：
 **成本真实计数**（llm_client 进程级计数器：真实上游调用数 + usage tokens，缓存命中/
@@ -466,6 +475,7 @@ CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
 ## 文档
 
 - `docs/Agent工作流规格-v0.1.md` —— **Agent 工作流实施基线**（用户能力、主张/传播证据双维判定、外发授权、分类保存与验收矩阵；规格不等于所有阶段已实现）。
+- `docs/异步状态窗口清单-2026-11-22.md` —— 前后端异步状态窗口系统排查清单（21 处窗口 × 严重度/防护现状/测试锁定，含已修案例范式与中高危窗口的修法建议）。
 - `docs/监测平台规格-2026-11-20.md` —— **监测平台实施基线**（热门信息自动巡检：发现源、两阶段编排、传播风险分级纯函数、隐私 fail-closed、API 与测试矩阵）。
 - `docs/取证技能-2026-11-05.md` —— 取证三技能（领域识别/信源发现/证据检索）的口径文档：分工、执行流程、安全模型、状态取值、预算与局限。
 - `docs/智能助手Skill工作流设计讨论-2026-11-07.md` —— Skill 融入工作流的问题与方向讨论汇总（两套证据链现状、能力分层、混合表达、内部机制不暴露、待决问题清单）。
@@ -511,11 +521,17 @@ CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
   先发本地初扫 markers + 组件级进度，绝不允许白屏干等）。
 - **路由四层防护链**：封闭枚举白名单 → 参数 schema 校验 → 工具 allowlist → 权限；任一步失败降级
   clarify（追问一次），绝不猜；用户消息里的"改分数/删档案/越权"指令一律 refuse，对话层注入由
-  15 个变异用例锁定无效。
+  15 个变异用例锁定无效。**注入免疫有独立回归资产**（2026-11-22 实测本项目拒绝注入指令而
+  通用大模型网页版被逐字攻陷后沉淀）：tests.test_injection_guard，6 类语料×2 变体，
+  每条断言"回合闭合+无注入产物+零模型调用+数据逐位完好"。
 - **卡片三层信息架构**：标签+置信度 → 证据计数/as_of/degraded 徽章 → 证据本前 5 条；
   卡片永远在叙述之前；叙述失败时以卡片+固定模板收尾，永不丢结论。
   折叠细节：结论卡把证据本前 5 条收进 `<details>`，言论土壤卡把完整分析报告收进 `<details>`
   （超长由后端截断并标 `report_truncated`）。
+- **打分依据可视化（2026-11-22）**：档案详情"结论版本对比"章节新增"打分依据"折叠区——
+  最新结论的逐项命中明细（`raw_verdict.signals`：如"来源模糊：听说、网传（+12）"）与
+  五类分项分值，逐项可解释、没列出的项未命中；结论卡尾部另有"📋 复制核查要点"按钮
+  （原说法+结论+置信度+as_of+证据链接序列化进剪贴板，可粘贴给任何大模型深入追问）。
 - **结论卡片口径**（全纯函数派生，大模型不参与打分）：label/risk_score（兼容层）+ confidence +
   evidence_sufficiency（official/unofficial/unknown/total）+ as_of + recheck_conditions +
   verdict_basis 标记；映射外置在 `config/verdict_rules.json` 的 `card` 段。

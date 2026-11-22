@@ -6,6 +6,8 @@
    标记从原分析页卡片"复制 + 参数化"而来（原 app.js 已在单页化中删除，
    卡片渲染逻辑现由本文件独家承载）。
    由 chat.js 调用（chat.js 不直接拼卡片 HTML）。
+   结论卡另带"复制核查要点"按钮（P2-2）：纯事件绑定（document 级委托），
+   序列化文本全部来自卡片已有数据，无新接口、无注入面。
 
    同时是前端公共小工具的唯一归属（U0 收口）：escapeHtml / when / apiPath /
    parseFrame + readSseStream（SSE 拆帧读流，自 chat.js 移入）/
@@ -100,6 +102,107 @@
         </details>`;
   }
 
+  /* ---------- 核查要点复制（P2-2，docs/优化方案-2026-11-22.md） ----------
+     把结论卡的硬结论序列化成可粘贴纯文本，引导用户"拿去任何大模型深入追问"
+     （与本项目确定性核查互补）。文本内容全部来自卡片已有数据（不新增接口）：
+     原说法在点击时从会话流里触发本轮的那条用户气泡读取（拿不到就如实省略该行），
+     其余字段在渲染时序列化进按钮的 data-copy-text 属性（经 escapeHtml，无注入面）。
+     免责语与后端 service.EXPORT_DISCLAIMER 同句（前端复制常量，口径一致）。 */
+  const COPY_DISCLAIMER = "本报告只述证据与立场分布，不对消息真假下结论；请以官方通报为准。";
+
+  function claimBriefText(c, preview) {
+    const conf = String(c.confidence || "");
+    const lines = [];
+    lines.push(`结论：${c.label || "（无标签）"}`);
+    const risk = Number(c.risk_score);
+    if (c.risk_score !== null && c.risk_score !== undefined && Number.isFinite(risk)) {
+      lines.push(`风险分：${risk}/100`);
+    }
+    lines.push(`置信度：${conf || "未知"}`);
+    lines.push(`证据截至（as_of）：${c.as_of || "未知"}`);
+    /* 只放行 http(s)（与 safeUrl 同一白名单口径），一行一条 */
+    const urls = (Array.isArray(preview) ? preview : [])
+      .map((en) => String((en && en.url) || "").trim())
+      .filter((u) => /^https?:\/\//i.test(u));
+    lines.push(urls.length
+      ? `证据链接：\n${urls.map((u) => `- ${u}`).join("\n")}`
+      : "证据链接：无（完整证据本可在档案库查看）");
+    lines.push(`免责声明：${COPY_DISCLAIMER}`);
+    return lines.join("\n");
+  }
+
+  /* 原说法：从卡片往上找本轮消息容器，再向前找最近一条用户气泡（实时与历史
+     回放里用户消息都在触发本轮的助手消息之前）。找不到返回空串，复制文本
+     就省略"原说法"一行——不编造。 */
+  function findSourceText(cardEl) {
+    const turn = (cardEl && cardEl.closest) ? cardEl.closest(".msg") : null;
+    let node = turn ? turn.previousElementSibling : null;
+    while (node) {
+      if (node.classList && node.classList.contains("msg-user")) {
+        const bubble = node.querySelector(".bubble");
+        return bubble ? String(bubble.textContent || "").trim() : "";
+      }
+      node = node.previousElementSibling;
+    }
+    return "";
+  }
+
+  /* 剪贴板：优先 navigator.clipboard（localhost 属安全上下文可直接用），
+     失败/不可用回退 textarea + execCommand（离屏挂载，避免页面滚动跳动）。 */
+  function fallbackCopy(text) {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      return ok;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function writeClipboard(text, done) {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      navigator.clipboard.writeText(text).then(() => done(true), () => done(fallbackCopy(text)));
+    } else {
+      done(fallbackCopy(text));
+    }
+  }
+
+  /* 成功"已复制 ✓" / 失败提示，2 秒后恢复原文案；连点重置计时器。 */
+  function flashCopyState(btn, ok) {
+    const original = btn.dataset.copyLabel || String(btn.textContent || "");
+    btn.dataset.copyLabel = original;
+    btn.textContent = ok ? "已复制 ✓" : "复制失败，请手动选择文本";
+    if (btn.dataset.copyTimer) window.clearTimeout(Number(btn.dataset.copyTimer));
+    btn.dataset.copyTimer = String(window.setTimeout(() => {
+      btn.textContent = original;
+      delete btn.dataset.copyLabel;
+      delete btn.dataset.copyTimer;
+    }, 2000));
+  }
+
+  /* 事件用 document 级委托绑定一次：实时路径（onCard）与历史回放都是直接
+     innerHTML 写入，逐卡绑不现实；委托对本文件产出的所有 .chat-copy-claim 生效。 */
+  function onCopyClaimClick(ev) {
+    const btn = (ev.target && ev.target.closest) ? ev.target.closest(".chat-copy-claim") : null;
+    if (!btn) return;
+    ev.preventDefault();
+    const body = String(btn.dataset.copyText || "");
+    const source = findSourceText(btn);
+    const lines = ["【核查要点】"];
+    if (source) lines.push(`原说法：${source}`);
+    if (body) lines.push(body);
+    writeClipboard(lines.join("\n"), (ok) => flashCopyState(btn, ok));
+  }
+
+  document.addEventListener("click", onCopyClaimClick);
+
   /* ---------- 1. 结论卡（§4.5：标签 + 置信度 + 证据充分度 + as_of + 复审条件） ----------
      新增 evidence_preview / evidence_total（M5 单页化）：把联网证据本的前 5 条折叠
      呈现在卡里，用户不必翻档案就能看到支撑材料；只渲染后端给的条数与链接，
@@ -141,6 +244,10 @@
           <ul>${recheck.map((r) => `<li>${escapeHtml(String(r))}</li>`).join("")}</ul>
         </div>` : ""}
         ${c.verdict_basis ? `<p class="chat-basis">${escapeHtml(String(c.verdict_basis))}</p>` : ""}
+        <div class="chat-copy-row">
+          <button type="button" class="chat-copy-claim" data-copy-text="${escapeHtml(claimBriefText(c, preview))}">📋 复制核查要点</button>
+          <span class="chat-copy-hint">复制后可粘贴给任何大模型继续深入追问</span>
+        </div>
       </div>`;
   }
 

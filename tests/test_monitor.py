@@ -572,6 +572,108 @@ class TestMonitorApi(unittest.TestCase):
         self.assertEqual(self.store.get_subscription(sid)["last_status"], "ok")
         self.assertFalse(thread.is_alive())
 
+    # ------------------------------------------------------------------
+    # 异步状态窗口回归（W1 审计 2026-11-22）：调度线程与 run-now 的并发边界。
+    # scheduler_tick（monitor_api.py:262-274）与 subscriptions_run_now
+    # （monitor_api.py:196-208）共用同一 _running 集合 + _running_lock，两条
+    # 起跑路径必须互斥。这里用阻塞式 stub 把"正在运行"的中间态拉长成可观察
+    # 窗口，双向各锁一条：调度占坑 → run-now 409；run-now 占坑 → 调度跳过。
+    # 全程 stub 执行器（不触检索、不读真实注册表：MYLOCALAI_* 重定向进临时目录）。
+    # ------------------------------------------------------------------
+
+    def _isolate_registry_env(self):
+        """注册表隔离（MYLOCALAI_* 手法，对齐 tests/test_stability_config.py）：
+        隐私偏好/模型注册表/密钥全部重定向进本用例临时目录，绝不读本机真实配置。"""
+        import os
+        patcher = mock.patch.dict("os.environ", {
+            "MYLOCALAI_PRIVACY_PREFERENCES_PATH":
+                str(Path(self.tmp.name) / "privacy.json"),
+            "MYLOCALAI_MODELS_PATH": str(Path(self.tmp.name) / "models.json"),
+            "MYLOCALAI_MODEL_SECRETS_PATH": str(Path(self.tmp.name) / "secrets.json"),
+        }, clear=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_run_now_409_while_scheduler_tick_in_flight(self):
+        """调度线程跑到一半（_running 占坑）时 run-now 到达 → 409，不并发重跑。
+
+        复现窗口：订阅到期 → 调度 tick 起跑（stub 卡在运行中间态）→ 用户此刻
+        点「立即运行」。防重入若在调度路径失守，同一订阅会被两条路径并发各跑
+        一轮（双份外发检索 + 双份运行行）。
+        """
+        from mylocalai.web import monitor_api
+        from mylocalai.assistant import tools_monitor
+        self._isolate_registry_env()
+        sid = self.store.create_subscription(
+            "调度占坑主题", [], [], 3600,
+            profile_id=self.store.active_profile_id())
+        self.addCleanup(lambda: monitor_api._running.discard(sid))
+        entered = threading.Event()
+        gate = threading.Event()
+        result = {}
+
+        def slow_run(store, sub, dossiers, **kwargs):
+            entered.set()
+            gate.wait(5)                      # 卡在运行中间态，放大竞态窗口
+            return {"status": "ok"}
+
+        def tick():
+            result["started"] = monitor_api.scheduler_tick()
+
+        worker = threading.Thread(target=tick, name="tick-race", daemon=True)
+        with mock.patch.object(tools_monitor, "run_subscription",
+                               side_effect=slow_run):
+            worker.start()
+            self.assertTrue(entered.wait(5),
+                            "调度线程应已进入执行器（此刻 _running 必须占坑）")
+            resp = self.client.post(f"/api/subscriptions/{sid}/run-now")
+            self.assertEqual(resp.status_code, 409)
+            self.assertIn("正在运行中", resp.json()["detail"])
+            gate.set()                        # 放行调度轮收尾
+        worker.join(timeout=5)
+        self.assertEqual(result.get("started"), 1)
+        self.assertNotIn(sid, monitor_api._running)   # 收尾必须清坑
+        self.assertEqual(self.store.runs(sid), [])    # 被拒的 run-now 没建运行行
+
+    def test_scheduler_tick_skips_subscription_held_by_run_now(self):
+        """run-now 后台线程运行中（_running 占坑）时调度 tick 命中同一订阅 → 跳过。
+
+        反向锁同一条互斥：run-now 起跑后调度到期命中，tick 必须让行（返回 0、
+        不建第二条运行行），而不是并发重跑。
+        """
+        from mylocalai.web import monitor_api
+        from mylocalai.assistant import tools_monitor
+        self._isolate_registry_env()
+        sid = self.store.create_subscription(
+            "run-now 占坑主题", [], [], 3600,
+            profile_id=self.store.active_profile_id())
+        self.addCleanup(lambda: monitor_api._running.discard(sid))
+        entered = threading.Event()
+        gate = threading.Event()
+
+        def slow_run(store, sub, dossiers, **kwargs):
+            entered.set()
+            gate.wait(5)
+            return {"status": "ok"}
+
+        with mock.patch.object(tools_monitor, "run_subscription",
+                               side_effect=slow_run):
+            resp = self.client.post(f"/api/subscriptions/{sid}/run-now")
+            self.assertEqual(resp.status_code, 202)
+            self.assertTrue(resp.json()["started"])
+            self.assertTrue(entered.wait(5), "run-now 后台线程应已进入执行器")
+            # 订阅此刻到期（next_run_at = created）：调度 tick 必须因 _running 让行
+            self.assertEqual(monitor_api.scheduler_tick(), 0)
+            gate.set()
+        # run-now 线程收尾清坑（防止漏 discard 污染后续用例/下一轮调度）
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and sid in monitor_api._running:
+            threading.Event().wait(0.02)
+        self.assertNotIn(sid, monitor_api._running)
+        # 恰一条运行行：调度让行没有另建（run-now 预建的那一条）
+        self.assertEqual([r["id"] for r in self.store.runs(sid)],
+                         [resp.json()["run_id"]])
+
 
 # ---------------------------------------------------------------------------
 # E. search_all(domains=...) 直测（打桩 providers，不联网）

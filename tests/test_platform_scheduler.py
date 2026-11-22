@@ -152,6 +152,48 @@ class TestSchedulerLifecycle(unittest.TestCase):
             self.assertIn(key, status)
         self.assertEqual(status["interval_s"], 900)
 
+    def test_trigger_async_rapid_double_trigger_never_overlaps(self):
+        """单飞的 check-then-act 窗口（W1 审计 2026-11-22）：trigger_async 先
+        locked() 判断、后由线程持锁（scheduler.py trigger_async → _run_scan），
+        两次手动触发都可能在窗口内拿到 started=True——"不排队不叠加"在该窗口
+        内并不成立（第二条会排队串行跑）。本用例锁定一个在此缺口下仍必须成立
+        的不变量：**两次扫描绝不并发重叠**——日志序必须是 start/end 交替，
+        绝不出现连续两个 start（_scan_lock 的串行保证）。全 stub runner，
+        不联网、不建 store。"""
+        import time
+        gate = threading.Event()
+        log = []
+        log_lock = threading.Lock()
+
+        class GatedRunner:
+            def scan(self, *, queries=None, cancel_check=None):
+                with log_lock:
+                    log.append("start")
+                gate.wait(5.0)                 # 第一次扫描卡住：放大窗口
+                with log_lock:
+                    log.append("end")
+                return dict(OK_SUMMARY)
+
+        sched = PlatformScheduler(runner=GatedRunner(), rules_loader=lambda: RULES_ON)
+        first = sched.trigger_async()
+        second = sched.trigger_async()         # 第一条尚未持锁 → 窗口内可能也是 True
+        self.assertTrue(first)
+        gate.set()
+        # 等所有已受理的扫描收尾（受理几条就收尾几条）
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            with log_lock:
+                if log.count("end") == log.count("start"):
+                    break
+            time.sleep(0.02)
+        with log_lock:
+            self.assertTrue(log, "至少第一条扫描应已起跑")
+            self.assertEqual(log.count("end"), log.count("start"))
+            for prev, cur in zip(log, log[1:]):
+                self.assertFalse(prev == "start" and cur == "start",
+                                 f"出现并发扫描（连续两个 start）：{log}")
+            self.assertLessEqual(len(log), 4)  # 最多两次扫描，不无限叠加
+
 
 class TestCli(unittest.TestCase):
     def setUp(self):

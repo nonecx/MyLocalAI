@@ -1483,3 +1483,49 @@
 }
 
 .key-health-card .key-health-text { font-weight: 600; }
+
+/* ============================================================
+   打分依据可视化 + 要点复制（P2-1/P2-2，docs/优化方案-2026-11-22.md）
+   两处新样式：档案详情的"打分依据"折叠区 / 结论卡的"复制核查要点"按钮。
+   配色只引用 style.css 的 :root 令牌（--primary*/--border/--panel/--muted），
+   不另起色值；折叠排版复用既有 .chat-evidence-fold / .dim-row，不重写骨架。
+   ============================================================ */
+
+/* 档案详情 · 打分依据折叠区（chat.js renderScoreBasis）：signals 逐项一行，
+   与 .chat-ev-list 同款紧凑列表；note 沿用 .chat-insight-note 的浅色口径。 */
+.chat-score-basis { margin-top: 8px; }
+
+.chat-score-basis-list {
+  margin: 6px 0 0 16px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+}
+
+/* 结论卡 · 复制核查要点（cards.js renderConclusion）：按钮走 .btn-ghost 的
+   同款观感（面板底 + 描边 + 主色文字），尺寸收窄成卡片内的小按钮；
+   提示文案浅色小字，与按钮同行、可换行（窄屏不挤爆）。 */
+.chat-copy-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.chat-copy-claim {
+  background: var(--panel);
+  color: var(--primary-dark);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 5px 12px;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.chat-copy-claim:hover { border-color: var(--primary); }
+
+.chat-copy-hint { font-size: 11.5px; color: var(--muted); }
