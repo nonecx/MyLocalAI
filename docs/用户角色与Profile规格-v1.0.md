@@ -127,6 +127,15 @@ loop.py 自动合并且经 review——角色扩展的 `_session_profile`/`_pres
 | monitor 专业·领域监测 | domain-monitoring〔专用〕（topic-understanding 持续复合） | domain_monitoring/SKILL.md、topic_understanding/SKILL.md | roles.monitor（识别"盯着某领域"→ 导流面板；只述变化） | 领域监测面板 + REST + 调度 |
 | full 全部能力 | 十项能力全量 | 十份 SKILL | 不合并（roles.full = {}） | 对话 |
 
+**角色四件事（2026-11-22 起，§1"只改三件事"增补第四件）**：在原有"入口与呈现 /
+数据范围 / 专属面板"三件之上，新增**权限第四件**——对话工具白名单按 skill 分类裁剪
+（`assistant_rules.json role_tool_allowlists`：通用 7 能力全角色可用，专用工具
+verify_claim/recheck_dossier 仅 layperson/full；fail-open 缺配置回落全局白名单）+
+两个面板 REST 写端点服务端角色闸（/api/batch：analyst/full；/api/subscriptions 写端点：
+monitor/full）。**判定语义与防护链不放宽不变**：verdict.assess 打分、隐私 fail-closed、
+路由四层防护链均不随角色放宽（白名单外 action 走既有"枚举外 → clarify"降级）。
+白名单语义、REST 闸与 fail-open 矩阵详见 `docs/角色Agent工作流规格-v1.0.md` §4。
+
 **通用/专用分类**（2026-11-21 分类体系，详见 `docs/Skill分类与提示词规范-v1.0.md`）：
 十项能力按角色绑定分两档——**通用**（横向，任何工作区可用，适用角色=全部）：
 evidence-research / information-collection / authority-verification / topic-understanding /
@@ -157,7 +166,11 @@ domain-monitoring→monitor。分类登记在各能力 SKILL.md 头注释（`分
    通用/专用分类与适用角色按映射表逐字对拍（2026-11-21 起），执行层 9 份 SKILL.md
    注释头的 `分类：通用` / `服务能力：<能力 id>` 映射对拍；
 5. 对拍：prompts.json 的 roles 键 ⊆ `dossier/profiles.py` 的 ROLES（`_` 开头为
-   注释键）；capabilities 目录集合 == 十个预期能力。
+   注释键）；capabilities 目录集合 == 十个预期能力；
+6. 角色工作流对拍（2026-11-22 增补）：`tests/test_workflow_integration.py` 锁定
+   注册表 ↔ 能力 SKILL.md 头注释逐字一致、role_tool_allowlists ↔ 注册表语义对拍、
+   full 恒全量；`tests/test_role_allowlists.py` 锁定白名单配置对拍、fail-open 回落、
+   catalog 过滤、route 角色行为与面板 REST 角色闸。
 
 ## 9. 已知取舍
 

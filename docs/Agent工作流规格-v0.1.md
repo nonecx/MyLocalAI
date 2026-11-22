@@ -197,3 +197,37 @@ SSE 事件顺序继续沿用既有 meta/status/tool_start/scan/progress/card/nar
 - **Phase 6 迁移其他能力**：逐一统一 evidence-research/topic/speech 的状态和 Tool manifest；完成端到端、CI、干净数据库迁移和删除恢复演练。
 
 每阶段通过对应验收矩阵后才进入下一阶段。高风险数据删除、外发默认关闭和主张语义评估需要产品/测试明确签收；不能用文档描述代替运行时测试证据。
+
+## 11. 2026-11-22 实施记录（Phase 3 部分落地）
+
+> 本节是实施回流记录，不改写上方 v0.1 正文契约；实施细节与决策记录见
+> `docs/角色Agent工作流规格-v1.0.md`（下称"新规格"）。
+
+**已落地**（分支 `feature/role-agent-workflows`）：
+
+- **Plan/Run 编排层**：新包 `assistant/workflow/`（registry 能力注册表 / plan 代码展开 /
+  runner 拓扑与三轴归并 / claim 六步执行器），落实 §3.2/§3.3"计划由代码展开、状态
+  分轴记录"；路由 LLM 枚举仍为 action 名（tool_start/前端/测试零破坏），capability_id
+  由注册表从 entry_action 纯代码映射（新规格 D1）。
+- **claim-checking 六步接线**：`workflow/claim.py` 六步执行（提取/事实取证/传播/评估/
+  校验/提交），六步图复用 `core/claim_workflow.py`；传播取证首次接入编排（§5.2 传播
+  记录的编排位落地：授权闸 fail-closed、失败/超预算折 partial 不阻断，记录须过
+  `validate_propagation_record` 校验）。
+- **三轴持久化 v9**：`tool_runs` 只追加 `plan_id/step_id/execution_status/task_status`
+  四列（`dossier/store.py` SCHEMA_VERSION=9，迁移幂等，老调用点逐位不变）。
+- **角色工具白名单**：`assistant_rules.json` 新增 `role_tool_allowlists`（layperson/full
+  全量、analyst/monitor 裁剪专用核查工具，fail-open 回落全局）+ 两个面板 REST 写端点
+  服务端角色闸（/api/batch：analyst/full；/api/subscriptions 写端点：monitor/full）。
+- **界面去数值**：对话卡片全角色剔除 risk_score；§1 第 6 条"前端不显示数值评分"的
+  落地口径裁定为**界面去、数据层留档**（档案库结论行/REST/导出仍留 risk_score 兼容
+  字段；置信度档位徽章与 E 分代理估计保留），见新规格 §5。
+
+**能力数量口径回流**：§1 第 1 条"面向用户的能力共八项" → 实际注册表**十项**——
+2026-11-21 分类第二轮新增第四波通用技能 source-credibility（信源速查）/ fact-check-guide
+（辟谣指南），十项通用/专用分类映射以《Skill分类与提示词规范-v1.0.md》§2 为准。
+
+**仍未落地**（后续阶段）：§4 Tool manifest 全字段（输入/输出 JSON Schema、幂等性、
+错误码、provenance 等完整声明）；§3.1 Router 直接产出 capability_id 封闭结构（现为
+action 名 + 代码映射）；§5.4/§6 五态 UI 与新答案对象的完整前端呈现（claim_answer 已
+在编排层产出，前端仍渲染既有卡片）；§7 数据策略与 §10 Phase 5（三类独立保存开关/
+TTL/删除/WAL/backup 验收）。
