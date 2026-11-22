@@ -250,6 +250,9 @@ def health() -> Dict[str, Any]:
             "model": _llm_client.get_model(),
             "base_url": _llm_client.get_base_url(),
             "error": "" if llm_ok else llm_detail,
+            # 连续返回空正文的真实上游调用次数（LongCat 空 content 前科的可观测面，
+            # P1-2）；拿到非空正文即清零，与 llm_client.empty_content_streak() 同源
+            "empty_content_streak": _llm_client.empty_content_streak(),
         },
         # 模型注册表的加载期告警数：data/models.json 缺失/损坏/版本不符时 > 0
         # （注册表会 fail-soft 退回内置提供方表，服务照常起）。原文在设置面板里看，
