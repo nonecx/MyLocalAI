@@ -14,6 +14,11 @@
 到期的订阅逐轮跑检；多 worker 部署时只有主进程调度（启动时告警，与
 app._warn_if_multiworker 同口径）。频率下限 300s（防把搜索引擎打爆）。
 
+角色闸（v6 角色权限层）：写/运行端点（POST/PUT/DELETE 订阅与 run-now）要求
+当前激活档案的 role ∈ {monitor, full}——领域监测是"专业用户·领域监测"工作区
+的面板能力；其余角色 403（诚实中文 detail）。读端点（GET）不做角色闸，只按
+profile_id 归属分家。
+
 分家：订阅归当前激活档案工作区；跨工作区访问 → 404（不泄露存在性）。
 授权：每轮运行前查 public-search 外发授权，未过 → blocked + 订阅暂停，零外发。
 """
@@ -64,6 +69,33 @@ def _active_profile_id() -> Optional[int]:
         return int(pid) if pid else None
     except Exception:  # noqa: BLE001
         return None
+
+
+#: 领域监测面板的角色闸（语义基线）：写/运行端点仅 monitor（专业用户·领域监测）
+#: 与 full。layperson/analyst 403。
+_MONITOR_PANEL_ROLES = ("monitor", "full")
+
+
+def _active_role() -> str:
+    """当前激活档案工作区的角色（沿 web 层 profiles store 单例读，同一数据源）。
+
+    读不到（store 不可用/旧库/档案缺失）→ "full" 不裁剪——与
+    ProfileStore.role_of 的缺省口径一致（fail-open，与既有降级文化同向）。
+    """
+    try:
+        from mylocalai.web.profiles_api import get_profile_store
+        return get_profile_store().role_of(_active_profile_id())
+    except Exception:  # noqa: BLE001  角色读不到不裁剪（安全退化）
+        return "full"
+
+
+def _require_panel_role(roles: tuple, message: str) -> None:
+    """面板服务端角色闸：当前激活档案的角色不在 roles → 403（诚实中文 detail）。
+
+    只用于写/运行端点；读端点按 profile_id 归属分家，不做角色闸。
+    """
+    if _active_role() not in roles:
+        raise HTTPException(status_code=403, detail=message)
 
 
 class SubscriptionIn(BaseModel):
@@ -123,7 +155,11 @@ def subscriptions_list() -> Dict[str, Any]:
 
 @router.post("/api/subscriptions")
 def subscriptions_create(req: SubscriptionIn) -> Dict[str, Any]:
-    """新建订阅（频率下限/域名上限 → 400）。"""
+    """新建订阅（角色不符 → 403；频率下限/域名上限 → 400）。"""
+    _require_panel_role(
+        _MONITOR_PANEL_ROLES,
+        "领域监测面板仅对专业用户·领域监测工作区开放（当前工作区角色无此权限），"
+        "请切换档案工作区后再试")
     _validate(req.topic, req.keywords, req.domains, req.frequency_s)
     store = get_subscription_store()
     try:
@@ -137,7 +173,11 @@ def subscriptions_create(req: SubscriptionIn) -> Dict[str, Any]:
 
 @router.put("/api/subscriptions/{sub_id}")
 def subscriptions_update(sub_id: int, req: SubscriptionUpdate) -> Dict[str, Any]:
-    """改主题/关键词/域名/频率/启停（跨工作区 404）。"""
+    """改主题/关键词/域名/频率/启停（角色不符 → 403；跨工作区 404）。"""
+    _require_panel_role(
+        _MONITOR_PANEL_ROLES,
+        "领域监测面板仅对专业用户·领域监测工作区开放（当前工作区角色无此权限），"
+        "请切换档案工作区后再试")
     _sub_or_404(int(sub_id))
     fields: Dict[str, Any] = {}
     if req.topic is not None:
@@ -169,7 +209,11 @@ def subscriptions_update(sub_id: int, req: SubscriptionUpdate) -> Dict[str, Any]
 
 @router.delete("/api/subscriptions/{sub_id}")
 def subscriptions_delete(sub_id: int) -> Dict[str, Any]:
-    """删除订阅（跨工作区 404）。"""
+    """删除订阅（角色不符 → 403；跨工作区 404）。"""
+    _require_panel_role(
+        _MONITOR_PANEL_ROLES,
+        "领域监测面板仅对专业用户·领域监测工作区开放（当前工作区角色无此权限），"
+        "请切换档案工作区后再试")
     _sub_or_404(int(sub_id))
     get_subscription_store().delete_subscription(int(sub_id))
     return {"deleted": True, "id": int(sub_id)}
@@ -177,7 +221,11 @@ def subscriptions_delete(sub_id: int) -> Dict[str, Any]:
 
 @router.post("/api/subscriptions/{sub_id}/run-now", status_code=202)
 def subscriptions_run_now(sub_id: int) -> Dict[str, Any]:
-    """立即跑一轮（202 + 后台线程；已在跑 → 409）。"""
+    """立即跑一轮（角色不符 → 403；202 + 后台线程；已在跑 → 409）。"""
+    _require_panel_role(
+        _MONITOR_PANEL_ROLES,
+        "领域监测面板仅对专业用户·领域监测工作区开放（当前工作区角色无此权限），"
+        "请切换档案工作区后再试")
     sub = _sub_or_404(int(sub_id))
     with _running_lock:
         if int(sub_id) in _running:

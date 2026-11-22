@@ -622,16 +622,11 @@
       note || "本节暂无数据（章节按需生成，不预生成、不编造）")}</p>`;
   }
 
-  /* 分数变化判定：null/undefined 视为"无分"，避免 Number(null)=0 的假相同 */
-  function scoreChanged(a, b) {
-    const na = (a === null || a === undefined) ? null : Number(a);
-    const nb = (b === null || b === undefined) ? null : Number(b);
-    if (na === null && nb === null) return false;
-    if (na === null || nb === null) return true;
-    return na !== nb;
-  }
-
-  /* 1. 结论版本对比表：标签/分数/as_of 相对上一版有变化的行高亮 */
+  /* 1. 结论版本对比表（界面去数值）：只展示版本号 + 结论标签 + as_of，
+     读作 v1(误导) → vN(谣言) 的演进；判定用的 risk_score 数值不在表里渲染
+     （载荷/档案里仍留档，前端不消费，字段缺不缺都不崩）。
+     行高亮只看"看得见的变化"：结论标签或 as_of 相对上一版变了才标，
+     不再拿隐藏列的分数差异去高亮一行没有可见变化的行。 */
   function renderConclusionChapter(c) {
     c = c || {};
     const compare = c.compare || {};
@@ -639,21 +634,17 @@
     if (!versions.length) return chapterAbsent("尚无结论版本（还没有跑过核查）");
     const rows = versions.map((v, i) => {
       const prev = i > 0 ? versions[i - 1] : null;
-      const changed = prev && (prev.label !== v.label
-        || scoreChanged(prev.risk_score, v.risk_score)
+      const changed = prev && (String(prev.label || "") !== String(v.label || "")
         || String(prev.as_of || "") !== String(v.as_of || ""));
-      const risk = (v.risk_score === null || v.risk_score === undefined)
-        ? "—" : Number(v.risk_score);
       return `<tr${changed ? ' class="chat-version-changed"' : ""}>
         <td>v${escapeHtml(String(v.version))}</td>
         <td>${escapeHtml(v.label || "—")}</td>
-        <td>${escapeHtml(String(risk))}</td>
         <td>${escapeHtml(String(v.as_of || "未知").replace("T", " "))}</td></tr>`;
     }).join("");
     const badges = compare.changed ? ' <span class="badge amber">标签有变化</span>' : "";
     const degraded = c.degraded ? ' <span class="badge amber">含降级运行</span>' : "";
     return `<table class="chat-versions-table">
-        <thead><tr><th>版本</th><th>标签</th><th>风险分</th><th>as_of</th></tr></thead>
+        <thead><tr><th>版本</th><th>结论标签</th><th>as_of</th></tr></thead>
         <tbody>${rows}</tbody></table>
       <div class="chat-badges">${badges}${degraded}</div>`;
   }

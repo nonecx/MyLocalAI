@@ -227,8 +227,11 @@ class LoopCostBase(unittest.TestCase):
 
 class TestLoopCostWiring(LoopCostBase):
     def test_tool_run_done_cost_and_analysis_runs_real_delta(self):
-        """stub verify 真实走了 1 次 chat 调用 → tool_runs / done.cost /
-        analysis_runs 三处都记真实 delta (1, 321)，而不是 llm_turns 粗口径。"""
+        """stub verify 真实走了 chat 调用 → tool_runs / done.cost /
+        analysis_runs 三处都记真实 delta，而不是 llm_turns 粗口径。
+        2026-11-22 编排化后 verify_claim 含执行器主张提取的 1 次真实上游调用
+        （collect_evidence 探针 1 次）：stub 未收 state 参数，claims 组件在执行器
+        与 stub 内各算一次，合计 (2, 642)；生产路径 state 共享，增量只有提取 1 次。"""
         stub = _StubUpstream(total_tokens=321)
 
         def route_llm(system, user):
@@ -257,14 +260,14 @@ class TestLoopCostWiring(LoopCostBase):
 
         # tool_runs：finish_run 拿到工具段真实 delta（不是 llm_turns=7 的粗口径）
         run = self.sessions.runs_for_session(self.session_id)[0]
-        self.assertEqual((run["requests"], run["tokens"]), (1, 321))
-        # done.cost：路由 0（stub 没走真实上游）+ 工具 1 + 叙述 0
-        self.assertEqual(out["cost"], {"requests": 1, "tokens": 321})
+        self.assertEqual((run["requests"], run["tokens"]), (2, 642))
+        # done.cost：路由 0（stub 没走真实上游）+ 工具段 2 次真实调用 + 叙述 0
+        self.assertEqual(out["cost"], {"requests": 2, "tokens": 642})
         # 档案 analysis_runs：record_analysis 调用点注入的也是真实 delta
         runs = self.dossiers.store.runs(out["dossier_id"])
         self.assertEqual(len(runs), 1)
-        self.assertEqual((runs[0]["requests"], runs[0]["tokens"]), (1, 321))
-        self.assertEqual(len(stub.calls), 1)
+        self.assertEqual((runs[0]["requests"], runs[0]["tokens"]), (2, 642))
+        self.assertEqual(len(stub.calls), 2)
 
     def test_coarse_fallback_when_snapshot_unavailable(self):
         """计数面不可用（usage_snapshot 炸）→ 逐段退回 M4 前粗口径：

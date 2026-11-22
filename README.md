@@ -45,7 +45,7 @@
 │   │   ├── attn_rules.json / deep_read_rules.json / society_issues.json / prompts.json
 │   │   └── README.md           关注度与深读的完整说明（公式、触发、护栏、隔离）
 │   ├── dossier/                档案库（SQLite 单文件 + WAL）
-│   │   ├── store.py            连接工厂、schema_version 顺序迁移（v4 指纹表+话术标记表、v6 Profile 工作区、v7 材料批次、v8 监测订阅）、档案域七表 + 会话域三表
+│   │   ├── store.py            连接工厂、schema_version 顺序迁移（v4 指纹表+话术标记表、v6 Profile 工作区、v7 材料批次、v8 监测订阅、v9 编排 plan/三轴列）、档案域七表 + 会话域三表
 │   │   ├── profiles.py         Profile 工作区（多档案数据分家 + 角色，v6）
 │   │   ├── batches.py          材料批次存储（v7）
 │   │   ├── batch_summary.py    批次汇总纯函数（零 LLM，永不抛）
@@ -74,6 +74,11 @@
 │   │   ├── skills/             技能执行层（SKILL.md 注入模型，注释头带 分类/服务能力）：
 │   │   │                       取证三技能 domain/sources/evidence、资料收集 research/、
 │   │   │                       权威核验 authority/、信源速查 source/、辟谣指南 guide/
+│   │   ├── workflow/           编排引擎（Agent工作流规格 §3 Router/Plan/Run）：registry
+│   │   │                       （能力注册表 10 条 + 6 个横向工具裁定）、plan（expand_plan
+│   │   │                       代码展开，claim-checking 六步复用 core/claim_workflow）、
+│   │   │                       runner（三轴状态/拓扑步序/持久化包装）、claim（六步执行器：
+│   │   │                       state 共享 + 传播取证首次接入 + compile_answer 答案编译）
 │   │   ├── prompts.json        人设与固定话术（system 类提示词带 角色/目标/边界 三段结构，
 │   │   │                       支持 ASSISTANT_PROMPTS_PATH/_EXTRA_PATH 覆盖）——改这里而非改代码
 │   │   └── assistant_rules.json  路由模型/上限/预算/指纹阈值/信源画像阈值/拒绝词表——改这里而非改代码
@@ -283,6 +288,9 @@ python -m mylocalai.cli --attention-online "某段待分析的文本"
   按档位覆盖）、受控生成参数、护栏禁词正则（2026-10-29）
 - `src/mylocalai/attention/society_issues.json` —— 封闭议题清单（40 项，LLM 只能从中选 `issue_tags`）
 - `src/mylocalai/attention/prompts.json` —— 深读受控生成提示词（system 硬约束 + few-shot 正反对比）
+- `src/mylocalai/assistant/assistant_rules.json` 的 `role_tool_allowlists` 段 —— 四角色对话工具
+  白名单（按 skill 分类裁剪：通用 7 能力全角色可用，专用 verify_claim/recheck_dossier 仅
+  layperson+full；缺段/缺角色回落全局 tool_allowlist=fail-open，改这里不改代码，2026-11-22）
 用 `RUMOR_RULES_PATH` / `RUMOR_SOURCES_PATH` / `RUMOR_PROMPTS_PATH` / `LLM_PROVIDERS_PATH` /
 `DEEP_READ_RULES_PATH` / `DEEP_READ_ISSUES_PATH` / `DEEP_READ_PROMPTS_PATH` /
 `ASSISTANT_PROMPTS_PATH`（对话层人设整套替换）/ `ASSISTANT_PROMPTS_EXTRA_PATH`
@@ -340,10 +348,11 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 1682 个用例（unittest discover 全量，2026-11-21 信源可信度速查/辟谣方法指南
-两条通用技能与 skill 分类体系落地后实测，含 `tests/test_source_skills.py` 30 例、
-`tests/test_guide_skills.py` 23 例与 `tests/test_role_prompts.py` 新增分类对拍 2 例；
-**M4 起由 `tests.test_readme_counts` 自动校验此数字与 mock 闸门条数，改动后须同步回写**）：
+离线套件共 1758 个用例（unittest discover 全量，2026-11-22 角色 Agent 工作流（编排引擎 +
+角色工具白名单 + 全面去数值）落地后实测，含编排层 `tests/test_workflow_engine.py` 20 例、
+`tests/test_workflow_claim.py` 13 例、角色白名单 `tests/test_role_allowlists.py` 38 例与
+跨层对拍 `tests/test_workflow_integration.py` 5 例；**M4 起由 `tests.test_readme_counts`
+自动校验此数字与 mock 闸门条数，改动后须同步回写**）：
 M1-M3 的全部回归（详见 git 历史），加上 M4 新增模块：
 **成本真实计数**（llm_client 进程级计数器：真实上游调用数 + usage tokens，缓存命中/
 single-flight 等待不计、取不到 usage 如实 0；loop 按"段前段后快照 delta"接线进
@@ -438,6 +447,9 @@ CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
 - `docs/信息收集与权威核验技能-2026-11-20.md` —— 资料收集（collect_research）与权威核验
   （verify_authority）的实施规格：双流水线、共享采集底座、权威类别与动态核验信号、
   balance/lean 决策表与"1+3"输出口径、预算/状态/失败矩阵与测试矩阵。
+- `docs/角色Agent工作流规格-v1.0.md` —— 四角色工作流（阶段流程/能力编排/白名单/导流/
+  出口姿态）、Plan/Run 编排引擎（能力注册表 + claim-checking 六步接线 + 三轴 v9）、
+  角色工具白名单与面板服务端闸、去数值分层口径、开放问题裁定（横向工具归属等）。
 - `docs/Skill分类与提示词规范-v1.0.md` —— skill 通用/专用分类体系（按角色绑定）、
   提示词【角色身份/任务目标/边界】三段结构、谣言引擎链提示词外置与
   ASSISTANT_PROMPTS_PATH 覆盖机制、信源可信度速查/辟谣方法指南两条新能力的实施记录。
@@ -551,6 +563,22 @@ CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
   环境变量覆盖，坏配置降级留 `loop.prompts_warnings()`；attention 旧版文本口径
   `attn_deep_read.json` 标注 deprecated（运行时仅降级模板段被消费，受控版见
   `attention/prompts.json`）。
+- **角色 Agent 工作流与编排引擎**（2026-11-22；详见 `docs/角色Agent工作流规格-v1.0.md`）：
+  按《Agent工作流规格》§3 落地 Plan/Run 编排层——`assistant/workflow/` 能力注册表
+  （10 条能力 + 6 个横向工具裁定：档案查询/导出/检索/画像/观点属对话跟进机制，不注册为
+  能力）+ `expand_plan` 代码展开（模型不拼工具）+ claim-checking 六步执行器
+  （state 共享复用 RumorAgent 完整取证链；**传播取证首次接入**：授权闸 fail-closed、
+  失败 partial 级联不阻断；`compile_answer` 答案编译，旧引擎无引文锚定时 partial+诚实
+  出口）+ 执行三轴（execution_status/task_status/assessment）随 tool_runs v9 落库
+  （plan_id/step_id/两轴新列）。
+  **角色工具白名单**：`assistant_rules.json` 的 `role_tool_allowlists` 按 skill 分类裁剪——
+  通用 7 能力全角色可用，专用 verify_claim/recheck_dossier 仅 layperson+full
+  （analyst/monitor 对话核查走既有 clarify 降级 + addon 导流到面板），fail-open 缺省回落
+  全量；路由工具目录按角色过滤（registry.catalog(allowlist)）；材料批次/领域监测面板
+  REST 加服务端角色闸（写端点 403，读端点仍按工作区归属）。
+  **全面去数值**：界面层去、数据层留档——risk_score 不进任何角色的对话卡片（原 layperson
+  简化卡口径扩展到全角色；档案库/REST/导出留档），情绪强度改档位文案，批次条目与版本
+  对比表以结论标签替代分数；置信度档位徽章与 E 分（关注度代理估计）保留。
 - **MCP 同期交付**：见下节。
 
 ## 记忆与完整性（2026-10-31，M3）

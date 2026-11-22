@@ -229,8 +229,10 @@ class TestSameCoreParity(MCPAssistantTestBase):
         self.assertEqual(inner["label"], "疑似谣言")
         self.assertTrue(str(inner.get("verdict_basis", "")).startswith("verdict"))
         # 顶层并置字段与内层一致（web cards.js 历史回放直接读顶层）
+        # 2026-11-22 全角色去数值：risk_score 不进对话卡片，不在顶层并置字段里
         self.assertEqual(card["label"], inner["label"])
-        self.assertEqual(card["risk_score"], inner["risk_score"])
+        self.assertNotIn("risk_score", inner)
+        self.assertNotIn("risk_score", card)
         suff = inner["evidence_sufficiency"]
         self.assertEqual(suff["official"], 1)                    # stub 官方来源 1 条
         self.assertEqual(suff["total"], 2)

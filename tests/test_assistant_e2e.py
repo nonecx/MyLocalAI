@@ -57,7 +57,8 @@ DEFAULT_VERIFY_RESULT = {
 }
 
 #: chat.js renderConclusion 渲染路径所需字段（整合项1：e2e 锁定卡片载荷齐全）
-CONCLUSION_CARD_FIELDS = ("label", "risk_score", "confidence", "evidence_sufficiency",
+#: 2026-11-22 全角色去数值：risk_score 不进对话卡片（数据层留档），从渲染字段清单移除
+CONCLUSION_CARD_FIELDS = ("label", "confidence", "evidence_sufficiency",
                           "as_of", "recheck_conditions", "verdict_basis")
 
 

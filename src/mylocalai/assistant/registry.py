@@ -113,11 +113,18 @@ class ToolRegistry:
         if spec["permission"] == "write" and not write_enabled:
             raise ToolNotAllowed(f"工具需要写权限: {name}")
 
-    def catalog(self) -> List[Dict[str, Any]]:
-        """给路由 system prompt 的工具摘要（名字 + 一句话 + 成本/延迟档）。"""
+    def catalog(self, allowlist: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """给路由 system prompt 的工具摘要（名字 + 一句话 + 成本/延迟档）。
+
+        allowlist（角色权限层，可选）：给定时只返回名字在清单内的条目——路由模型
+        只看得到该角色可用的工具（assistant_rules.role_tool_allowlists 的角色白名单）；
+        None（缺省）→ 全量目录，与加角色前的行为逐位一致。
+        """
+        names = set(allowlist) if allowlist is not None else None
         return [{"name": t["name"], "description": t["description"],
                  "cost": t["cost"], "est_s": t["est_s"], "permission": t["permission"]}
-                for t in self._tools.values()]
+                for t in self._tools.values()
+                if names is None or t["name"] in names]
 
 
 def text_param(max_len: int = MAX_TEXT_LENGTH):

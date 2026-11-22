@@ -225,15 +225,21 @@ class TestLoopRolePrompts(unittest.TestCase):
         return events
 
     def test_role_prompts_reach_router_and_narrate(self):
-        """三角色：router system 含各自导流关键词，narrate system 含各自 posture。"""
+        """三角色：router system 含各自导流关键词，narrate system 含各自 posture。
+
+        2026-11-22 角色白名单：verify_claim 是专用工具（layperson/full）——analyst/
+        monitor 的对话核查会走枚举外降级 clarify，narrate 不再经过。叙述 posture
+        改用各角色可用的路径触发：普通用户仍走核查，专业角色走闲聊兜底（chitchat
+        无 reply 时 narrate 吃同一份角色合并后的 narrate_system）。
+        """
         cases = {
-            "layperson": ("当前工作区用户是普通用户", "面向普通用户"),
-            "analyst": ("当前工作区用户是专业用户（材料分析）", "面向专业用户"),
-            "monitor": ("当前工作区用户是专业用户（领域监测）", "只述检索结果与变化"),
+            "layperson": ("当前工作区用户是普通用户", "面向普通用户", "verify_claim"),
+            "analyst": ("当前工作区用户是专业用户（材料分析）", "面向专业用户", "chitchat"),
+            "monitor": ("当前工作区用户是专业用户（领域监测）", "只述检索结果与变化", "chitchat"),
         }
-        for index, (role, (router_mark, narrate_mark)) in enumerate(cases.items()):
+        for index, (role, (router_mark, narrate_mark, action)) in enumerate(cases.items()):
             sid = self._session_for(role)
-            route = _stub_route(text=f"网传某说法{index}是真的吗？")
+            route = _stub_route(action=action, text=f"网传某说法{index}是真的吗？")
             narrate = _stub_narrate()
             self._turn(sid, route, narrate)
             self.assertIn(router_mark, route.seen["system"], f"{role} router 缺角色提示词")

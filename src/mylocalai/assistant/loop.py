@@ -43,6 +43,8 @@ from mylocalai.assistant import router as router_mod
 from mylocalai.assistant import (tools_authority, tools_chapters, tools_evidence,
                                  tools_guide, tools_heat, tools_insights, tools_memory,
                                  tools_research, tools_source, tools_verify)
+from mylocalai.assistant.workflow import (capability_for_action, expand_plan,
+                                          plan_step_tool, shell_to_three_axis)
 from mylocalai.assistant.context import build_context
 from mylocalai.assistant.events import EventStream
 from mylocalai.assistant.fingerprint import DEFAULT_SHINGLE_SIZE
@@ -233,22 +235,44 @@ def _add_usage_delta(cost: Dict[str, int], base: Optional[Dict[str, int]],
 #: 卡片 → 角色呈现（v6 多 Profile 分家）：普通用户版隐去的**展示字段**。
 #: 只动呈现、不动判定语义：label/置信度/证据充分度/as_of/复审条件原样保留
 #: （口径诚实铁律：该标的都标）；risk_score 是 verdict.assess 的兼容层数值，
-#: 按 Agent工作流规格 §1.6“前端不显示风险分/置信度等数值评分”的方向，普通用户
-#: 视图不展示——档案详情页与 full/analyst/monitor 角色仍可看到完整数值。
+#: 卡片数值口径（2026-11-22 全面去数值）：risk_score 不进**任何角色**的对话卡片
+#: ——界面层去数值、数据层留档（档案库/REST/导出仍含完整数值）；置信度/档位徽章保留。
 _LAYERSON_HIDDEN_CARD_FIELDS = ("risk_score",)
 
 
 def _present_for_role(card: Dict[str, Any], role: str) -> Dict[str, Any]:
-    """按档案角色调整对话卡片的呈现（layperson = 普通用户简化版）。
+    """按档案角色调整对话卡片的呈现（2026-11-22：全角色去数值 + layperson 简化语气）。
 
-    简化只发生在**对话卡片**（card 事件 + kind="card" 落库的这一份），不改
-    store 里的结论行——历史回放渲染同一份简化卡片，行为自洽。
+    去数值：risk_score 从所有角色的对话卡片剔除（卡片永远在叙述之前的那份），
+    档案库结论行/REST/导出的完整数值不动。layperson 额外打 presentation=simple
+    （简化语气与标题）。调整只发生在**对话卡片**（card 事件 + kind="card" 落库
+    的这一份），历史回放渲染同一份卡片，行为自洽。
     """
-    if role != "layperson" or not isinstance(card, dict):
+    if not isinstance(card, dict):
         return card
     out = {k: v for k, v in card.items() if k not in _LAYERSON_HIDDEN_CARD_FIELDS}
-    out["presentation"] = "simple"
+    if role == "layperson":
+        out["presentation"] = "simple"
     return out
+
+
+def _collapse_plan_steps(wp: Any, args: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """把编排计划折叠成回合执行清单（规格 §3：模型不拼工具，Plan 由代码展开）。
+
+    claim-checking 的六步在执行器（workflow.claim）内部按依赖推进，回合循环对
+    同一承载工具只做**一次** handler 调用——连续的 phase 步折叠为一条执行项，
+    后续 step_id 记入 extra_step_ids，执行后按 plan 文档补 per-step 审计行。
+    单步能力（其余能力与横向工具）折叠后与旧版 steps 形状逐位等价。
+    """
+    collapsed: List[Dict[str, Any]] = []
+    for step in wp.steps:
+        tool = plan_step_tool(step)
+        if collapsed and collapsed[-1]["action"] == tool:
+            collapsed[-1]["extra_step_ids"].append(str(step.step_id))
+            continue
+        collapsed.append({"action": tool, "args": dict(args or {}),
+                          "step_id": str(step.step_id), "extra_step_ids": []})
+    return collapsed
 
 
 def _prompts_for_role(prompts: Dict[str, Any], role: str) -> Dict[str, Any]:
@@ -962,7 +986,13 @@ class AssistantLoop:
         if events is None:
             events = EventStream()
         # 校验放在 try 之前：非法 action 必须抛给调用方，不得被外层兜底折成 error 事件
-        action_plan = self.resolve_action(action) if action is not None else None
+        # 角色白名单（2026-11-22）：action 通道与路由通道共用同一份按角色裁剪的清单
+        if action is not None:
+            _role = str(self._session_profile(self.sessions, int(session_id)).get("role")
+                        or "full")
+            action_plan = self.resolve_action(action, role=_role)
+        else:
+            action_plan = None
         result: Dict[str, Any] = {"session_id": session_id, "reply": "", "action": "",
                                   "card": None, "tool_run_id": None, "dossier_id": None,
                                   "degraded": False, "cost": {"requests": 0, "tokens": 0}}
@@ -1017,7 +1047,8 @@ class AssistantLoop:
 
     def _route_plan(self, user_text: str, history_hint: str = "",
                     id_fallback: Optional[int] = None,
-                    prompts: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                    prompts: Optional[Dict[str, Any]] = None,
+                    role: Optional[str] = None) -> Dict[str, Any]:
         """路由 → 执行计划（refusal / meta / tools 三种）。
 
         history_hint/id_fallback（§5.4 ②）：会话背景（活跃档案卡+最近对话摘要）与
@@ -1027,19 +1058,27 @@ class AssistantLoop:
         prompts：按档案角色合并后的提示词（v6）。None 时用 self.prompts——
         与加角色分家前的行为逐位一致（测试 stub/旧调用路径不受影响）。
 
+        role（2026-11-22 角色工作流）：透传给 router.route 做角色工具白名单裁剪
+        （缺省 None = 全量白名单，行为与旧版逐位一致）。
+
         M2 路由恒产出单个工具 action；这里返回"计划列表"的形状是为 M3 指纹
         "先问再查"的第二槽位预留（先秒回旧结论、后台再重查），执行侧已按
-        max_tool_calls_per_turn 封顶。
+        max_tool_calls_per_turn 封顶。tools 计划带 plan_id/capability_id
+        （编排层 §3：expand_plan 代码展开，模型不拼工具；claim-checking 六步
+        折叠为一次承载工具调用，见 _collapse_plan_steps）。
         """
         res = router_mod.route(user_text, self.registry, self.services["route_llm"],
                                self.rules, prompts if prompts is not None else self.prompts,
-                               history_hint=history_hint, id_fallback=id_fallback)
+                               history_hint=history_hint, id_fallback=id_fallback, role=role)
         if res["action"] in router_mod.META_ACTIONS:
             return {"kind": "meta", "action": res["action"],
                     "reply": res.get("reply", ""), "error": res.get("error", "")}
-        return {"kind": "tools", "steps": [{"action": res["action"], "args": res.get("args", {})}]}
+        wp = expand_plan(res["action"], res.get("args", {}), role=str(role or "full"))
+        return {"kind": "tools", "plan_id": wp.plan_id,
+                "capability_id": capability_for_action(res["action"]),
+                "steps": _collapse_plan_steps(wp, res.get("args", {}))}
 
-    def resolve_action(self, action: Any) -> Dict[str, Any]:
+    def resolve_action(self, action: Any, role: Optional[str] = None) -> Dict[str, Any]:
         """把结构化 action 校验成执行计划（合法即"跳过路由 LLM"的精确输入通道）。
 
         与 router.route 的降级哲学刻意相反：调用方是本地可信前端（web 的 POST
@@ -1055,9 +1094,13 @@ class AssistantLoop:
              一律拒绝：写档案必须经"自然语言 → 路由 → 拒绝词表"的正常对话路径，
              action 通道不提供绕过（测试锁定这一条）。
         参数最后过 registry.validate 规整（只保留声明过的键，越界抛 ValidationError）。
+
+        role（2026-11-22 角色工作流）：action 通道与路由通道共用同一份按角色裁剪的
+        白名单（缺省 None = 全局清单，行为与旧版逐位一致）；tools 计划带
+        plan_id/capability_id（编排层 §3）。
         """
         name, args = action_payload(action)
-        allowlist = [str(a) for a in (self.rules.get("tool_allowlist") or [])]
+        allowlist = router_mod._role_allowlist(self.rules, role)
         spec = self.registry.get(name)
         if spec is None:
             raise ToolNotAllowed(f"未注册的工具: {name}")
@@ -1066,7 +1109,10 @@ class AssistantLoop:
         if str(spec.get("permission")) != "read":
             raise ToolNotAllowed(f"结构化 action 只允许只读工具，拒绝写工具: {name}")
         clean = self.registry.validate(name, args)
-        return {"kind": "tools", "steps": [{"action": name, "args": clean}]}
+        wp = expand_plan(name, clean, role=str(role or "full"))
+        return {"kind": "tools", "plan_id": wp.plan_id,
+                "capability_id": capability_for_action(name),
+                "steps": _collapse_plan_steps(wp, clean)}
 
     # ---- 路由上下文（§5.4 ②：活跃档案卡 + 最近对话摘要） ----
 
@@ -1375,7 +1421,8 @@ class AssistantLoop:
                 route_base = _usage_now()
                 history_hint, last_dossier_id = self._route_context(session_id, history)
                 plan = self._route_plan(user_text, history_hint=history_hint,
-                                        id_fallback=last_dossier_id, prompts=prompts)
+                                        id_fallback=last_dossier_id, prompts=prompts,
+                                        role=profile_role)
                 _add_usage_delta(cost, route_base, fallback_requests=1)
 
             if pending is not None and plan.get("kind") != "tools":
@@ -1438,9 +1485,13 @@ class AssistantLoop:
                     {"action": "get_dossier", "args": {"id": int(hit.get("dossier_id") or 0)}}]}
 
         # ③ 工具回合：先 start_run 拿 run_id，meta 永远是第一个事件（run_id 回传给前端绑定）
+        # 编排层（规格 §3 Plan/Run）：plan_id/step_id 随 run 落库做关联；steps 已折叠为
+        # 承载工具执行清单（claim-checking 六步 = 1 次 handler 调用，见 _collapse_plan_steps）
         max_calls = max(1, int(rules.get("max_tool_calls_per_turn", 2) or 2))
         steps = list(plan["steps"])[:max_calls]   # 上限封顶：超限的计划项不执行（M3 槽位预留）
-        run_id = sessions.start_run(session_id, steps[0]["action"], steps[0]["args"])
+        run_id = sessions.start_run(session_id, steps[0]["action"], steps[0]["args"],
+                                    plan_id=plan.get("plan_id"),
+                                    step_id=steps[0].get("step_id"))
         events.emit("meta", session_id=session_id, run_id=run_id)
         events.emit("status", stage="routing")
 
@@ -1448,11 +1499,13 @@ class AssistantLoop:
         deadline_hit = False   # 轮预算已耗尽：不再开新工具；已有 card 照发（永不因超时丢结论）
         for idx, step in enumerate(steps):
             if idx > 0:
-                run_id = sessions.start_run(session_id, step["action"], step["args"])
+                run_id = sessions.start_run(session_id, step["action"], step["args"],
+                                            plan_id=plan.get("plan_id"),
+                                            step_id=step.get("step_id"))
             if self._cancelled(cancel_check):
                 # 协作取消（§5.3 取消链）：本轮 run 记 cancelled，error 后收尾——
                 # web 端 drain 对 error 收尾已兼容；不再叙述（断开后也送不到前端）。
-                sessions.finish_run(run_id, status="cancelled")
+                sessions.finish_run(run_id, status="cancelled", execution_status="cancelled")
                 events.emit("error", code="cancelled", recoverable=True,
                             message="本轮已取消（用户断开或请求取消）。")
                 result.update(action=str(step["action"]), tool_run_id=run_id, degraded=True)
@@ -1462,7 +1515,8 @@ class AssistantLoop:
             left = self._budget_left()
             if left is not None and left <= 0:
                 deadline_hit = True
-                sessions.finish_run(run_id, status="timeout", degraded=True)
+                sessions.finish_run(run_id, status="timeout", degraded=True,
+                                    execution_status="budget_exhausted")
                 events.emit("error", code="deadline", recoverable=True,
                             message="本轮核查时间预算已用尽，不再开始新的取证。")
                 result.update(action=str(step["action"]), tool_run_id=run_id, degraded=True)
@@ -1486,7 +1540,8 @@ class AssistantLoop:
                 ctx = SimpleNamespace(sessions=sessions,
                                       dossiers=_CostDossiers(dossiers, tool_base),
                                       events=events, cancel_check=cancel_check,
-                                      services=services, profile_id=profile_id)
+                                      services=services, profile_id=profile_id,
+                                      plan_id=plan.get("plan_id"))
                 if spec is None:
                     tool_error = f"工具未注册: {step['action']}"
                 else:
@@ -1507,7 +1562,8 @@ class AssistantLoop:
                                     duration_s=round(duration, 3),
                                     requests=int((tool_delta or {}).get("requests", 0)),
                                     tokens=int((tool_delta or {}).get("tokens", 0)),
-                                    dossier_id=out.get("dossier_id"))
+                                    dossier_id=out.get("dossier_id"),
+                                    execution_status="cancelled")
                 events.emit("error", code="cancelled", recoverable=True,
                             message="本轮已取消（用户断开或请求取消）。")
                 result.update(action=str(step["action"]), tool_run_id=run_id, degraded=True)
@@ -1526,6 +1582,13 @@ class AssistantLoop:
             status = ("error" if tool_error
                       else "timeout" if timed_out
                       else ("ok" if out.get("ok", True) else "degraded"))
+            # 编排三轴（规格 §3.3 Run 分轴）：执行器结果自带两轴顶层键（claim-checking）；
+            # 其余工具从返回外壳拆轴（非外壳按 ok/degraded 合成），随 finish_run 落库。
+            if "execution_status" in out:
+                three = {"execution_status": str(out.get("execution_status") or ""),
+                         "task_status": str(out.get("task_status") or "")}
+            else:
+                three = shell_to_three_axis(out)
             # M4 真实计数：tool_run/done.cost 记工具段真实 delta；快照不可用退回
             # 工具自报的粗口径 out.cost（M4 前口径）
             if tool_delta is not None:
@@ -1536,7 +1599,27 @@ class AssistantLoop:
                             "tokens": int(coarse.get("tokens", 0))}
             executed.append({"step": step, "run_id": run_id, "out": out,
                              "duration": duration, "status": status, "error": tool_error,
-                             "run_cost": run_cost})
+                             "run_cost": run_cost, "three": three})
+
+            # 编排审计行（规格 §3.3 Run 分轴）：claim-checking 的后续 phase 步在执行器
+            # 内部推进，这里按 plan 文档补 per-step tool_run 行（plan_id+step_id+状态），
+            # plan_id 与承载行同源（ctx 透传进执行器）；审计行失败绝不挡回合。
+            extra_ids = step.get("extra_step_ids") or []
+            if extra_ids and isinstance(out.get("plan"), dict):
+                doc_steps = out["plan"].get("steps")
+                if isinstance(doc_steps, dict):
+                    status_of = {str(k): str((v or {}).get("status") or "")
+                                 for k, v in doc_steps.items()}
+                    for sid in extra_ids:
+                        pstatus = status_of.get(str(sid)) or ""
+                        if not pstatus:
+                            continue
+                        try:
+                            rid = sessions.start_run(session_id, str(step["action"]), {},
+                                                     plan_id=plan.get("plan_id"), step_id=sid)
+                            sessions.finish_run(rid, status="ok", execution_status=pstatus)
+                        except Exception:  # noqa: BLE001  审计行失败不影响回合
+                            pass
 
             # ⑤ 卡片永远在叙述之前；卡片同时以 kind="card" 落库
             claim_answer = out.get("claim_answer")
@@ -1548,7 +1631,9 @@ class AssistantLoop:
                                 _CARD_TYPE.get(str(step["action"]), "conclusion"),
                                 card, run_id, role=profile_role,
                                 claim_answer=claim_answer if isinstance(claim_answer, dict) else None)
-                result["card"] = card
+                # 对话产出统一为呈现卡（全角色去数值后的形状）——MCP 同核对照、
+                # web 事件流与 result 三处看到同一份卡片；原始卡只留档案库/REST。
+                result["card"] = _present_for_role(card, profile_role)
             cost["requests"] += int(run_cost.get("requests", 0))
             cost["tokens"] += int(run_cost.get("tokens", 0))
             if out.get("dossier_id") is not None:
@@ -1577,7 +1662,8 @@ class AssistantLoop:
             for e in executed:
                 sessions.finish_run(e["run_id"], status="cancelled", degraded=True,
                                     duration_s=round(e["duration"], 3),
-                                    dossier_id=e["out"].get("dossier_id"))
+                                    dossier_id=e["out"].get("dossier_id"),
+                                    execution_status="cancelled")
             events.emit("error", code="cancelled", recoverable=True,
                         message="本轮已取消（用户断开或请求取消）。")
             result["degraded"] = True
@@ -1618,11 +1704,14 @@ class AssistantLoop:
             out = e["out"]
             run_cost = e["run_cost"]   # M4：工具段真实 delta（粗口径为 fallback）
             degraded = bool(out.get("degraded")) or e["status"] in ("error", "timeout")
+            three = e.get("three") or {}
             sessions.finish_run(e["run_id"], status=e["status"], degraded=degraded,
                                 duration_s=round(e["duration"], 3),
                                 requests=int(run_cost.get("requests", 0)),
                                 tokens=int(run_cost.get("tokens", 0)),
-                                dossier_id=out.get("dossier_id"))
+                                dossier_id=out.get("dossier_id"),
+                                execution_status=three.get("execution_status") or None,
+                                task_status=three.get("task_status") or None)
             events.emit("tool_end", tool=str(e["step"]["action"]),
                         duration_s=round(e["duration"], 3), degraded=degraded,
                         dossier_id=out.get("dossier_id"))
@@ -1645,9 +1734,9 @@ class AssistantLoop:
         payload 交给 renderCard 后按 card_type 分发、直接读顶层字段；实时路径
         onCard 会先解 d.card，两种形状都成立（与 web 层实现逐一对过）。
 
-        role（v6 多 Profile 分家）：layperson（普通用户）走 _present_for_role 简化
-        （隐去 risk_score 数值、标 presentation=simple）后再 emit/落库——实时与
-        历史回放看到同一份简化卡片；其余角色原样。
+        role（v6 多 Profile 分家）：卡片统一经 _present_for_role——2026-11-22 起全角色
+        去数值（risk_score 不进对话卡片，数据层留档），layperson 另打
+        presentation=simple 简化语气；实时与历史回放看到同一份卡片。
         """
         card = _present_for_role(card, role)
         payload: Dict[str, Any] = {"card_type": card_type, "card": card}

@@ -40,6 +40,22 @@
     "情绪化宣泄/普通网络争论": { cls: "info", icon: "💬", desc: "未命中高风险特征组合，属一般性表达" },
   };
 
+  /* 情绪强度分档（界面去数值）：不展示 0-10 数字分，只给高/中/低档位文案。
+     档位线与后端言论四档判定同一条口径——verdict_rules.json 的 speech_tier 段
+     （high_score=7 / suspect_score=5）：>=7 与"高强度"判定线一致，>=5 与
+     "疑似情绪化谣言"线一致，其余为低。展示层只读这两条线，后端调阈值时
+     改 verdict_rules.json 即可，前端此处只保留同一数值作注释口径。
+     分数缺失/非法时不出档位（只留情感倾向枚举），不拿 0 冒充"低"。 */
+  const EMOTION_BAND_HIGH = 7;   // 与 speech_tier.high_score 同线
+  const EMOTION_BAND_SUSPECT = 5; // 与 speech_tier.suspect_score 同线
+  function emotionBand(score) {
+    const n = Number(score);
+    if (score === null || score === undefined || score === "" || !Number.isFinite(n)) return "";
+    if (n >= EMOTION_BAND_HIGH) return "高";
+    if (n >= EMOTION_BAND_SUSPECT) return "中";
+    return "低";
+  }
+
   const HEAT_BAND_CLS = {
     "高关注": "red",
     "中关注": "amber",
@@ -48,6 +64,9 @@
   };
 
   const CONF_CLS = { high: "green", medium: "amber", low: "gray" };
+  /* 置信度是 high/medium/low 三档（档位徽章，不是数值分）：界面只出中文档位
+     文案，未知档位原样透传（escapeHtml 后展示），绝不出现数字。 */
+  const CONF_LABEL = { high: "高", medium: "中", low: "低" };
 
   function degradedBadge(p) {
     return p && p.degraded ? '<span class="badge amber">降级输出</span>' : "";
@@ -94,34 +113,30 @@
   /* ---------- 1. 结论卡（§4.5：标签 + 置信度 + 证据充分度 + as_of + 复审条件） ----------
      新增 evidence_preview / evidence_total（M5 单页化）：把联网证据本的前 5 条折叠
      呈现在卡里，用户不必翻档案就能看到支撑材料；只渲染后端给的条数与链接，
-     前端不推断、不补造任何证据。 */
+     前端不推断、不补造任何证据。
+     界面去数值（分层口径）：判定用的 risk_score 数值不在界面展示——载荷里
+     可能仍有该字段（后端留档），前端只渲染结论标签 + 置信度档位 + 证据计数，
+     字段缺不缺、有没有数值都不崩、都不渲染数字。 */
   function renderConclusion(c) {
     c = c || {};
     const suff = (c.evidence_sufficiency && typeof c.evidence_sufficiency === "object")
       ? c.evidence_sufficiency : {};
     const preview = Array.isArray(c.evidence_preview) ? c.evidence_preview.slice(0, 5) : [];
     const evTotal = Number(c.evidence_total) || 0;
-    const riskRaw = c.risk_score;
-    const risk = Number(riskRaw);
-    const hasRisk = riskRaw !== null && riskRaw !== undefined && Number.isFinite(risk);
     const conf = String(c.confidence || "");
     const recheck = Array.isArray(c.recheck_conditions) ? c.recheck_conditions : [];
-    /* presentation === "simple"（v6 普通用户档案工作区）：后端已隐去 risk_score
-       数值（Agent工作流规格 §1.6 方向），这里换标题并加一行说明——简化必须看得见。 */
+    /* presentation === "simple"（v6 普通用户档案工作区）：换标题并加一行说明，
+       保持 layperson 简化语气——简化必须看得见。全角色都只给标签与档位
+       （不再有"普通视图才藏分数"的差别），说明行只讲"直接给结论 + 档案库可查"。 */
     const simple = c.presentation === "simple";
     const title = simple ? "🧾 核查结果" : "🧾 核查结论";
     return `
       <div class="chat-card chat-card-conclusion${simple ? " chat-card-simple" : ""}">
         <div class="chat-card-title">${title}${simple ? "" : '<span class="badge gray">结论卡</span>'}${degradedBadge(c)}</div>
         <div class="chat-card-label">${escapeHtml(c.label || "（无标签）")}</div>
-        ${hasRisk ? `
-        <div class="score-line">
-          <div class="score-num">风险分 <b>${risk}</b> / 100</div>
-          <div class="score-bar"><i style="width: ${Math.min(100, Math.max(0, risk))}%"></i></div>
-        </div>` : ""}
-        ${simple ? '<p class="chat-simple-note muted">已按普通用户视图简化：不展示风险分数值；完整数值与证据批次可在档案库查看。</p>' : ""}
+        ${simple ? '<p class="chat-simple-note muted">已按普通用户视图简化：直接给结论与证据概况；完整判定细节与证据批次可在档案库查看。</p>' : ""}
         <div class="chat-badges">
-          ${conf ? `<span class="badge ${CONF_CLS[conf] || "gray"}">置信度 ${escapeHtml(conf)}</span>` : ""}
+          ${conf ? `<span class="badge ${CONF_CLS[conf] || "gray"}">置信度 ${escapeHtml(CONF_LABEL[conf] || conf)}</span>` : ""}
           <span class="badge gray">证据充分度：官方 ${Number(suff.official) || 0} · 非官方 ${Number(suff.unofficial) || 0} · 未知 ${Number(suff.unknown) || 0} / 共 ${Number(suff.total) || 0} 条</span>
         </div>
         ${asOfLine(c.as_of)}
@@ -146,7 +161,7 @@
     const l = (p.logic && typeof p.logic === "object") ? p.logic : null;
     const dims = (e || a || l) ? `
         <div class="chat-dims">
-          ${e ? `<div class="dim-row"><span class="k">情感倾向</span><span class="v">${escapeHtml(e.emotion_tendency || "未知")}（强度 ${Number(e.emotion_score) || 0}/10）</span></div>` : ""}
+          ${e ? `<div class="dim-row"><span class="k">情感倾向</span><span class="v">${escapeHtml(e.emotion_tendency || "未知")}${emotionBand(e.emotion_score) ? `（情绪强度：${emotionBand(e.emotion_score)}）` : ""}</span></div>` : ""}
           ${a ? `<div class="dim-row"><span class="k">攻击等级</span><span class="v">${escapeHtml(a.aggression_level || "未知")} · 对象 ${escapeHtml(a.attack_target || "未知")}</span></div>` : ""}
           ${l ? `<div class="dim-row"><span class="k">逻辑关联</span><span class="v">${escapeHtml(l.logic_relevance || "未知")}${l.logic_fallacy && l.logic_fallacy !== "无" ? ` · 谬误：${escapeHtml(l.logic_fallacy)}` : ""}</span></div>` : ""}
         </div>` : "";
@@ -573,6 +588,17 @@
 
   const BATCH_SOURCE_LABEL = { text: "文本", file: "文件", urls: "链接" };
 
+  /* 条目结论文案（界面去数值）：判定用的 risk_score 数值不在条目行展示——
+     有 label（后端 tools_batch 落库的结论标签）就用 label；完成但没拿到 label
+     时给「已核查」中性文案；失败/拦截/未跑等状态已有状态徽章，标签位如实
+     出「—」，不冒充"已核查"也不留"无标签"空话。字段缺失一律不抛错。 */
+  function batchItemLabel(it) {
+    const label = String((it || {}).label || "").trim();
+    if (label) return label;
+    const st = String((it || {}).status || "");
+    return (st === "ok" || st === "done") ? "已核查" : "—";
+  }
+
   /* 档案链接：只接受正整数 id（同 safeUrl 的"白名单才放行"思路），
      产出站内相对路径 /api/dossiers/{id}，不产生任何外链 */
   function batchDossierHref(id) {
@@ -639,18 +665,16 @@
             + `</li>`;
         }).join("")}</ul>` : "";
 
-    /* 条目表：position + 状态徽章 + label（+ url）+ 风险分 + 档案链接 */
+    /* 条目表：position + 状态徽章 + 结论标签（+ url）+ 档案链接。
+       界面去数值：判定分不在条目行展示，标签列走 batchItemLabel 的兜底口径。 */
     const itemHtml = items.length ? `
         <table class="chat-batch-items-table">
-          <thead><tr><th>#</th><th>状态</th><th>标签</th><th>风险分</th><th>档案</th></tr></thead>
+          <thead><tr><th>#</th><th>状态</th><th>结论标签</th><th>档案</th></tr></thead>
           <tbody>${items.map((it) => {
             it = it || {};
             const meta = BATCH_ITEM_STATUS[String(it.status)] || null;
             const statusText = meta ? meta.text : escapeHtml(String(it.status || "未知"));
             const statusCls = meta ? meta.cls : "gray";
-            const risk = Number(it.risk_score);
-            const riskTxt = (it.risk_score !== null && it.risk_score !== undefined
-              && Number.isFinite(risk)) ? String(risk) : "—";
             /* url 是外部内容：只放行 http(s)（safeUrl 同款正则），不给伪协议链接 */
             const url = safeUrl(it.url);
             const urlHtml = url
@@ -663,8 +687,7 @@
             return `<tr>
                 <td>${Number(it.position) || 0}</td>
                 <td><span class="badge ${statusCls}">${statusText}</span></td>
-                <td>${escapeHtml(it.label || "（无标签）")}${urlHtml}</td>
-                <td>${escapeHtml(riskTxt)}</td>
+                <td>${escapeHtml(batchItemLabel(it))}${urlHtml}</td>
                 <td>${dossier}</td></tr>`;
           }).join("")}</tbody>
         </table>` : "";

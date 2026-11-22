@@ -646,16 +646,20 @@
     const smeta = statusMeta(ITEM_STATUS, it.status);
     const status = el("span", `badge ${smeta.cls}`, smeta.text);
     li.appendChild(status);
-    li.appendChild(el("span", "chat-batch-item-label", it.label || "（无标签）"));
+    /* 结论文案（界面去数值）：判定用的 risk_score 数值不在条目行展示——
+       有 label（后端 tools_batch 落库的结论标签）就用 label；完成但没拿到
+       label 时给「已核查」中性文案；失败/拦截/未跑等状态已有状态徽章，
+       标签位不再渲染（不冒充"已核查"），字段缺失一律不抛错。 */
+    const itemLabel = String(it.label || "").trim();
+    if (itemLabel) {
+      li.appendChild(el("span", "chat-batch-item-label", itemLabel));
+    } else if (String(it.status || "") === "ok" || String(it.status || "") === "done") {
+      li.appendChild(el("span", "chat-batch-item-label", "已核查"));
+    }
 
     /* urls 批次的原始链接（外部内容只做纯文本展示，不生成可点外链） */
     const url = String(it.url || "").trim();
     if (url) li.appendChild(el("span", "chat-batch-item-url muted", url));
-
-    const risk = Number(it.risk_score);
-    if (it.risk_score !== null && it.risk_score !== undefined && Number.isFinite(risk)) {
-      li.appendChild(el("span", "chat-batch-item-risk muted", `风险分 ${risk}`));
-    }
     if (it.group_id) {
       li.appendChild(el("span", "chat-batch-item-group", `同源组 ${it.group_id}`));
     }
