@@ -51,8 +51,15 @@
 
   const CONF_CLS = { high: "green", medium: "amber", low: "gray" };
 
+  /* degraded 徽章 + 降级可操作化（P0-2）：徽章旁补一行小字，告诉用户"为什么降级、
+     去哪里修"，不再让"降级输出"三个字变成没有出路的死状态。不区分具体原因
+     （模型未配置 vs 上游故障一律同文案，保持最小改动）；仅 degraded=true 时渲染。
+     文案是静态常量（无用户数据插值），随徽章一起进各渲染器的既有 innerHTML 模板；
+     小字占满标题下一行（.chat-degraded-hint 用 flex-basis:100% 换行，样式在 chat.css）。 */
   function degradedBadge(p) {
-    return p && p.degraded ? '<span class="badge amber">降级输出</span>' : "";
+    if (!p || !p.degraded) return "";
+    return '<span class="badge amber">降级输出</span>'
+      + '<span class="chat-degraded-hint">模型未配置或上游故障：可在 设置 → 模型管理 中检查密钥</span>';
   }
 
   /* as_of 是每张卡的"证据截至时间"，缺省也要明说未知，不许静默省略 */

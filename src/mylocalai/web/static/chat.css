@@ -569,6 +569,9 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  /* 允许换行：degraded 徽章旁的小字（.chat-degraded-hint，flex-basis:100%）
+     要独占标题下一行；子项都放得下时布局与旧行为完全一致。 */
+  flex-wrap: wrap;
   margin-bottom: 8px;
 }
 
@@ -1428,3 +1431,55 @@
   padding: 7px 10px;
   margin-top: 6px;
 }
+
+/* ============================================================
+   密钥健康度显性化（P0-2，docs/优化方案-2026-11-22.md）
+   三处新样式：顶栏 chip 警示态 / 设置弹层体检卡 / 结论卡降级提示行。
+   配色只引用 style.css 的 :root 令牌，浅底与描边用 color-mix 从令牌派生，
+   不硬编码色值；三者均为可换行的行内/块级小元素，窄屏（900px 断点）无
+   独立断点需求，按本文件既有约定不新增 @media。
+   ============================================================ */
+
+/* 顶栏服务状态 chip 警示态：shell.js 在 /api/health 的 llm.usable=false 时把
+   #apiStatus 置为 status-chip warn（服务活着但模型未配置 → 分析将降级）。
+   .status-chip 本体与 ok/bad 两态定义在 style.css，这里只补第三态（跨文件约定）。 */
+.status-chip.warn {
+  background: color-mix(in srgb, var(--warn) 10%, var(--panel));
+  border-color: color-mix(in srgb, var(--warn) 32%, var(--panel));
+  color: var(--warn);
+}
+
+/* 结论卡降级提示行：cards.js degradedBadge 在「降级输出」徽章旁追加的小字，
+   flex-basis 100% 让它独占 .chat-card-title（本文件已给标题加 flex-wrap）的下一行。 */
+.chat-degraded-hint {
+  flex: 1 1 100%;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.5;
+  color: var(--warn);
+}
+
+/* 设置弹层体检卡（跨文件约定）：settings.js「模型」Tab 顶部的密钥体检卡
+   （buildKeyHealthCard）。settings.css 不在本任务改动清单（且 test_models_ui
+   要求 settings.js 用到的 settings-* 类在 settings.css 都有定义），因此盒底
+   复用既有 .settings-notice（圆角/内边距/字号/间距随它），这里只补三态配色变体：
+   none=红（未配置，分析降级）、env=绿（密钥来自环境变量）、secrets=蓝（密钥来自设置面板）。 */
+.key-health-card.key-health-none {
+  border-color: color-mix(in srgb, var(--danger) 32%, var(--panel));
+  background: color-mix(in srgb, var(--danger) 8%, var(--panel));
+  color: var(--danger);
+}
+
+.key-health-card.key-health-env {
+  border-color: color-mix(in srgb, var(--good) 32%, var(--panel));
+  background: color-mix(in srgb, var(--good) 8%, var(--panel));
+  color: var(--good);
+}
+
+.key-health-card.key-health-secrets {
+  border-color: color-mix(in srgb, var(--primary) 32%, var(--panel));
+  background: color-mix(in srgb, var(--primary) 8%, var(--panel));
+  color: var(--primary-dark);
+}
+
+.key-health-card .key-health-text { font-weight: 600; }

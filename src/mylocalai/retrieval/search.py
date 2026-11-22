@@ -8,6 +8,10 @@
     是机会式的，抓不到不影响判定。
   - fetch_article 做了 SSRF 防护：只允许 http/https、解析主机后拒绝私网/环回/
     链路本地地址，限制响应大小与超时——搜索结果里的 URL 是外部输入，不能盲信。
+  - API 型搜索源（P0-1 检索源结构化升级）：清单外置在 search_sources.json，
+    密钥走 key_env 指定的环境变量；enabled + 密钥两者齐备才进默认装配，执行层
+    另有 skip_reason → skipped 计数兜底（不报错、不算降级主因）。授权闸与爬虫
+    源同一条：search_all 的 public-search 闸先于一切 HTTP 外发。
 
 所有函数都不抛异常：失败返回 (空结果, 错误说明) 或 None，由上层记入降级组件。
 """
@@ -16,6 +20,8 @@ from __future__ import annotations
 
 import html as _html
 import ipaddress
+import json
+import logging
 import os
 import re
 import socket
@@ -30,6 +36,8 @@ from . import dns_fallback
 from .sources import FETCH_TIERS, TIER_UNKNOWN, classify_domain, extract_date, normalize_host, tier_rank
 
 dns_fallback.install()   # 系统 DNS 偶发解析不了搜索后端域名，公网 DNS 兜底
+
+_logger = logging.getLogger("mylocalai.retrieval.search")
 
 _HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -235,10 +243,257 @@ class GenericAPIProvider:
         return out, None
 
 
+# ===========================================================================
+# API 型搜索源（search_sources.json 声明 + key_env 环境变量供密钥）
+# ===========================================================================
+
+#: 清单文件位置。不做环境变量整套替换（保持改动面最小）；测试用 monkeypatch
+#: 换这个常量指向临时文件即可。
+_SEARCH_SOURCES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "search_sources.json")
+#: 当前支持的清单版本与协议集合；版本不符/协议未知都按 fail-soft 丢弃并留告警。
+_API_SOURCES_SCHEMA_VERSION = 1
+_API_SOURCE_PROTOCOLS = ("bing", "bocha")
+
+#: 源级字段校验器：合法 → 归一后的配置 dict；不合法 → None（调用方丢弃并告警）。
+_API_SOURCE_FIELDS = {
+    "id": str, "protocol": str, "base_url": str, "key_env": str,
+}
+
+
+def _warn_sources(reason: str) -> None:
+    """对齐 config/rules.py 的告警风格：写进 load_warnings()，不抛异常、不静默。"""
+    try:
+        from mylocalai.config.rules import add_warning
+        add_warning("search_sources.json", reason)
+    except Exception:            # noqa: BLE001  告警通道本身不能成为新的故障点
+        _logger.warning("search_sources.json: %s", reason)
+
+
+def _clear_source_warnings() -> None:
+    """告警只反映**本次**加载结果（同 config 层"同名只留最新"的口径）：先清上一轮。
+
+    私有借取 `_WARNINGS` 与 add_warning 是同一个存储，清的是且仅是本文件自己的两个键，
+    不会碰其它模块的告警（对齐 rules.py "_SHAPE_WARNING_KEYS 只清自己的键"的纪律）。
+    """
+    try:
+        from mylocalai.config.rules import _WARNINGS
+        _WARNINGS.pop("search_sources.json", None)
+        _WARNINGS.pop("search_sources.json#sources", None)
+    except Exception:            # noqa: BLE001
+        pass
+
+
+def load_api_source_configs(path: Optional[str] = None) -> List[Dict[str, object]]:
+    """读 API 型搜索源清单，返回归一后的配置 dict 列表。
+
+    fail-soft 纪律（对齐 config/rules.py 的 _load()）：
+      - 文件不存在 → 合法配置（未启用 API 源），静默返回 []；
+      - JSON 损坏 / 根不是对象 / schema_version 不符 / sources 段不是数组
+        → 返回 [] 并经 add_warning 留告警（load_warnings() 可见）；
+      - 单个源声明缺 id/protocol 未知/base_url 非法 → 丢弃该条并合并告警；
+      - 绝不抛异常：检索主链路不因一个配置文件的笔误而崩。
+    每次调用都重新读盘（文件很小，检索本身是网络 IO 量级）：改 JSON 即生效，
+    不需要重启服务。
+    """
+    _clear_source_warnings()
+    file_path = path or _SEARCH_SOURCES_PATH
+    try:
+        with open(file_path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return []                # 文件被移除 = 明确的不启用，不是故障
+    except Exception as exc:     # noqa: BLE001  JSON 损坏、权限问题等
+        _warn_sources(f"search_sources.json 读取失败（{file_path}）："
+                      f"{type(exc).__name__}: {exc}，已退回无 API 源")
+        return []
+    if not isinstance(data, dict):
+        _warn_sources("search_sources.json 根节点必须是对象，已退回无 API 源")
+        return []
+    version = data.get("schema_version")
+    if version != _API_SOURCES_SCHEMA_VERSION:
+        _warn_sources(f"search_sources.json schema_version 不符（期望 "
+                      f"{_API_SOURCES_SCHEMA_VERSION}，实际 {version!r}），已退回无 API 源")
+        return []
+    rows = data.get("sources")
+    if rows is None:
+        return []                # 没写 sources 段 = 无 API 源（合法）
+    if not isinstance(rows, list):
+        _warn_sources("search_sources.json#sources 必须是数组，已退回无 API 源")
+        return []
+    out: List[Dict[str, object]] = []
+    dropped: List[str] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            dropped.append("（元素不是对象）")
+            continue
+        sid = str(item.get("id") or "").strip()
+        protocol = str(item.get("protocol") or "").strip().lower()
+        base_url = str(item.get("base_url") or "").strip()
+        key_env = str(item.get("key_env") or "").strip()
+        if not sid:
+            dropped.append("（缺 id）")
+            continue
+        if protocol not in _API_SOURCE_PROTOCOLS:
+            dropped.append(f"{sid}（protocol 未知: {protocol or '空'}）")
+            continue
+        if not base_url.startswith(("http://", "https://")):
+            dropped.append(f"{sid}（base_url 非 http/https）")
+            continue
+        if not key_env:
+            dropped.append(f"{sid}（缺 key_env）")
+            continue
+        weight = item.get("weight", 1.0)
+        if isinstance(weight, bool) or not isinstance(weight, (int, float)):
+            weight = 1.0
+        timeout = item.get("timeout_s", _SEARCH_TIMEOUT)
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+            timeout = _SEARCH_TIMEOUT
+        enabled = item.get("enabled", True)
+        out.append({"id": sid, "protocol": protocol, "base_url": base_url,
+                    "key_env": key_env, "enabled": bool(enabled),
+                    "weight": float(weight), "timeout_s": float(timeout)})
+    if dropped:
+        _warn_sources(f"search_sources.json#sources 里这些条不合规，已丢弃：{'；'.join(dropped)}")
+    return [cfg for cfg in out if cfg["enabled"]]
+
+
+def _build_api_providers() -> List["ApiSearchProvider"]:
+    """清单 → 可用执行器实例列表（默认装配用）。
+
+    只装配"enabled 且已配密钥"的源（跳过判定与 ApiSearchProvider.skip_reason()
+    同一口径）；单个实例构造失败不拖垮检索（fail-soft）。
+    """
+    providers: List[ApiSearchProvider] = []
+    for cfg in load_api_source_configs():
+        try:
+            p = ApiSearchProvider(cfg)
+        except Exception:        # noqa: BLE001  配置错误的单个源不拖垮检索
+            continue
+        if not p.skip_reason():
+            providers.append(p)
+    return providers
+
+
+class ApiSearchProvider:
+    """API 型搜索源执行器：与爬虫源（So360/Baidu）并列的第三类后端。
+
+    - 请求/响应形状按 protocol 分发（bing=GET + Ocp-Apim-Subscription-Key 头、
+      响应 webPages.value[]；bocha=POST + Bearer 头、响应 data.webPages.value[]），
+      统一 normalize 成与爬虫源相同的 SearchResult 形状（title/url/snippet/date，
+      domain 走既有 classify_domain 口径）；
+    - 密钥从 key_env 指定的环境变量读取（对齐 providers.json 的 key_env 模式）；
+      未配置 → skip_reason() 给出原因，search_all 计一次 skipped 且**不发请求**
+      （不报错、不算降级主因）。默认装配（default_providers）只收已配密钥的源，
+      skip 机制兜住显式装配与"装配后才失钥"的运行时窗口；
+    - 授权闸与爬虫源同一条：HTTP 只会发生在 search_all 的 public-search 闸之后
+      （未授权时 search_all 在构建任何 provider 之前就返回 blocked）；
+    - fail-soft：单次失败返回 ([], 原因) 并累计 consecutive_failures（只计数与
+      日志，不做跳过策略——动态降权属于后续多源融合项）。
+    """
+
+    def __init__(self, config: Dict[str, object]) -> None:
+        self.id = str(config.get("id") or "api-source")
+        # engines 计数键与既有引擎名（"360"/"baidu"）同一槽位口径：用源 id 作引擎名。
+        self.name = self.id
+        self.protocol = str(config.get("protocol") or "").strip().lower()
+        self.base_url = str(config.get("base_url") or "").strip()
+        self.key_env = str(config.get("key_env") or "").strip()
+        self.weight = float(config.get("weight") or 1.0)
+        self.timeout_s = float(config.get("timeout_s") or _SEARCH_TIMEOUT)
+        self.consecutive_failures = 0
+
+    # ---- 跳过判定（search_all 在发任何请求前检查） ----
+
+    def skip_reason(self) -> str:
+        """应跳过本源时返回原因串；可正常运行时返回空串。密钥缺失是主场景。"""
+        if not self.key_env or not os.environ.get(self.key_env, "").strip():
+            return f"api_key_missing:{self.key_env or 'key_env未配置'}"
+        return ""
+
+    # ---- 请求与 normalize ----
+
+    def search(self, query: str, k: int = 6) -> Tuple[List[SearchResult], Optional[str]]:
+        results, err = self._request(query, max(1, int(k)))
+        if err:
+            self.consecutive_failures += 1
+            _logger.warning("api-source %s 连续失败 %d 次: %s",
+                            self.id, self.consecutive_failures, err)
+            return [], err
+        self.consecutive_failures = 0
+        return results, None
+
+    def _request(self, query: str, k: int) -> Tuple[List[SearchResult], Optional[str]]:
+        key = os.environ.get(self.key_env, "").strip()
+        if self.protocol == "bing":
+            headers = dict(_HEADERS)
+            headers["Ocp-Apim-Subscription-Key"] = key
+            try:
+                resp = requests.get(self.base_url, params={"q": query, "count": k, "offset": 0},
+                                    headers=headers, timeout=self.timeout_s)
+            except requests.RequestException as exc:
+                return [], f"{self.id}请求失败: {type(exc).__name__}"
+            if resp.status_code != 200:
+                return [], f"{self.id}返回HTTP {resp.status_code}"
+            try:
+                data = resp.json()
+            except ValueError:
+                return [], f"{self.id}返回非JSON响应"
+            rows = data.get("webPages") if isinstance(data, dict) else None
+            rows = rows.get("value") if isinstance(rows, dict) else None
+            return self._normalize(rows, k, snippet_key="snippet"), None
+        if self.protocol == "bocha":
+            headers = dict(_HEADERS)
+            headers["Authorization"] = f"Bearer {key}"
+            headers["Content-Type"] = "application/json"
+            payload = {"query": query, "count": k, "summary": True}
+            try:
+                resp = requests.post(self.base_url, json=payload, headers=headers,
+                                     timeout=self.timeout_s)
+            except requests.RequestException as exc:
+                return [], f"{self.id}请求失败: {type(exc).__name__}"
+            if resp.status_code != 200:
+                return [], f"{self.id}返回HTTP {resp.status_code}"
+            try:
+                data = resp.json()
+            except ValueError:
+                return [], f"{self.id}返回非JSON响应"
+            inner = data.get("data") if isinstance(data, dict) else None
+            rows = inner.get("webPages") if isinstance(inner, dict) else None
+            rows = rows.get("value") if isinstance(rows, dict) else None
+            # 博查摘要字段是 summary；兼容个别版本回退 snippet。
+            return self._normalize(rows, k, snippet_key="summary"), None
+        return [], f"{self.id}协议未知: {self.protocol}"
+
+    def _normalize(self, rows: object, k: int, snippet_key: str) -> List[SearchResult]:
+        """API 行 → SearchResult（title/url/snippet/date + 既有 domain 口径）。"""
+        if not isinstance(rows, list):
+            return []
+        out: List[SearchResult] = []
+        for i, row in enumerate(rows[:k]):
+            if not isinstance(row, dict):
+                continue
+            url = str(row.get("url") or "").strip()
+            if not url:
+                continue
+            title = _strip_tags(str(row.get("name") or ""))
+            snippet = _strip_tags(str(row.get(snippet_key) or row.get("snippet") or ""))
+            date = extract_date(str(row.get("dateLastCrawled") or ""), url)
+            out.append(SearchResult(self.name, i + 1, title, url, snippet, date,
+                                    classify_domain(url)))
+        return out
+
+
 def default_providers() -> List[object]:
     """按环境变量组装后端列表：
       RUMOR_SEARCH_BACKENDS  逗号分隔：custom-api,so360,baidu（默认 so360,baidu）
-    配了 RUMOR_SEARCH_API_URL 时 custom-api 才会生效。"""
+    配了 RUMOR_SEARCH_API_URL 时 custom-api 才会生效。
+    另外前置 search_sources.json 里**已启用且已配密钥**的 API 型源（启用 =
+    enabled:true + key_env 环境变量有非空密钥，两者共同决定——正是"改 JSON/
+    填 .env 即启用，不改代码"的口径）。未配密钥的源不进默认装配，因此一个 API
+    源都没启用时本函数返回值与从前逐位一致（既有装配契约不变）；skip 机制
+    （skip_reason → skipped 计数）保留给显式装配的 provider 与"装配后才失钥"
+    的运行时窗口，见 search_all。"""
     order = [s.strip().lower() for s in
              os.environ.get("RUMOR_SEARCH_BACKENDS", "so360,baidu").split(",") if s.strip()]
     mapping: Dict[str, Callable[[], object]] = {
@@ -259,7 +514,8 @@ def default_providers() -> List[object]:
                 out.append(factory())
             except Exception:      # noqa: BLE001  配置错误的单个后端不拖垮检索
                 continue
-    return out or [So360Provider(), BaiduProvider()]
+    api = _build_api_providers()
+    return api + out if api else (out or [So360Provider(), BaiduProvider()])
 
 
 def search_all(query: str, k: int = 6,
@@ -268,7 +524,11 @@ def search_all(query: str, k: int = 6,
                domains: Optional[List[str]] = None) -> Dict[str, object]:
     """多后端搜索 + 按 URL 去重合并。返回 {query, results, engines}，绝不抛异常。
 
-    providers 缺省时用 default_providers()（环境变量可插拔专用 API）。
+    providers 缺省时用 default_providers()（环境变量可插拔专用 API，外加
+    search_sources.json 声明的 API 型源）。API 型源带 skip_reason()：授权闸放行后、
+    发任何请求之前先检查——密钥缺失等配置性原因 → 该源计一次 skipped 且零 HTTP
+    （不报错、不算降级主因）；顶层仅在 skipped>0 时多一个 "skipped" 键，未配置
+    任何 API 源时返回结构与从前逐位不变。
     domains（可选，领域监测用）：为每个域名构造一次 `site:域名` 查询变体
     （≤3 个，与订阅层 MAX_DOMAINS 同口径），结果合并去重后按域名后置过滤；
     不传时只查原 query，与加参数前逐位不变。搜索引擎对 site: 的支持是尽力
@@ -296,7 +556,24 @@ def search_all(query: str, k: int = 6,
     engines: Dict[str, Dict[str, object]] = {}
     merged: List[SearchResult] = []
     seen = set()
+    skipped_total = 0
     for p in (providers if providers is not None else default_providers()):
+        # API 型源的配置性跳过（密钥缺失等）：先于一切 HTTP 检查；命中即计一次
+        # skipped 并进下一个源，不进入变体循环（零外发）。没有 skip_reason 的
+        # 提供方（爬虫源/custom-api/测试桩）走原路径，逐位不变。
+        checker = getattr(p, "skip_reason", None)
+        if callable(checker):
+            try:
+                reason = str(checker() or "")
+            except Exception:    # noqa: BLE001  判定器坏了按"不跳过"处理，交给 search() 兜
+                reason = ""
+            if reason:
+                key = getattr(p, "name", None) or type(p).__name__
+                slot = engines.setdefault(key, {"ok": False, "error": "", "count": 0})
+                slot["skipped"] = int(slot.get("skipped", 0)) + 1
+                slot["skip_reason"] = reason
+                skipped_total += 1
+                continue
         for variant in queries:
             try:
                 results, err = p.search(variant, k)
@@ -330,7 +607,8 @@ def search_all(query: str, k: int = 6,
     # 变体数放宽（每变体至多 k 条），总量有界（全空兜底路径口径不变）。
     limit = k if not domains else k * max(1, len(queries))
     return _finalize(query, merged[:max(1, int(limit))], engines,
-                     domain_scoped=scoped, scope_degraded=degraded)
+                     domain_scoped=scoped, scope_degraded=degraded,
+                     skipped_total=skipped_total)
 
 
 def _in_domains(url: str, domains: List[str]) -> bool:
@@ -345,11 +623,15 @@ def _in_domains(url: str, domains: List[str]) -> bool:
 def _finalize(query: str, merged: List[SearchResult],
               engines: Dict[str, Dict[str, object]],
               domain_scoped: bool = False,
-              scope_degraded: bool = False) -> Dict[str, object]:
+              scope_degraded: bool = False,
+              skipped_total: int = 0) -> Dict[str, object]:
     """排序 + 组装返回（原 search_all 尾段；domain_scoped 时如实标注）。
 
     scope_degraded（R9）：site: 变体全空兜底的诚实标注——domain_scope_applied
     置 False 并带 scope_degraded=True；不传 domains 时两个键都不出现（逐位不变）。
+    skipped_total（P0-1 API 型源）：密钥缺失等原因被跳过的源计数；只在 >0 时
+    才加顶层 "skipped" 键（未配置 API 源时返回结构逐位不变）。skipped 不是
+    error：该次调用确实没外发、也没失败，是合法的"源不可用"状态。
     截断由调用方做（见 search_all 的 limit 口径），这里只排序不裁。
     """
     # 排序不写死档名：按 registry 里 tiers 的声明顺序排（越靠前越权威），未声明的档排最后。
@@ -360,6 +642,8 @@ def _finalize(query: str, merged: List[SearchResult],
         out["scope_degraded"] = True
     elif domain_scoped:
         out["domain_scope_applied"] = True
+    if skipped_total > 0:
+        out["skipped"] = int(skipped_total)
     return out
 
 

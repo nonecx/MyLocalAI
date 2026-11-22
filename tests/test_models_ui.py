@@ -335,8 +335,14 @@ class SettingsApiLiveRoutesTest(unittest.TestCase):
         for key in ("schema_version", "active", "protocols", "input_types",
                     "reasoning_tiers", "providers", "warnings"):
             self.assertIn(key, payload, f"GET /api/models 缺少顶层键 {key}")
-        # 密钥只以掩码/状态字段出现
-        self.assertNotIn("sk-", resp.text, "响应里出现了疑似明文密钥")
+        # 密钥只以掩码/状态字段出现。掩码值本身形如 "sk-…qRBc"（合法携带 sk- 前缀），
+        # 先把掩码值剔除再查明文启发式，否则真实注册表（用户在面板里配的 key）
+        # 会触发误报——断言意图是"无明文密钥"，不是"响应里禁止出现 sk-"字面量。
+        masked = re.findall(r'"api_key_masked"\s*:\s*"([^"]*)"', resp.text)
+        text = resp.text
+        for m in masked:
+            text = text.replace(m, "")
+        self.assertNotIn("sk-", text, "响应里出现了疑似明文密钥")
         self.assertNotIn("api_key\"", resp.text)
 
 

@@ -35,6 +35,7 @@ from mylocalai.config import rules
 from mylocalai.rumor.state import AnalysisState  # noqa: E402
 from mylocalai.llm import llm_cache
 from mylocalai.llm import llm_client
+from mylocalai.llm import model_registry
 
 
 def _write_json(data) -> str:
@@ -369,11 +370,21 @@ class TestProviderBinding(unittest.TestCase):
             "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL",
             "LLM_PROVIDER", "LLM_FALLBACKS")
 
+    #: 设置面板的注册表/密钥文件隔离：指向不存在的路径。注意不能只 pop——pop 之后
+    # registry_path() 会回退到真实 data/models.json，用户在面板里配的提供方就成了
+    # 合法的运行时选择，错配用例的前提（"没有任何可用密钥"）就不成立了。
+    _ML_KEYS = ("MYLOCALAI_MODELS_PATH", "MYLOCALAI_MODEL_SECRETS_PATH")
+    _ML_ISOLATED = {"MYLOCALAI_MODELS_PATH": "Z:/nonexistent/models.json",
+                    "MYLOCALAI_MODEL_SECRETS_PATH": "Z:/nonexistent/secrets.json"}
+
     def setUp(self):
         self._saved = {k: os.environ.get(k) for k in self.KEYS}
         for k in self.KEYS:
             os.environ.pop(k, None)
+        self._saved_ml = {k: os.environ.get(k) for k in self._ML_KEYS}
+        os.environ.update(self._ML_ISOLATED)
         llm_client.reset_cache()
+        model_registry.reset_cache()
 
     def tearDown(self):
         for k, v in self._saved.items():
@@ -381,7 +392,13 @@ class TestProviderBinding(unittest.TestCase):
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+        for k, v in self._saved_ml.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
         llm_client.reset_cache()
+        model_registry.reset_cache()
 
     def test_mismatched_key_is_reported_not_silently_used(self):
         """只设 OPENAI_API_KEY 而提供方仍是 longcat —— 必须报错，而不是继续发往 LongCat。"""

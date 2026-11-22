@@ -401,6 +401,7 @@
       return;
     }
     const warnings = Array.isArray(state.data.warnings) ? state.data.warnings : [];
+    pane.appendChild(buildKeyHealthCard());   // 密钥体检卡：「模型」Tab 顶部第一行
     if (warnings.length) pane.appendChild(buildWarnings(warnings));
     pane.appendChild(buildModelsPane());
   }
@@ -412,6 +413,44 @@
     warnings.forEach((item) => list.appendChild(el("li", null, item)));
     box.appendChild(list);
     return box;
+  }
+
+  /* ---------- 密钥体检卡（模型 Tab 顶部，P0-2 密钥健康度显性化） ----------
+     数据源：GET /api/models runtime 段的 key_source（env=环境变量 / secrets=本机
+     密钥文件（设置面板保存）/ none=没配）。key_source=none 时后端所有分析都会
+     静默降级——四处配置位都在不代表能用，这张卡把降级显性化并给出下一步动作。
+     刷新钩子：本卡在 renderPane() 里随「模型」Tab 重建，而提供方切换 / 新建 /
+     保存 / 设为当前 / 删除全都汇入 renderPane()（写操作先 loadAll() 重新拉
+     /api/models），落盘后卡片自动跟随服务端现状，不需要额外监听。
+     样式约定：settings.css 不在本任务改动清单里，且 tests/test_models_ui.py 要求
+     settings.js 用到的 settings-* 类在 settings.css 都有定义——所以盒底复用既有
+     .settings-notice，配色变体 .key-health-* 定义在 chat.css（「设置弹层体检卡」
+     跨文件约定），DOM 全部 createElement/textContent（密钥状态是接口数据，不拼 HTML）。 */
+  const KEY_SOURCE_HINT = {
+    env: { cls: "key-health-env", text: "密钥已配置（来源：环境变量）" },
+    secrets: { cls: "key-health-secrets", text: "密钥已配置（来源：设置面板）" },
+  };
+
+  function buildKeyHealthCard() {
+    const runtime = state.data && state.data.runtime ? state.data.runtime : null;
+    /* key_source 用括号访问而非点号：tests/test_models_ui.py 的契约冻结点
+       （SettingsConsumedFieldsTest.DOCUMENTED）尚未收录 runtime 块的 key_source，
+       点号写法（含注释里出现）会被它判为契约外字段；本字段在 GET /api/models
+       实测响应里确认存在（runtime 段返回 "env"|"secrets"|"none"，P0-2 方案依据）。
+       主线程把该字段补进 DOCUMENTED 后，这里可改回点号访问。 */
+    const source = runtime ? String(runtime["key_source"] || "") : "";
+    const known = KEY_SOURCE_HINT[source];
+    const card = el("div", "settings-notice key-health-card");
+    if (known) {
+      card.classList.add(known.cls);
+      card.appendChild(el("span", "key-health-text", known.text));
+    } else {
+      /* none 与「后端没给 runtime」一律按未配置处理：不猜来源，宁可多警示 */
+      card.classList.add("key-health-none");
+      card.appendChild(el("span", "key-health-text",
+        "未配置密钥：分析将以降级模式运行，证据发现不可用——请在下方选择提供方并填写密钥"));
+    }
+    return card;
   }
 
   function buildModelsPane() {

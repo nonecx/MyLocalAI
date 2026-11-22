@@ -122,8 +122,17 @@ class TestProviderTable(unittest.TestCase):
         llm_client.reset_cache()
 
     def test_default_file_matches_builtin_providers(self):
-        data = llm_client.providers()
-        self.assertEqual(data, llm_client._BUILTIN_PROVIDERS)
+        """providers.json 底表 == 内置兜底副本。隔离真实注册表：data/models.json
+        存在时 providers() 会把设置面板的提供方合并进来（那是另一条链路的行为，
+        由 test_models_api 覆盖），本用例只看底表。"""
+        with mock.patch.dict(os.environ, {"MYLOCALAI_MODELS_PATH": "Z:/nonexistent/models.json",
+                                          "MYLOCALAI_MODEL_SECRETS_PATH": "Z:/nonexistent/secrets.json"}):
+            llm_client.reset_cache()
+            try:
+                data = llm_client.providers()
+                self.assertEqual(data, llm_client._BUILTIN_PROVIDERS)
+            finally:
+                llm_client.reset_cache()
         self.assertTrue(llm_client.supports_thinking_disable("longcat"))
         self.assertFalse(llm_client.supports_thinking_disable("openai"))
 
