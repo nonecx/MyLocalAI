@@ -256,10 +256,17 @@ class RumorAgent:
 
     # ------------------------------------------------------------------ #
     def analyze(self, text: str,
-                cancel_check: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
+                cancel_check: Optional[Callable[[], bool]] = None,
+                state: Optional[AnalysisState] = None) -> Dict[str, Any]:
         """全链路分析。cancel_check（可选，§5.3 协作取消）：分析期间被轮询，命中即
         停止开算新组件并提前收尾——返回已完成组件的降级结论（mode="cancelled"）。
         不传时行为与无此参数时逐位一致。
+
+        state（可选，编排层共享状态）：非 None 时复用调用方注入的 AnalysisState
+        （claims/markers 等已算过的组件按 compute-once 不重算）；None 时自建状态，
+        行为逐位不变。注意：本方法仍会对 text 做 sanitize/截断——共享方的文本一致性
+        由调用方保证（应传入与本方法相同的规整/截断口径处理过的同一文本，见
+        workflow.claim._prepare_text）。
         """
         t0 = time.perf_counter()
         # 孤立代理项先规整：它进不了缓存键、也发不出去，留着只会让某个组件抛
@@ -270,8 +277,14 @@ class RumorAgent:
         truncated = len(text) > self.max_chars
         text = text[: self.max_chars]
 
-        state = AnalysisState(text, self.funcs, on_component_done=self.on_component_done,
-                              source_profile=self.source_profile)
+        if state is not None:
+            # 编排层共享状态：funcs/回调/信源画像以注入对象为准（self.funcs 等构造参数
+            # 只在自建状态时生效——装配责任在共享状态的创建方，见 workflow.claim._state_funcs）。
+            pass
+        else:
+            state = AnalysisState(text, self.funcs,
+                                  on_component_done=self.on_component_done,
+                                  source_profile=self.source_profile)
         mode, agent_error = "agent", ""
         trace: Dict[str, Any] = {"tools_called": [], "llm_turns": 0, "final_text": ""}
 

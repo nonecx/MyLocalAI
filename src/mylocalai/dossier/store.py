@@ -26,7 +26,7 @@ from typing import Any, Dict, Iterable, List, Optional
 __all__ = ["SCHEMA_VERSION", "DEFAULT_DB_PATH", "connect", "migrate",
            "DossierStore", "default_db_path"]
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 #: 顺序迁移：索引 i 的脚本把库从版本 i 升到 i+1。永不修改已发布的条目，只允许追加。
 MIGRATIONS: List[str] = [
@@ -306,6 +306,19 @@ MIGRATIONS: List[str] = [
         created_at     TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_sub_runs_sub ON subscription_runs(subscription_id, id);
+    """,
+    # v9：tool_runs 编排分轴列（Agent工作流规格 §3.3，2026-11-22）。tool_runs 逐条
+    # ALTER 追加四列，全部可空、旧行不回填（旧调用点不传 → 保持 NULL）：
+    #   plan_id/step_id      —— 该 run 对应执行计划与计划内步骤（workflow.plan 展开）；
+    #   execution_status     —— 执行轴：running/completed/partial/failed/cancelled/budget_exhausted；
+    #   task_status          —— 任务语义出口：needs_clarification/no_factual_claim/
+    #                           not_applicable/not_triggered 等，与执行轴分开记。
+    # 幂等由 migrate 机制保证（schema_migrations 登记，重复执行跳过）。
+    """
+    ALTER TABLE tool_runs ADD COLUMN plan_id TEXT;
+    ALTER TABLE tool_runs ADD COLUMN step_id TEXT;
+    ALTER TABLE tool_runs ADD COLUMN execution_status TEXT;
+    ALTER TABLE tool_runs ADD COLUMN task_status TEXT;
     """,
 ]
 

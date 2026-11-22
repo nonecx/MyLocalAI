@@ -21,6 +21,11 @@ from typing import Any, Callable, Dict, List, Optional
 
 from mylocalai.assistant.registry import ToolRegistry, ValidationError, text_param, deep_param, id_param
 from mylocalai.assistant.tools_guard import dossier_visible
+from mylocalai.assistant.workflow.claim import (
+    _legacy_answer as _claim_legacy_answer,
+    execute_claim_checking as _execute_claim_plan,
+)
+from mylocalai.assistant.workflow.runner import aggregate_execution_status as _aggregate_statuses
 
 __all__ = ["register_all", "query_param"]
 
@@ -106,12 +111,15 @@ def _evidence_count(result: Dict[str, Any]) -> int:
 
 
 def _verify_digest(result: Dict[str, Any], card: Optional[Dict[str, Any]]) -> str:
-    """verify 结果的叙述要点：标签/分数/置信度/as_of/证据分布/复审条件/证据前5条。"""
+    """verify 结果的叙述要点：标签/置信度/as_of/证据分布/复审条件/证据前5条。
+
+    digest 去数值（Agent工作流规格 §1.6"前端不显示风险分/置信度等数值评分"的方向）：
+    只保留档位标签文案与置信度档位徽章，风险分数字与 score_breakdown 类内部数值一律
+    不进 digest（数值仍是档案数据层的兼容字段，呈现层裁剪是本模块的职责）。
+    """
     lines: List[str] = ["[核查结论]"]
     label = str(result.get("label", ""))
-    score = _as_float(result.get("risk_score"))
-    lines.append(f"- 标签：{label or '（无）'}；风险分：{'暂无' if score is None else score:g}/100"
-                 f"（verdict.assess() 纯函数输出，大模型不参与打分）")
+    lines.append(f"- 标签：{label or '（无）'}（verdict.assess() 纯函数输出，大模型不参与打分）")
     if card:
         lines.append(f"- 置信度：{card.get('confidence', '')}；证据截至：{card.get('as_of', '') or '未知'}")
         suff = card.get("evidence_sufficiency") or {}
@@ -139,35 +147,11 @@ def _legacy_claim_answer(original_text: str, result: Dict[str, Any]) -> Dict[str
     The legacy RumorAgent does not provide verified public-propagation records,
     exact claim spans, or fetched-page quote locators. Its output therefore cannot
     satisfy the validated claim-answer contract and must be labeled incomplete.
+
+    实现已收敛到 workflow.claim._legacy_answer（执行器与工具层共用同一形状，防两处
+    漂移）；本函数保留旧名供既有调用方/测试兼容，无 span 时输出形状逐位不变。
     """
-    claims = result.get("claims") if isinstance(result.get("claims"), list) else []
-    claim_rows = []
-    for index, item in enumerate(claims[:3], 1):
-        if not isinstance(item, dict):
-            continue
-        text = str(item.get("claim") or item.get("text") or "").strip()
-        if not text:
-            continue
-        claim_rows.append({
-            "claim_id": f"LEGACY-C{index}",
-            "claim_excerpt": text[:120],
-            "truth_assessment": None,
-            "rumor_state": None,
-            "evidence_status": "unvalidated_legacy_evidence",
-            "propagation_status": "not_started",
-            "limitations": [
-                "旧核查引擎尚未提供可验证的传播记录、主张原文定位和页面引文锚点；"
-                "本对象不是可展示的五态核查结论。"
-            ],
-        })
-    return {
-        "schema_version": 1,
-        "answer_status": "insufficient_data",
-        "checked_at": "",
-        "claims": claim_rows,
-        "limitations": ["legacy_verdict_not_mapped_to_truth_or_rumor_state"],
-        "source_text_available_in_memory": bool(original_text),
-    }
+    return _claim_legacy_answer(original_text, result, [], [])
 
 
 def _start_dossier(ctx: Any, text: str, input_kind: str = "text",
@@ -207,15 +191,135 @@ def _result(result: Any, card: Any, digest: str, cost: Dict[str, int],
     return out
 
 
+# ---------------------------------------------------------------- 编排注入件
+
+def _wrap_verify_fn(services: Any) -> Callable:
+    """把 ctx.services["verify"] 适配成编排执行器的 verify_fn 注入形状。
+
+    服务实际签名是 _verify(text, deep, on_component_done=..., cancel_check=...)；执行器
+    会传 state=（共享 AnalysisState）。用 inspect 探测服务是否已支持 state 透传（波次 2
+    的 _verify 改法）：支持则转发共享状态（claims/markers 经 compute-once 不重算），
+    不支持（旧签名/测试 stub）则不传 state——引擎自建状态，行为与接线前一致。
+    """
+    def _verify_fn(text: str, *, deep: bool, state: Any = None,
+                   on_component_done: Optional[Callable] = None,
+                   cancel_check: Optional[Callable] = None) -> Dict[str, Any]:
+        fn = services["verify"]
+        accepts_state = False
+        try:
+            import inspect
+            parameters = inspect.signature(fn).parameters
+            accepts_state = ("state" in parameters or any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters.values()))
+        except (TypeError, ValueError):  # noqa: BLE001  探测失败按旧签名处理
+            accepts_state = False
+        if accepts_state:
+            # 共享状态路径：进度回调由状态的创建方装配（执行器自建状态不带回调；
+            # 波次 2 若在 loop 侧建 state，就在创建时传入 _progress_emitter），
+            # 故这里不再把 on_component_done 传给服务（引擎签名无此参）。
+            return fn(str(text), bool(deep), state=state, cancel_check=cancel_check)
+        return fn(str(text), bool(deep), on_component_done=on_component_done,
+                  cancel_check=cancel_check)
+
+    return _verify_fn
+
+
+def _make_literal_match(claim_id: str) -> Callable:
+    """确定性逐字匹配器（v0.1，语义匹配属规格 Phase 2 未接线）：
+
+    主张原文（压空白）逐字出现在已读正文 → repeats + 引文；否则 unclear + 空引文——
+    引文锚定由 verify_candidate 的代码复核把关（未锚定一律 not_verified），宁可不核验，
+    不放宽传播门槛。"LOCALQUOTE-1" 是编排方供给的唯一证据引用 ID，代表"本次已读正文
+    本身"；真正的传播门槛是 verify_candidate 的 quote_span 锚定校验。
+    """
+    def _match(claim_text: str, body: str) -> Dict[str, Any]:
+        claim = " ".join(str(claim_text or "").split())
+        quote = claim if (claim and claim in str(body or "")) else ""
+        return {"claim_id": claim_id, "evidence_ids": ["LOCALQUOTE-1"],
+                "relation": "repeats" if quote else "unclear", "quote": quote}
+
+    return _match
+
+
+def _wrap_propagate_fn(services: Any) -> Callable:
+    """把 skills.propagation 的 discover/verify 包装成编排执行器的 propagate_fn 注入形状。
+
+    授权闸在编排执行器先行 fail-closed（未授权到不了这里）；collect_propagation_records
+    内部还会再查一次偏好（双保险）。逐 claim 串行，状态按 aggregate_execution_status
+    同一优先级归并（cancelled > budget_exhausted > failed > partial > completed）；
+    任何单 claim 异常折进状态，不外抛、不挡核查主线。
+    """
+    from mylocalai.assistant.skills import propagation as _propagation
+
+    def _search_fn(query: str, k: int = 5, timeout: float = 20.0) -> Dict[str, Any]:
+        raw = services["search"](str(query)) or {}
+        if not isinstance(raw, dict):
+            return {"status": "error", "results": []}
+        results = [row for row in (raw.get("results") or []) if isinstance(row, dict)]
+        return {"status": "error" if raw.get("degraded") else "ok",
+                "results": results[:max(1, int(k))]}
+
+    def _fetch_fn(url: str, timeout: float = 10.0, max_bytes: int = 1_500_000) -> Dict[str, Any]:
+        from mylocalai.assistant.skills.transport import default_transport
+        # 体积上限由 transport 自身管理（max_bytes 不透传）；deadline 传绝对时刻。
+        return default_transport().fetch(str(url),
+                                         deadline=time.monotonic() + max(1.0, float(timeout)))
+
+    def _propagate_fn(claims: Any, *, deadline_s: float,
+                      cancel_check: Optional[Callable] = None) -> Dict[str, Any]:
+        records: List[Dict[str, Any]] = []
+        statuses: List[str] = []
+        for item in (claims or []):
+            claim_id = str((item or {}).get("claim_id") or "")
+            claim_text = str((item or {}).get("text") or "")
+            if not claim_id or not claim_text.strip():
+                continue
+            try:
+                found = _propagation.collect_propagation_records(
+                    claim_id, claim_text, search_fn=_search_fn, fetch_fn=_fetch_fn,
+                    safe_url_fn=_propagation.safe_public_url,
+                    match_fn=_make_literal_match(claim_id),
+                    allowed_evidence_ids=["LOCALQUOTE-1"],
+                    timeout_s=max(1.0, float(deadline_s)), cancel_check=cancel_check)
+            except Exception:  # noqa: BLE001  传播层异常折成该 claim 失败，不外抛
+                statuses.append("failed")
+                continue
+            if isinstance(found, dict):
+                records.extend(row for row in (found.get("records") or [])
+                               if isinstance(row, dict))
+                statuses.append(str(found.get("status") or "failed"))
+        if not statuses:
+            return {"status": "completed", "records": records}
+        return {"status": _aggregate_statuses(statuses), "records": records}
+
+    return _propagate_fn
+
+
 # ---------------------------------------------------------------- 工具实现
 
 def _verify_claim(ctx: Any, text: str, deep: bool = False) -> Dict[str, Any]:
-    """verify_claim：RumorAgent.analyze 全链路（30-120s 慢查）→ 自动建档 v1。"""
+    """verify_claim：claim-checking 六步编排（workflow.claim 执行器）→ 自动建档 v1。
+
+    相对直调 RumorAgent 的行为差异（判定语义零改动）：
+      - 六步计划状态推进 + claim_answer 统一由执行器产出（无 span 时退既有诚实过渡
+        形状，前端/测试契约不变）；
+      - 主张提取明确"无事实主张"→ 诚实短出口，不再空跑整链取证；
+      - 公开传播检索在 core.privacy 未授权时如实 not_applicable（零外发）。
+    handler 签名、返回键（ok/card/digest/cost/dossier_id/degraded/label/risk_score/
+    version/batch/not_saved/save_reason/claim_answer）、卡片形状与建档路径全部不变。
+    """
     services = ctx.services
     t0 = time.perf_counter()
-    result = services["verify"](str(text), bool(deep),
-                                on_component_done=_progress_emitter(ctx.events),
-                                cancel_check=getattr(ctx, "cancel_check", None)) or {}
+    result = _execute_claim_plan(
+        str(text), deep=bool(deep),
+        verify_fn=_wrap_verify_fn(services),
+        propagate_fn=_wrap_propagate_fn(services),
+        dossiers=getattr(ctx, "dossiers", None),
+        profile_id=getattr(ctx, "profile_id", None),
+        cancel_check=getattr(ctx, "cancel_check", None),
+        on_component_done=_progress_emitter(ctx.events),
+        budget={"plan_id": getattr(ctx, "plan_id", None)})
     duration = time.perf_counter() - t0
     if not isinstance(result, dict):
         result = {}
@@ -364,8 +468,17 @@ def _recheck_dossier(ctx: Any, id: int) -> Dict[str, Any]:  # noqa: A002  与路
                        {"requests": 0, "tokens": 0}, int(id), False,
                        ok=False, not_saved=True, reason="raw_input_unavailable")
     t0 = time.perf_counter()
-    result = services["verify"](text, False, on_component_done=_progress_emitter(ctx.events),
-                                cancel_check=getattr(ctx, "cancel_check", None)) or {}
+    # recheck 语义：同构六步编排（deep=False），复用同一执行器与注入件——计划状态/答案
+    # 编译/传播授权闸与 verify_claim 完全一致，只是入口是档案原文。
+    result = _execute_claim_plan(
+        str(text), deep=False,
+        verify_fn=_wrap_verify_fn(services),
+        propagate_fn=_wrap_propagate_fn(services),
+        dossiers=getattr(ctx, "dossiers", None),
+        profile_id=getattr(ctx, "profile_id", None),
+        cancel_check=getattr(ctx, "cancel_check", None),
+        on_component_done=_progress_emitter(ctx.events),
+        budget={"plan_id": getattr(ctx, "plan_id", None)})
     duration = time.perf_counter() - t0
     if not isinstance(result, dict):
         result = {}
@@ -375,7 +488,8 @@ def _recheck_dossier(ctx: Any, id: int) -> Dict[str, Any]:  # noqa: A002  与路
     rec = _record(ctx, int(id), result, kind="recheck", duration_s=duration, requests=requests)
     card = rec.get("card")
 
-    # 版本对比摘要（§6 M3-2 的数据面，M2 先把事实带上：标签/分数变化 + 证据批次增减）
+    # 版本对比摘要（§6 M3-2 的数据面，M2 先把事实带上）。digest 去数值（规格 §1.6）：
+    # 对比行只保留档位标签变化（如"v1（误导）→ v2（谣言）"），不带风险分数字。
     compare_lines: List[str] = []
     try:
         cmp = ctx.dossiers.compare_versions(int(id)) or {}
@@ -383,9 +497,8 @@ def _recheck_dossier(ctx: Any, id: int) -> Dict[str, Any]:  # noqa: A002  与路
         if len(versions) > 1:
             first, last = versions[0], versions[-1]
             compare_lines.append(
-                f"- 版本：v{first.get('version')}（{first.get('label')}，"
-                f"风险分 {first.get('risk_score')}）→ v{last.get('version')}"
-                f"（{last.get('label')}，风险分 {last.get('risk_score')}）")
+                f"- 版本：v{first.get('version')}（{first.get('label')}）→ v{last.get('version')}"
+                f"（{last.get('label')}）")
         batches = cmp.get("evidence_batches") or {}
         if batches:
             compare_lines.append("- 证据批次：" + "，".join(

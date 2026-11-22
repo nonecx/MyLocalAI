@@ -178,7 +178,13 @@ class SessionStore:
             return ""  # tool args may contain raw user text, URLs, or model payloads
         return value
 
-    def start_run(self, session_id: int, tool: str, args: Optional[Dict[str, Any]]) -> int:
+    def start_run(self, session_id: int, tool: str, args: Optional[Dict[str, Any]],
+                  *, plan_id: Optional[str] = None, step_id: Optional[str] = None) -> int:
+        """登记一次工具运行（v9 起可选带编排计划定位：plan_id/step_id）。
+
+        可选参默认 None：老调用点（loop 既有路径/测试）行为逐位不变；传值时写入
+        tool_runs 对应列（编排层 per-step 持久化，workflow.runner.StepRunRecorder 消费）。
+        """
         persisted_args = args or {}
         if not self._can_persist_input():
             persisted_args = self._redact_args(persisted_args)
@@ -187,20 +193,31 @@ class SessionStore:
         with self._lock, self._conn:
             cur = self._conn.execute(
                 "INSERT INTO tool_runs (session_id, tool, args, status, created_at,"
-                " input_expires_at, result_expires_at) VALUES (?, ?, ?, 'running', ?, ?, ?)",
+                " input_expires_at, result_expires_at, plan_id, step_id)"
+                " VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)",
                 (session_id, str(tool or ""), json.dumps(persisted_args, ensure_ascii=False), _now(),
-                 raw_expiry, result_expiry))
+                 raw_expiry, result_expiry,
+                 str(plan_id) if plan_id else None, str(step_id) if step_id else None))
             return int(cur.lastrowid)
 
     def finish_run(self, run_id: int, status: str, degraded: bool = False,
                    duration_s: float = 0.0, requests: int = 0, tokens: int = 0,
-                   dossier_id: Optional[int] = None) -> None:
+                   dossier_id: Optional[int] = None,
+                   *, execution_status: Optional[str] = None,
+                   task_status: Optional[str] = None) -> None:
+        """收尾一次工具运行（v9 起可选带执行轴/任务轴两轴状态，规格 §3.3 分轴记录）。
+
+        execution_status/task_status 与 dossier_id 同走 COALESCE 语义：不传（老调用点）
+        保留已有值，传值才覆盖——重复 finish 不会把两轴抹回 NULL。
+        """
         with self._lock, self._conn:
             self._conn.execute(
                 "UPDATE tool_runs SET status = ?, degraded = ?, duration_s = ?, requests = ?,"
-                " tokens = ?, dossier_id = COALESCE(?, dossier_id) WHERE id = ?",
+                " tokens = ?, dossier_id = COALESCE(?, dossier_id),"
+                " execution_status = COALESCE(?, execution_status),"
+                " task_status = COALESCE(?, task_status) WHERE id = ?",
                 (str(status or ""), 1 if degraded else 0, float(duration_s), int(requests),
-                 int(tokens), dossier_id, run_id))
+                 int(tokens), dossier_id, execution_status, task_status, run_id))
 
     def get_run(self, run_id: int) -> Optional[Dict[str, Any]]:
         with self._lock:
