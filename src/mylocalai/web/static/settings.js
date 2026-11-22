@@ -401,6 +401,7 @@
       return;
     }
     const warnings = Array.isArray(state.data.warnings) ? state.data.warnings : [];
+    pane.appendChild(buildKeyHealthCard());   // 密钥体检卡：「模型」Tab 顶部第一行
     if (warnings.length) pane.appendChild(buildWarnings(warnings));
     pane.appendChild(buildModelsPane());
   }
@@ -412,6 +413,43 @@
     warnings.forEach((item) => list.appendChild(el("li", null, item)));
     box.appendChild(list);
     return box;
+  }
+
+  /* ---------- 密钥体检卡（模型 Tab 顶部，密钥健康度显性化）----------
+     数据源：GET /api/models 响应 runtime 段的 key_source，三值词面以后端
+     src/mylocalai/llm/model_registry.py 的 _resolve_secret() 为准：
+     env=环境变量 / stored=本机密钥文件（设置面板保存）/ none=没配。
+     key_source=none 时后端所有分析都会静默降级——四处配置位都在不代表能用，
+     这张卡把降级显性化并给出下一步动作。
+     刷新钩子：本卡在 renderPane() 里随「模型」Tab 重建，而提供方切换 / 新建 /
+     保存 / 设为当前 / 删除全都汇入 renderPane()（写操作先 loadAll() 重新拉
+     /api/models），落盘后卡片自动跟随服务端现状，不需要额外监听。
+     样式约定：settings.css 不新增规则，盒底复用既有 .settings-notice；配色变体
+     .key-health-card / .key-health-none / .key-health-env / .key-health-secrets /
+     .key-health-text 定义在 chat.css（跨文件约定，tests/test_models_ui.py 有断言）；
+     DOM 全部 createElement/textContent（密钥状态是接口数据，不拼 HTML）。
+     出处：本卡自 P0-2「密钥健康度显性化」在途稿移植，词面已对齐后端——原稿
+     误把 stored 写成 secrets，后端 _resolve_secret() 永远不会返回 secrets。 */
+  const KEY_SOURCE_HINT = {
+    env: { cls: "key-health-env", text: "密钥已配置（来源：环境变量）" },
+    stored: { cls: "key-health-secrets", text: "密钥已配置（来源：设置面板）" },
+  };
+
+  function buildKeyHealthCard() {
+    const runtime = state.data && state.data.runtime ? state.data.runtime : null;
+    const source = runtime ? String(runtime.key_source || "") : "";
+    const known = KEY_SOURCE_HINT[source];
+    const card = el("div", "settings-notice key-health-card");
+    if (known) {
+      card.classList.add(known.cls);
+      card.appendChild(el("span", "key-health-text", known.text));
+    } else {
+      /* none 与「后端没给 runtime」一律按未配置处理：不猜来源，宁可多警示 */
+      card.classList.add("key-health-none");
+      card.appendChild(el("span", "key-health-text",
+        "未配置密钥：分析将以降级模式运行，证据发现不可用——请在下方选择提供方并填写密钥"));
+    }
+    return card;
   }
 
   function buildModelsPane() {

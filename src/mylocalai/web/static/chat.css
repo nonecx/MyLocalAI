@@ -1476,3 +1476,33 @@
 @media (max-width: 900px) {
   .chat-monitor-list { max-height: 240px; }
 }
+
+/* ============================================================
+   设置弹层「模型」Tab 密钥体检卡三态配色（settings.js buildKeyHealthCard）。
+   卡片本体由 settings.js 创建：盒底复用 settings.js 已用的 .settings-notice
+   （圆角/内边距/字号/间距随它），本节只补配色变体——
+   .key-health-none=红（未配置，分析降级）、.key-health-env=绿（密钥来自环境变量）、
+   .key-health-secrets=蓝（密钥来自设置面板保存；后端词面是 stored，变体类名沿用初稿）。
+   配色只引用 style.css 的 :root 令牌，浅底与描边用 color-mix 从令牌派生，
+   不硬编码色值；卡片是可换行的块级小元素，窄屏（900px 断点）无独立断点需求，
+   按本文件既有约定不新增 @media。
+   ============================================================ */
+.key-health-card.key-health-none {
+  border-color: color-mix(in srgb, var(--danger) 32%, var(--panel));
+  background: color-mix(in srgb, var(--danger) 8%, var(--panel));
+  color: var(--danger);
+}
+
+.key-health-card.key-health-env {
+  border-color: color-mix(in srgb, var(--good) 32%, var(--panel));
+  background: color-mix(in srgb, var(--good) 8%, var(--panel));
+  color: var(--good);
+}
+
+.key-health-card.key-health-secrets {
+  border-color: color-mix(in srgb, var(--primary) 32%, var(--panel));
+  background: color-mix(in srgb, var(--primary) 8%, var(--panel));
+  color: var(--primary-dark);
+}
+
+.key-health-card .key-health-text { font-weight: 600; }

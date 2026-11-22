@@ -12,7 +12,9 @@
     web/models_api.py（隐私那条在 privacy_api.py）的路由表里找到；写操作的
     (HTTP 方法, 路径模板) 与规格 §3.2 表格逐条一致；全文件无 innerHTML 类 HTML 拼接
     （模型 ID / 显示名称 / base_url / 密钥都是用户输入）；1M / 128K / 65536 的解析与
-    显示常量在位；用户要求的控件文案齐备；
+    显示常量在位；用户要求的控件文案齐备；密钥体检卡 KEY_SOURCE_HINT 只认后端
+    _resolve_secret() 的词面 env/stored（secrets 不是后端词面，绝不作为键出现），
+    未配置分支降级文案在位，key-health-* 类在 chat.css 都有定义；
   - settings.css：只用 style.css 的 :root 令牌，不自己另起配色；settings.js 里出现的
     settings-* 类都有样式定义（否则面板裸奔）；
   - 消费的响应字段 ⊆ 规格 §3 的字段表（防止前端偷偷依赖契约外字段）。
@@ -46,6 +48,7 @@ SETTINGS_JS = STATIC_DIR / "settings.js"
 SETTINGS_CSS = STATIC_DIR / "settings.css"
 SHELL_JS = STATIC_DIR / "shell.js"
 STYLE_CSS = STATIC_DIR / "style.css"
+CHAT_CSS = STATIC_DIR / "chat.css"
 
 
 def _read(path: Path) -> str:
@@ -187,6 +190,50 @@ class SettingsUiStructureTest(unittest.TestCase):
         self.assertTrue(targets, "解析不到 settings.js 使用的 settings-* 类")
         missing = [name for name in targets if f".{name}" not in self.css]
         self.assertEqual(missing, [], f"settings.css 缺少定义：{missing}")
+
+    def test_key_health_card_covers_backend_key_source_vocabulary(self):
+        """密钥体检卡：KEY_SOURCE_HINT 覆盖后端词面 env/stored，绝不出现 secrets 键（防回归）。
+
+        后端 src/mylocalai/llm/model_registry.py 的 _resolve_secret() 只返回
+        env | stored | none（stored = 密钥保存在 model_secrets.json，即设置面板保存）；
+        初稿曾把 stored 误写成 secrets，导致已配置密钥仍显示「未配置」红卡。
+        """
+        matched = re.search(r"const KEY_SOURCE_HINT\s*=\s*\{(.*?)\n\s*\};", self.js, re.S)
+        self.assertIsNotNone(matched, "settings.js 缺少 KEY_SOURCE_HINT 映射表")
+        keys = set(re.findall(r"(\w+)\s*:\s*\{", matched.group(1)))
+        self.assertIn("env", keys, "KEY_SOURCE_HINT 缺少 env 键（密钥来自环境变量）")
+        self.assertIn("stored", keys, "KEY_SOURCE_HINT 缺少 stored 键（密钥来自设置面板保存）")
+        self.assertNotIn("secrets", keys,
+                         "后端永远不会返回 secrets（词面是 stored），KEY_SOURCE_HINT 不该有这个键")
+        self.assertIn("key-health-secrets", self.js,
+                      "stored 档的配色变体类名沿用 key-health-secrets（chat.css 侧同名）")
+        # 卡片真的挂进「模型」Tab 渲染，且在配置读取告警之前（Tab 顶部第一行）
+        self.assertRegex(self.js, r"pane\.appendChild\(buildKeyHealthCard\(\)\)",
+                         "renderPane 里没有挂密钥体检卡")
+        self.assertLess(self.js.index("pane.appendChild(buildKeyHealthCard())"),
+                        self.js.index("pane.appendChild(buildWarnings"),
+                        "密钥体检卡应在配置读取告警之前渲染")
+
+    def test_key_health_card_has_unconfigured_copy(self):
+        """未配置（none / 取不到 runtime）分支的降级警示文案在位，并给出下一步动作。"""
+        js = self.js
+        self.assertIn("function buildKeyHealthCard", js)
+        self.assertIn("未配置密钥：分析将以降级模式运行，证据发现不可用", js,
+                      "缺少未配置密钥的降级警示文案")
+        self.assertIn("请在下方选择提供方并填写密钥", js,
+                      "未配置分支缺少下一步动作提示")
+
+    def test_key_health_classes_defined_in_chat_css(self):
+        """settings.js 用到的 key-health-* 类在 chat.css 都有定义（体检卡配色跨文件契约）。
+
+        与 test_settings_classes_have_styles 同一手法：settings.css 不加规则，
+        体检卡盒底复用 .settings-notice，三态配色变体落在 chat.css。
+        """
+        css = _read(CHAT_CSS)
+        used = sorted(set(re.findall(r"key-health-[a-z0-9-]+", self.js)))
+        self.assertTrue(used, "解析不到 settings.js 使用的 key-health-* 类")
+        missing = [name for name in used if f".{name}" not in css]
+        self.assertEqual(missing, [], f"chat.css 缺少定义：{missing}")
 
     def test_required_ui_copy_is_present(self):
         """用户点名要的控件与提示文案齐备（中文界面）。"""
@@ -343,14 +390,15 @@ class SettingsApiLiveRoutesTest(unittest.TestCase):
 class SettingsConsumedFieldsTest(unittest.TestCase):
     """settings.js 消费的 snake_case 字段 ⊆ 规格 §3 的字段表（契约冻结点）。"""
 
-    #: 规格 §3.1 / §3.3 出现的响应字段（含 limits、model view 内层字段与 protocols 的
-    #: runtime_supported），外加 §3.2 请求体字段 api_key（写密钥时前端要发这个键）
+    #: 规格 §3.1 / §3.3 出现的响应字段（含 limits、model view 内层字段、protocols 的
+    #: runtime_supported 与 runtime 段的 key_source，词面 env|stored|none 见规格 §2.1），
+    #: 外加 §3.2 请求体字段 api_key（写密钥时前端要发这个键）
     DOCUMENTED = {
         "schema_version", "providers", "warnings", "protocols", "input_types",
         "reasoning_tiers", "limits", "max_providers", "max_models_per_provider",
         "max_context_window", "max_output_tokens",
         "display_name", "base_url", "protocol_runtime_supported", "runtime_supported",
-        "key_env", "api_key", "api_key_set", "api_key_source", "api_key_masked", "is_active",
+        "key_env", "key_source", "api_key", "api_key_set", "api_key_source", "api_key_masked", "is_active",
         "default_models", "context_window", "active_tier", "api_value", "owned_by",
     }
 
@@ -368,7 +416,7 @@ class SettingsConsumedFieldsTest(unittest.TestCase):
     def test_key_status_and_model_params_are_wired(self):
         """密钥状态、协议运行期支持、模型参数这几组关键字段真的被用上（不是文档里有前端没接）。"""
         consumed = set(re.findall(r"\.([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b", self.js))
-        for field in ("api_key_set", "api_key_source", "api_key_masked",
+        for field in ("api_key_set", "api_key_source", "api_key_masked", "key_source",
                       "protocol_runtime_supported", "is_active", "default_models",
                       "input_types", "reasoning_tiers", "active_tier", "api_value",
                       "display_name", "base_url"):
