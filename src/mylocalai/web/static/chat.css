@@ -1506,3 +1506,82 @@
 }
 
 .key-health-card .key-health-text { font-weight: 600; }
+
+/* ---------- 统计说法核查卡（cards.js renderStatistics 的 stat-* 类） ----------
+   与权威核验卡同族：主张逐条分组（摘录 + 数值 | 来源数值 + 引文 | 四态判定徽章），
+   复用 .chat-badges/.chat-ev-*/.chat-auth-limits；这里只补主张分组与来源区层次。
+   口径：四态判语是代码算出的中文文字徽章，不显示任何数值分。 */
+.chat-card-statistics { font-size: 12.5px; line-height: 1.8; }
+
+.chat-stat-claims { list-style: none; margin: 8px 0 0; padding: 0; }
+
+.chat-stat-claim {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+.chat-stat-claim:first-child { border-top: none; padding-top: 0; }
+.chat-stat-claim-head > b { color: var(--primary-dark); margin-right: 6px; }
+.chat-stat-excerpt { font-weight: 600; }
+.chat-stat-qual { font-size: 12px; color: var(--muted); margin: 4px 0 0; }
+.chat-stat-source { margin-top: 5px; }
+.chat-stat-basis { font-size: 12px; color: var(--muted); margin: 5px 0 0; }
+
+/* ---------- 档案对比卡（cards.js renderComparison 的 cmp-* 类） ----------
+   左右两列并排（窄屏堆叠），差异区只述标签演进/证据增减/信源增减/疑似同源徽章；
+   置信度只出 high/medium/low 档位徽章，不出任何相似度数值与风险分。 */
+.chat-card-comparison { font-size: 12.5px; line-height: 1.8; }
+
+.chat-cmp-sides {
+  display: flex;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.chat-cmp-side {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.chat-cmp-side-name { font-weight: 700; font-size: 12.5px; }
+.chat-cmp-side-label { font-weight: 600; margin-top: 4px; }
+
+.chat-cmp-diff { margin-top: 8px; }
+.chat-cmp-diff-list { list-style: none; margin: 4px 0 0; padding: 0; }
+.chat-cmp-diff-item { margin-top: 4px; }
+
+/* 窄屏补充：对比卡左右两列改纵向堆叠 */
+@media (max-width: 900px) {
+  .chat-cmp-sides { flex-direction: column; }
+}
+
+/* ---------- 事件时间线卡（cards.js renderTimeline 的 timeline-* 类） ----------
+   纵向时间线：日期徽章 + 精度徽章 + 事件 + 引文折叠（.chat-evidence-fold 复用）；
+   「时间不详」单独成区不混入主线；来源 URL 纯文本，不造可点链接。 */
+.chat-card-timeline { font-size: 12.5px; line-height: 1.8; }
+
+.chat-timeline-events { list-style: none; margin: 8px 0 0; padding: 0; }
+
+.chat-timeline-item {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+.chat-timeline-item:first-child { border-top: none; padding-top: 0; }
+.chat-timeline-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+}
+.chat-timeline-date {
+  display: inline-block;
+  min-width: 92px;
+  font-weight: 700;
+  color: var(--primary-dark);
+}
+.chat-timeline-event { font-weight: 600; margin-top: 3px; }
+.chat-timeline-undated-title { font-weight: 600; margin-top: 10px; color: var(--muted); }

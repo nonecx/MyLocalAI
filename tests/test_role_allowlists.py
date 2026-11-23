@@ -2,9 +2,12 @@
 """角色权限层测试：角色工具白名单（route 裁剪 + 目录过滤）+ 面板服务端角色闸。
 
 语义基线（用户已拍板，测试逐条锁定）：
-  - 横向工具 + 通用 7 能力工具 → 全角色可用；
-  - 专用工具 verify_claim / recheck_dossier → 仅 layperson + full
-    （单条说法的直接核查是普通用户工作区的主责）；
+  - 横向工具 6 个 + 通用 7 能力的入口 action → 全角色可用；
+  - 专用工具按主角色分发（第五波起 analyst 与 monitor 各含自家专用，不再同集）：
+    verify_claim / recheck_dossier / check_statistics → 仅 layperson + full
+    （单条说法核查与统计说法核查是普通用户工作区的主责）；
+    compare_dossiers → 仅 analyst + full（档案对比是专业用户·材料分析的主责）；
+    event_timeline → 仅 monitor + full（事件时间线是专业用户·领域监测的主责）；
   - fail-open：assistant_rules 缺 role_tool_allowlists 段 / 角色缺项 / 非列表 /
     空 → 回落全局 tool_allowlist（不裁剪）；full 恒全量；
   - 面板通道服务端闸：batch → {analyst, full}、monitor → {monitor, full}，
@@ -34,11 +37,20 @@ import mylocalai.assistant as assistant_pkg  # noqa: E402
 from mylocalai.assistant import router as router_mod  # noqa: E402
 from mylocalai.assistant.loop import AssistantLoop  # noqa: E402
 from mylocalai.assistant.registry import ToolRegistry, ValidationError  # noqa: E402
+from mylocalai.assistant.workflow import registry as workflow_registry  # noqa: E402
 
 ASSISTANT_DIR = Path(assistant_pkg.__file__).resolve().parent
 
-#: 语义基线里的"专用"与"元"工具集合（与 router.TOOL_ACTIONS / META_ACTIONS 对拍）。
-SPECIAL_TOOLS = ("verify_claim", "recheck_dossier")
+#: 语义基线里的"专用"工具 → 主角色（full 恒全量，取各家之并）。
+#: 与 assistant.workflow.registry.CAPABILITIES 的 cap.roles 对拍：通用能力入口与
+#: 横向工具全角色可用；专用入口只在主角色 + full。
+SPECIAL_TOOLS = {
+    "layperson": ("verify_claim", "recheck_dossier", "check_statistics"),
+    "analyst": ("compare_dossiers",),
+    "monitor": ("event_timeline",),
+}
+#: full 的专用工具 = 全部专用入口（恒全量）
+FULL_SPECIAL_TOOLS = tuple(t for tools in SPECIAL_TOOLS.values() for t in tools)
 
 
 def load_json(name: str) -> dict:
@@ -65,30 +77,66 @@ class TestRoleAllowlistConfig(unittest.TestCase):
         cls.section = cls.rules["role_tool_allowlists"]
 
     def test_layperson_and_full_are_supersets(self):
-        """layperson/full ⊇ analyst/monitor（专用裁剪只往小裁，不另开特例）。"""
-        layperson = set(self.section["layperson"])
+        """full ⊇ 每个角色（恒全量）；三角色互不为超集是允许的（各家专用不同）。"""
         full = set(self.section["full"])
-        analyst = set(self.section["analyst"])
-        monitor = set(self.section["monitor"])
-        self.assertTrue(layperson >= analyst, "layperson 应包含 analyst 全部工具")
-        self.assertTrue(layperson >= monitor, "layperson 应包含 monitor 全部工具")
-        self.assertTrue(full >= analyst, "full 应包含 analyst 全部工具")
-        self.assertTrue(full >= monitor, "full 应包含 monitor 全部工具")
+        for role in ("layperson", "analyst", "monitor"):
+            self.assertTrue(full >= set(self.section[role]),
+                            f"full 应包含 {role} 全部工具")
+        # 逐角色精确对拍：白名单 == 通用入口 ∪ 横向工具 ∪ 该角色专用入口 ∪ META
+        generic = set()
+        for cap_id, cap in workflow_registry.CAPABILITIES.items():
+            if cap.category == "通用":
+                generic |= set(cap.entry_actions)
+        generic |= set(workflow_registry.HORIZONTAL_TOOLS)
+        generic |= set(router_mod.META_ACTIONS)
+        for role in ("layperson", "analyst", "monitor"):
+            expected = generic | set(SPECIAL_TOOLS[role])
+            self.assertEqual(set(self.section[role]), expected,
+                            f"{role} 白名单应等于 通用+横向+META+自家专用，"
+                            f"多出 {set(self.section[role]) - expected}，"
+                            f"缺少 {expected - set(self.section[role])}")
+        # full = 通用 + 横向 + META + 全部专用入口
+        self.assertEqual(set(self.section["full"]),
+                         generic | set(FULL_SPECIAL_TOOLS))
 
-    def test_analyst_equals_monitor(self):
-        """analyst == monitor：两个专业工作区共用同一套"横向 + 通用"工具。"""
-        self.assertEqual(set(self.section["analyst"]), set(self.section["monitor"]))
+    def test_analyst_monitor_scoped_by_dedicated_tools(self):
+        """两角色不再同集：差集 = 各自专用对话工具。
+
+        analyst − monitor = {compare_dossiers}、monitor − analyst = {event_timeline}；
+        通用能力入口 + 横向工具 → 全角色可用，专用入口只在主角色 + full
+        （与 registry CAPABILITIES 的 cap.roles 逐条对拍）。
+        """
+        for cap_id, cap in workflow_registry.CAPABILITIES.items():
+            if cap.composite or cap.channel != "对话":
+                continue    # 面板复合能力不占对话路由（服务端闸在 web 层）
+            for action in cap.entry_actions:
+                for role in ("layperson", "analyst", "monitor"):
+                    expected = role in cap.roles
+                    self.assertEqual(action in self.section[role], expected,
+                                     f"{cap_id}.{action} 在 {role} 应为 {expected}")
+                self.assertIn(action, self.section["full"])
+        for tool in workflow_registry.HORIZONTAL_TOOLS:
+            for role in ("layperson", "analyst", "monitor", "full"):
+                self.assertIn(tool, self.section[role],
+                              f"横向工具 {tool} 必须对 {role} 可用")
+        # 两个专业角色确实分家了：差集正好是各自的专用入口
+        analyst, monitor = set(self.section["analyst"]), set(self.section["monitor"])
+        self.assertEqual(analyst - monitor, {"compare_dossiers"})
+        self.assertEqual(monitor - analyst, {"event_timeline"})
 
     def test_special_tools_only_for_layperson_and_full(self):
-        """verify_claim/recheck_dossier ∉ analyst/monitor，∈ layperson/full。"""
-        for role in ("analyst", "monitor"):
-            for tool in SPECIAL_TOOLS:
-                self.assertNotIn(tool, self.section[role],
-                                 f"{tool} 不应出现在 {role} 的白名单")
-        for role in ("layperson", "full"):
-            for tool in SPECIAL_TOOLS:
-                self.assertIn(tool, self.section[role],
-                              f"{tool} 应出现在 {role} 的白名单")
+        """专用工具只在主角色 + full；别家角色一律不含。"""
+        for owner, tools in SPECIAL_TOOLS.items():
+            for tool in tools:
+                self.assertIn(tool, self.section[owner],
+                              f"{tool} 应出现在主角色 {owner}")
+                self.assertIn(tool, self.section["full"],
+                              f"{tool} 应出现在 full")
+                for role in ("layperson", "analyst", "monitor"):
+                    if role == owner:
+                        continue
+                    self.assertNotIn(tool, self.section[role],
+                                     f"{tool} 是 {owner} 的专用工具，不应出现在 {role}")
 
     def test_all_entries_within_closed_enum(self):
         """白名单任何一项都必须 ∈ TOOL_ACTIONS ∪ META_ACTIONS（封闭枚举，不认新词）。"""
@@ -100,10 +148,18 @@ class TestRoleAllowlistConfig(unittest.TestCase):
             self.assertEqual(unknown, [], f"{role} 白名单出现枚举外条目: {unknown}")
 
     def test_layperson_full_equal_global_allowlist(self):
-        """layperson/full = 全局 tool_allowlist（17 工具 + meta 全量）。"""
+        """full = 全局 tool_allowlist（恒全量）；三角色 = 全局 − 别家专用入口。
+
+        第五波前 layperson 曾与全局同集；现在三个专用能力分属三个主角色，
+        layperson/analyst/monitor 各自裁掉别家的专用入口（详见 SPECIAL_TOOLS）。
+        """
         global_list = set(self.rules["tool_allowlist"])
-        self.assertEqual(set(self.section["layperson"]), global_list)
-        self.assertEqual(set(self.section["full"]), global_list)
+        self.assertEqual(set(self.section["full"]), global_list,
+                         "full 必须等于全局 tool_allowlist（恒全量）")
+        for role in ("layperson", "analyst", "monitor"):
+            others = set(FULL_SPECIAL_TOOLS) - set(SPECIAL_TOOLS[role])
+            self.assertEqual(set(self.section[role]), global_list - others,
+                             f"{role} 应等于全局减去别家专用入口 {sorted(others)}")
 
     def test_meta_actions_always_routable(self):
         """chitchat/clarify/refuse 在每个角色的白名单里（元动作永不裁剪）。"""

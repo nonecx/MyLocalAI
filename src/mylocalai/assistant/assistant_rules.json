@@ -1,5 +1,5 @@
 {
-  "_comment": "助手行为规则（工作指导 §4.2/§5.1/§5.4）：改这里而非改代码。",
+  "_comment": "助手行为规则（工作指导 §4.2/§5.1/§5.4）：改这里而非改代码。第五波新增 statistics_model/timeline_model 两个模型段；dossier-comparison（compare_dossiers）是确定性纯函数比对，无检索无模型，故不设 comparison_model 段。",
   "route_model": {
     "system_prompt_key": "router_system",
     "temperature": 0,
@@ -44,6 +44,16 @@
     "max_tokens": 900,
     "cache_namespace": "assistant_guide"
   },
+  "statistics_model": {
+    "temperature": 0,
+    "max_tokens": 800,
+    "cache_namespace": "assistant_statistics"
+  },
+  "timeline_model": {
+    "temperature": 0,
+    "max_tokens": 900,
+    "cache_namespace": "assistant_timeline"
+  },
   "max_tool_calls_per_turn": 2,
   "turn_deadline_s": 180,
   "context_char_budget": 12000,
@@ -71,37 +81,39 @@
     "list_dossiers", "get_dossier", "recheck_dossier", "export_card",
     "search_web", "read_opinions", "deep_read", "insights", "collect_evidence",
     "collect_research", "verify_authority", "check_source", "guide_fact_check",
+    "check_statistics", "compare_dossiers", "event_timeline",
     "chitchat", "clarify", "refuse"
   ],
   "role_tool_allowlists": {
-    "_comment": "按 skill 分类裁剪的角色工具白名单：横向工具与通用 7 能力工具全角色可用；专用工具 verify_claim/recheck_dossier 仅 layperson/full（单条说法核查是普通用户工作区的主责）。缺段/缺角色/非列表/空 → 代码回落全局 tool_allowlist（fail-open，不裁剪）；full 恒全量。路由枚举=角色白名单∪chitchat/clarify/refuse，路由模型目录只展示该角色可用的工具。",
+    "_comment": "按 skill 分类裁剪的角色工具白名单：横向工具与通用能力工具全角色可用；专用工具按主角色分发——verify_claim/recheck_dossier/check_statistics 仅 layperson/full（单条说法核查与统计说法核查是普通用户工作区的主责），compare_dossiers 仅 analyst/full（档案对比是专业用户·材料分析的主责），event_timeline 仅 monitor/full（事件时间线是专业用户·领域监测的主责）；analyst 与 monitor 各含自家专用工具，不再同集。缺段/缺角色/非列表/空 → 代码回落全局 tool_allowlist（fail-open，不裁剪）；full 恒全量。路由枚举=角色白名单∪chitchat/clarify/refuse，路由模型目录只展示该角色可用的工具。",
     "layperson": [
-      "verify_claim", "recheck_dossier", "analyze_speech", "check_heat",
-      "compute_heat", "list_dossiers", "get_dossier", "export_card",
+      "verify_claim", "recheck_dossier", "check_statistics", "analyze_speech",
+      "check_heat", "compute_heat", "list_dossiers", "get_dossier", "export_card",
       "search_web", "read_opinions", "deep_read", "insights", "collect_evidence",
       "collect_research", "verify_authority", "check_source", "guide_fact_check",
       "chitchat", "clarify", "refuse"
     ],
     "analyst": [
-      "analyze_speech", "check_heat", "compute_heat", "list_dossiers",
-      "get_dossier", "export_card", "search_web", "read_opinions", "deep_read",
-      "insights", "collect_evidence", "collect_research", "verify_authority",
-      "check_source", "guide_fact_check",
+      "compare_dossiers", "analyze_speech", "check_heat", "compute_heat",
+      "list_dossiers", "get_dossier", "export_card", "search_web", "read_opinions",
+      "deep_read", "insights", "collect_evidence", "collect_research",
+      "verify_authority", "check_source", "guide_fact_check",
       "chitchat", "clarify", "refuse"
     ],
     "monitor": [
-      "analyze_speech", "check_heat", "compute_heat", "list_dossiers",
-      "get_dossier", "export_card", "search_web", "read_opinions", "deep_read",
-      "insights", "collect_evidence", "collect_research", "verify_authority",
-      "check_source", "guide_fact_check",
+      "event_timeline", "analyze_speech", "check_heat", "compute_heat",
+      "list_dossiers", "get_dossier", "export_card", "search_web", "read_opinions",
+      "deep_read", "insights", "collect_evidence", "collect_research",
+      "verify_authority", "check_source", "guide_fact_check",
       "chitchat", "clarify", "refuse"
     ],
     "full": [
-      "verify_claim", "recheck_dossier", "analyze_speech", "check_heat",
-      "compute_heat", "list_dossiers", "get_dossier", "export_card",
-      "search_web", "read_opinions", "deep_read", "insights",
-      "collect_evidence", "collect_research", "verify_authority", "check_source",
-      "guide_fact_check", "chitchat", "clarify", "refuse"
+      "verify_claim", "recheck_dossier", "check_statistics", "compare_dossiers",
+      "event_timeline", "analyze_speech", "check_heat", "compute_heat",
+      "list_dossiers", "get_dossier", "export_card", "search_web", "read_opinions",
+      "deep_read", "insights", "collect_evidence", "collect_research",
+      "verify_authority", "check_source", "guide_fact_check",
+      "chitchat", "clarify", "refuse"
     ]
   },
   "refusal_triggers": [

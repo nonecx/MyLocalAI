@@ -1,13 +1,13 @@
 # MyLocalAI Agent 工作流规格 v0.1
 
 > 状态：用户已确认的实施基线；不是已实现功能的说明。
-> 日期：2026-11-12（2026-11-20 修订：用户能力扩到八项，新增资料收集/权威核验两个只读对话能力，见 §1.1/§2/§9）
+> 日期：2026-11-12（2026-11-20 修订：用户能力扩到八项，新增资料收集/权威核验两个只读对话能力，见 §1.1/§2/§9；2026-11-21 修订：分类第二轮扩到十项；2026-11-23 修订：第五波扩到十三项，新增统计说法核查/档案对比/事件时间线三条专用只读对话能力，见 §1.1/§2/§11）
 > 范围：用户能力、路由计划、工具契约、事实核查、证据与判断、状态、数据保存、测试和迁移。
 > 原则：先更新合同与测试，再逐阶段改造；保持当前旧档案可读，不以风险分代替真假判断。
 
 ## 1. 已确认产品规则
 
-1. 面向用户的能力共八项：事实核查、证据研究、话题理解、言论理解四类为基础；材料分析、领域监测是已登记的复合形态（§3.2，通道为面板 + REST，不占对话路由枚举，不为它们新开对话 action）；资料收集、权威核验是 2026-11-20 新增的两个只读对话能力（不建档、不出真假结论、不给数值评分）。取证中的 domain、sources、evidence 与两套新流水线的内部阶段都是执行阶段，不因新增能力改变"执行阶段不成为用户能力"的分层；对话跟进是横向机制。
+1. 面向用户的能力共八项：事实核查、证据研究、话题理解、言论理解四类为基础；材料分析、领域监测是已登记的复合形态（§3.2，通道为面板 + REST，不占对话路由枚举，不为它们新开对话 action）；资料收集、权威核验是 2026-11-20 新增的两个只读对话能力（不建档、不出真假结论、不给数值评分）。取证中的 domain、sources、evidence 与两套新流水线的内部阶段都是执行阶段，不因新增能力改变"执行阶段不成为用户能力"的分层；对话跟进是横向机制。（**2026-11-23 计数回流**：面向用户的能力现为**十三项**——第四波 source-credibility / fact-check-guide 两条通用技能，第五波 statistical-claim-checking / dossier-comparison / event-timeline 三条专用技能；通用/专用分类映射以《Skill分类与提示词规范-v1.0.md》§2 为准，实施记录见 §11。）
 2. 路由模型表达用户目标、必要参数和澄清需求；执行图由代码根据已登记能力/组合模板展开。模型不得提交任意工具步骤列表。
 3. 显式提出且已登记的组合请求自动执行；未知组合或缺少必要输入时澄清。不得自由拼工具。
 4. 事实核查的每个可核查主张都尝试检索公开传播记录。任何可核验且可定位的公开发布可证明至少存在一个公开传播实例，但不证明传播广泛、来源权威或内容为真。搜索摘要、截图及用户提交文本本身不是已核验传播记录。
@@ -28,8 +28,13 @@
 | `speech-understanding` | 分析表达方式 | 情绪/攻击/逻辑分析 → 独立呈现 | 不得把表达风格当事实证据 |
 | `information-collection` | 主动收集/调研一个主题的资料 | 确定范围 → 检索资料 → 阅读摘录 → 整理简报 | 不判真假、不建档；引文逐字来自已读正文；未核验来源只作线索 |
 | `authority-verification` | 找权威资料证明/反驳一条说法 | 拆分主张 → 权威源发现 → 阅读取证 → 整理分析 | 权威类别与 balance/lean 由代码计算；无决定性证据不得说"证明/反驳"；无分数、无固定真假标签 |
+| `source-credibility` | 判断一个网站/域名/机构的身份可不可信 | 安全取页 1 页 → 权威信号判定 → 画像摘要 | 只评信源身份不判内容真假；未核验只给倾向；无分数、不建档 |
+| `fact-check-guide` | 学"怎么自己查证"的方法 | 代码锁定的查证五步法 + 受约束讲解 | 零检索零取页；不给具体事件说法的真假结论；讲解含 URL/判定词即丢弃 |
+| `statistical-claim-checking` | 核对一段话里的数字与口径 | 抽数字主张 → 逐主张检索读页 → 代码口径比对 → 汇总 | 只比数字不判真假；四态判语无分数；不建档 |
+| `dossier-comparison` | 对比两份已建档案差在哪 | 直读两侧档案 → 标签演进 → 证据/域名差集 → 指纹相似度 | 只陈述已记录的 diff，不核查不裁定；不做升级/降级判断；只读、无分数 |
+| `event-timeline` | 把一个主题的事件按时间排开 | 检索来源 → 读页 → 事件抽取 → 同源转载去重 → 排序汇总 | 只述有来源记录的事件；不判真假、不外推趋势；每条带逐字引文；不建档 |
 
-资料收集与权威核验均为只读对话能力（注册表 permission=read），机器可执行契约的唯一规范来源是注册表 + `assistant/skills/research/pipeline.py` / `assistant/skills/authority/pipeline.py`（共享口径见 `assistant/skills/collect_core.py`）；能力策略文档见 `capabilities/information_collection/SKILL.md` 与 `capabilities/authority_verification/SKILL.md`，实施口径见 `docs/信息收集与权威核验技能-2026-11-20.md`。材料分析与领域监测不占本表的路由枚举，其契约来源另见各自 SKILL.md 头部"文档性质"段。
+资料收集与权威核验均为只读对话能力（注册表 permission=read），机器可执行契约的唯一规范来源是注册表 + `assistant/skills/research/pipeline.py` / `assistant/skills/authority/pipeline.py`（共享口径见 `assistant/skills/collect_core.py`）；能力策略文档见 `capabilities/information_collection/SKILL.md` 与 `capabilities/authority_verification/SKILL.md`，实施口径见 `docs/信息收集与权威核验技能-2026-11-20.md`。材料分析与领域监测不占本表的路由枚举，其契约来源另见各自 SKILL.md 头部"文档性质"段。2026-11-21 第四波 source-credibility / fact-check-guide 与 2026-11-23 第五波 statistical-claim-checking / dossier-comparison / event-timeline 同为只读对话能力（工具 check_source / guide_fact_check / check_statistics / compare_dossiers / event_timeline），后三条按角色绑定为专用能力（layperson / analyst / monitor），实施口径见 `docs/Skill分类与提示词规范-v1.0.md` 与 `docs/第五波专用技能-2026-11-23.md`；**能力计数口径以《Skill分类与提示词规范-v1.0.md》§2 的 13 项映射表为准**。
 
 SKILL 文件用于人可读的能力策略；机器可执行的 ID、版本、输入 schema、计划步骤、预算、权限和结果 schema 必须有唯一规范来源，并通过 parity/contract tests 校验，不能在多个文件维护不一致的复制品。
 
@@ -222,9 +227,28 @@ SSE 事件顺序继续沿用既有 meta/status/tool_start/scan/progress/card/nar
   落地口径裁定为**界面去、数据层留档**（档案库结论行/REST/导出仍留 risk_score 兼容
   字段；置信度档位徽章与 E 分代理估计保留），见新规格 §5。
 
-**能力数量口径回流**：§1 第 1 条"面向用户的能力共八项" → 实际注册表**十项**——
+**能力数量口径回流**：§1 第 1 条"面向用户的能力共八项" → 实际注册表**十三项**——
 2026-11-21 分类第二轮新增第四波通用技能 source-credibility（信源速查）/ fact-check-guide
-（辟谣指南），十项通用/专用分类映射以《Skill分类与提示词规范-v1.0.md》§2 为准。
+（辟谣指南），2026-11-23 第五波新增三条专用技能 statistical-claim-checking（统计说法核查，
+layperson）/ dossier-comparison（档案对比，analyst）/ event-timeline（事件时间线，monitor）。
+十三项通用/专用分类映射以《Skill分类与提示词规范-v1.0.md》§2 为准。
+
+**2026-11-23 第五波回流（三条专用只读对话能力）**：
+
+- **三条新能力**（详见 `docs/第五波专用技能-2026-11-23.md`）：statistical-claim-checking
+  （工具 `check_statistics`，四态判语一致/不一致/口径不一致/未核实到，数值归一与比对全部
+  代码完成）、dossier-comparison（工具 `compare_dossiers`，两份档案的只读 diff，纯函数零
+  模型零网络）、event-timeline（工具 `event_timeline`，事件三件套 + 按时间排序，无日期事件
+  单独成区）；三者为对话能力，均 permission=read、不建档、无分数、不出真假结论。
+- **接线**：`router.TOOL_ACTIONS` 17 → 20；`workflow/registry.py` 的 `CAPABILITIES` 10 → 13；
+  `assistant_rules.json` 的 `role_tool_allowlists` 按主角色分发专用工具（analyst 与 monitor
+  不再同集，各含自家专用对话工具；layperson 含 check_statistics），并新增
+  `statistics_model` / `timeline_model` 两个模型段；`loop._CARD_TYPE` 补三条卡片映射 +
+  `statistics_skills` / `timeline_skills` 两个服务工厂（档案对比不进服务盒）；
+  `prompts.json` 的 router_system 目录补三条 action 与分流提示；前端
+  `cards.js` 新增 renderStatistics / renderComparison / renderTimeline。
+- **口径来源**：能力策略在三份能力层 SKILL.md，机器契约在注册表 +
+  `skills/{statistics,comparison,timeline}/`（预算外置各自 rules.json）。
 
 **仍未落地**（后续阶段）：§4 Tool manifest 全字段（输入/输出 JSON Schema、幂等性、
 错误码、provenance 等完整声明）；§3.1 Router 直接产出 capability_id 封闭结构（现为

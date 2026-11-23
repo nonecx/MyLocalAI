@@ -31,7 +31,8 @@ from mylocalai.assistant.router import META_ACTIONS, TOOL_ACTIONS  # noqa: E402
 CAPS_DIR = ROOT / "src" / "mylocalai" / "assistant" / "capabilities"
 RULES_PATH = ROOT / "src" / "mylocalai" / "assistant" / "assistant_rules.json"
 
-#: 能力目录名 ↔ capability_id 的连字符形式（与 test_role_prompts.EXPECTED_CAPS 同源）
+#: 能力目录名 ↔ capability_id 的连字符形式（与 test_role_prompts.EXPECTED_CAPS 同源；
+#: 第五波新增 statistical-claim-checking / dossier-comparison / event-timeline 三条）
 EXPECTED_CAPS = {
     "claim_checking": "claim-checking",
     "evidence_research": "evidence-research",
@@ -43,6 +44,9 @@ EXPECTED_CAPS = {
     "authority_verification": "authority-verification",
     "source_credibility": "source-credibility",
     "fact_check_guide": "fact-check-guide",
+    "statistical_claim_checking": "statistical-claim-checking",
+    "dossier_comparison": "dossier-comparison",
+    "event_timeline": "event-timeline",
 }
 
 
@@ -58,7 +62,7 @@ def _skill_head(cap_id: str) -> str:
 class TestRegistryMatchesSkillDocs(unittest.TestCase):
     """能力注册表 ↔ 人读能力文档头注释（分类与适用角色逐字对拍）。"""
 
-    def test_registry_covers_exactly_ten_capabilities(self):
+    def test_registry_covers_exactly_thirteen_capabilities(self):
         self.assertEqual(set(CAPABILITIES), set(EXPECTED_CAPS.values()),
                          "能力注册表与 capabilities/ 目录集合漂移")
 
@@ -116,18 +120,41 @@ class TestRoleAllowlistsMatchRegistry(unittest.TestCase):
         self.assertTrue(entry_action_set() <= union | set(META_ACTIONS),
                         "有入口 action 没进任何角色白名单")
 
-    def test_full_is_superset_and_specialists_equal(self):
-        """full 恒全量；analyst==monitor（裁剪语义相同）；layperson=专用+通用+横向。"""
+    def test_full_is_superset_and_specialists_scoped(self):
+        """full 恒全量；三个专业/普通角色各含自家专用工具、不含别家专用。
+
+        第五波后 analyst 与 monitor 不再同集：analyst 持 compare_dossiers（档案对比是
+        专业用户·材料分析的主责），monitor 持 event_timeline（事件时间线是专业用户·
+        领域监测的主责）；layperson 持 check_statistics + verify_claim/recheck_dossier
+        （单条说法与统计说法核查是普通用户工作区的主责）。full ⊇ 每个角色。
+        """
         full = set(self.allowlists["full"])
+        analyst = set(self.allowlists["analyst"])
+        monitor = set(self.allowlists["monitor"])
+        layperson = set(self.allowlists["layperson"])
+        # full 恒等于全局 tool_allowlist
         self.assertEqual(full, set(self.rules["tool_allowlist"]),
                          "full 必须等于全局白名单（恒全量）")
-        self.assertEqual(set(self.allowlists["analyst"]), set(self.allowlists["monitor"]))
-        self.assertTrue(full >= set(self.allowlists["analyst"]))
-        lay = set(self.allowlists["layperson"])
-        self.assertTrue(lay >= set(self.allowlists["analyst"]),
-                        "layperson 应包含 analyst 的全部工具（专用核查 + 通用 + 横向）")
-        self.assertIn("verify_claim", lay)
-        self.assertNotIn("verify_claim", self.allowlists["analyst"])
+        # 各角色专用工具：只进自家 + full
+        self.assertIn("compare_dossiers", analyst)
+        self.assertIn("compare_dossiers", full)
+        self.assertIn("event_timeline", monitor)
+        self.assertIn("event_timeline", full)
+        for tool in ("check_statistics", "verify_claim", "recheck_dossier"):
+            self.assertIn(tool, layperson)
+            self.assertIn(tool, full)
+        # 别家专用工具不进（含 verify_claim/recheck_dossier 对两个专业角色）
+        self.assertNotIn("event_timeline", analyst)
+        self.assertNotIn("compare_dossiers", monitor)
+        for role in ("analyst", "monitor"):
+            for tool in ("verify_claim", "recheck_dossier", "check_statistics"):
+                self.assertNotIn(tool, self.allowlists[role],
+                                 f"{tool} 不应出现在 {role}")
+        for tool in ("compare_dossiers", "event_timeline"):
+            self.assertNotIn(tool, layperson, f"{tool} 不应出现在 layperson")
+        # full ⊇ 每个角色（恒全量）
+        for role, allowlist in self.allowlists.items():
+            self.assertTrue(full >= set(allowlist), f"full 应包含 {role} 的全部工具")
 
 
 if __name__ == "__main__":

@@ -14,6 +14,12 @@
    逐字引文）与权威核验（authority，逐主张证据倾向 + 受约束分析）。两张卡都只
    转述后端产物，不新增/改写证据，不显示任何 score / confidence 数值分，不写
    "真/假/属实"固定判定标签（balance 用中文文字徽章）。
+
+    本波次再新增三张只读卡（第五波，按角色绑定）：统计说法核查（statistics，逐主张
+    数字口径比对 + 四态判语徽章）、档案对比（comparison，两份档案的只读 diff）、
+    事件时间线（timeline，带逐字引文的事件整理）。三张卡同样只转述后端产物：
+    不显示任何数值评分，不写真假判定词，外部来源 URL 一律纯文本呈现，as_of 缺省
+    明说「未知」。
    ============================================================ */
 "use strict";
 
@@ -67,6 +73,14 @@
   /* 置信度是 high/medium/low 三档（档位徽章，不是数值分）：界面只出中文档位
      文案，未知档位原样透传（escapeHtml 后展示），绝不出现数字。 */
   const CONF_LABEL = { high: "高", medium: "中", low: "低" };
+
+  /* 置信度档位徽章（档案对比卡单侧用）：档位缺失/为空时不出徽章，
+     不拿默认档冒充；只出中文档位文案，不出任何数值分。 */
+  function confTierBadge(side) {
+    const v = String((side || {}).confidence || "");
+    if (!v) return "";
+    return `<span class="badge ${CONF_CLS[v] || "gray"}">置信度 ${escapeHtml(CONF_LABEL[v] || v)}</span>`;
+  }
 
   function degradedBadge(p) {
     return p && p.degraded ? '<span class="badge amber">降级输出</span>' : "";
@@ -1398,6 +1412,294 @@
       </div>`;
   }
 
+  /* ---------- 12. 统计说法核查卡（check_statistics：逐主张数字口径比对，四态判语） ----------
+     由后端 tools_statistics 产出：card = {card_type:"statistics", status, task_status,
+     as_of, degraded, text, state, state_label, claims[{claim_id, excerpt, number,
+     unit, metric, qualifiers{time,place,entity,base}, verdict, verdict_label,
+     source_number, source_url, source_title, quote, as_of, basis}], limits, gaps,
+     errors, counts{claims,searches,pages,llm_calls}}。
+     口径诚实铁律同全文件：四态判语（consistent/inconsistent/caliber_mismatch/
+     unverifiable）全部由流水线内的代码算出，这里只做中文文字徽章，不显示任何数值
+     分；引文与来源数值逐字透传；来源 URL 是外部内容，只做纯文本展示（与监测卡
+     同口径，不造可点链接）；as_of 缺省明说「未知」；digest 里导流 verify_claim
+     的话术不进卡。 */
+  const STAT_VERDICT_META = {
+    consistent: { cls: "green", text: "一致" },
+    inconsistent: { cls: "red", text: "不一致" },
+    caliber_mismatch: { cls: "amber", text: "口径不符" },
+    unverifiable: { cls: "gray", text: "无法核实" },
+  };
+
+  /* 四态判语徽章：后端 verdict_label 优先（逐字透传），未知判语落灰色不猜 */
+  function statisticsVerdict(cl) {
+    cl = cardObj(cl);
+    const meta = STAT_VERDICT_META[String(cl.verdict || "")] || { cls: "gray", text: "未知判定" };
+    return { cls: meta.cls, text: String(cl.verdict_label || meta.text) };
+  }
+
+  function renderStatistics(c) {
+    c = cardObj(c);
+    const counts = cardObj(c.counts);
+    const claims = cardList(c.claims);
+    const limits = cardList(c.limits);
+    const gaps = cardList(c.gaps);
+    const errors = cardList(c.errors);
+    const statusText = EVIDENCE_STATUS[String(c.status || "")] || String(c.status || "未知");
+    const taskText = EVIDENCE_TASK[String(c.task_status || "")] || "";
+    const stateText = String(c.state_label || c.state || "");
+
+    /* 每条数字主张一组：原文摘录 + 数值 | 来源数值 + 引文 | 四态判定徽章 */
+    const claimHtml = claims.length ? `<ul class="chat-stat-claims">${claims.map((cl) => {
+      cl = cardObj(cl);
+      const vmeta = statisticsVerdict(cl);
+      const numText = (cl.number === null || cl.number === undefined || cl.number === "")
+        ? "未知" : String(cl.number);
+      const unit = String(cl.unit || "");
+      const metric = String(cl.metric || "");
+      const qual = cardObj(cl.qualifiers);
+      const qualBits = [];
+      if (qual.time) qualBits.push(`时间 ${escapeHtml(String(qual.time))}`);
+      if (qual.place) qualBits.push(`地点 ${escapeHtml(String(qual.place))}`);
+      if (qual.entity) qualBits.push(`主体 ${escapeHtml(String(qual.entity))}`);
+      if (qual.base) qualBits.push(`基数 ${escapeHtml(String(qual.base))}`);
+      const srcMeta = [];
+      if (cl.source_number) srcMeta.push(`<span class="chat-ev-stance">来源数值 ${escapeHtml(String(cl.source_number))}</span>`);
+      if (cl.source_title) srcMeta.push(`<span class="chat-ev-stance">《${escapeHtml(String(cl.source_title))}》</span>`);
+      const srcUrlText = monitorUrlText(cl.source_url);
+      const srcHtml = (srcMeta.length || srcUrlText || cl.quote)
+        ? `<div class="chat-stat-source">${srcMeta.join("")}` +
+          (srcUrlText ? `<div class="chat-ev-url">${srcUrlText}（外部链接，纯文本展示）</div>` : "") +
+          (cl.quote ? `<blockquote class="chat-ev-quote">${escapeHtml(String(cl.quote))}</blockquote>` : "") +
+          "</div>"
+        : "";
+      return `<li class="chat-stat-claim">
+          <div class="chat-stat-claim-head">
+            <b>${escapeHtml(String(cl.claim_id || ""))}</b>
+            <span class="chat-stat-excerpt">${escapeHtml(String(cl.excerpt || ""))}</span>
+          </div>
+          <div class="chat-badges">
+            <span class="badge ${vmeta.cls}">口径判定：${escapeHtml(vmeta.text)}</span>
+            <span class="badge gray">数值 ${escapeHtml(numText)}${escapeHtml(unit)}${metric ? `（${escapeHtml(metric)}）` : ""}</span>
+          </div>
+          ${qualBits.length ? `<p class="chat-stat-qual">限定条件：${qualBits.join(" · ")}</p>` : ""}
+          ${srcHtml}
+          ${cl.basis ? `<p class="chat-stat-basis">比对依据：${escapeHtml(String(cl.basis))}</p>` : ""}
+          <p class="chat-ev-url">该主张口径截至（as_of）：${escapeHtml(String(cl.as_of || "未知"))}</p>
+        </li>`;
+    }).join("")}</ul>`
+      : '<p class="chat-insight-sub muted">本次没有识别到可核对的数字主张（合法空出口，不强行比对）。</p>';
+
+    const limitHtml = limits.length
+      ? `<div class="chat-auth-section-title">本轮的比对限制</div>` +
+        `<ul class="chat-auth-limits">${limits.map((x) => `<li>${escapeHtml(String(x))}</li>`).join("")}</ul>`
+      : "";
+
+    return `
+      <div class="chat-card chat-card-statistics">
+        <div class="chat-card-title">📊 统计说法核查<span class="badge gray">只比对口径 · 不判真假 · 无分数</span>${degradedBadge(c)}</div>
+        <div class="chat-badges">
+          <span class="badge gray">${escapeHtml(statusText)}</span>
+          ${taskText ? `<span class="badge gray">${escapeHtml(taskText)}</span>` : ""}
+          <span class="badge gray">数字主张 ${claims.length} 条</span>
+          ${stateText ? `<span class="badge gray">运行状态：${escapeHtml(stateText)}</span>` : ""}
+        </div>
+        <p class="chat-insight-sub">输入：${escapeHtml(String(c.text || "（未记录）"))}</p>
+        <div class="chat-auth-section-title">逐主张口径比对（判定全部由代码完成，逐字转述）</div>
+        ${claimHtml}
+        ${limitHtml}
+        ${cardIssueFold(gaps, errors)}
+        <p class="chat-insight-note muted">已执行 ${countText(counts.searches)} 次搜索 · ${countText(counts.pages)} 次读页 · ${countText(counts.llm_calls)} 次模型调用。判定全部由代码完成：只比对数字与单位口径，不判说法真假；「未核实到」只表示本次没有定位到可比对的来源数字。</p>
+        ${asOfLine(c.as_of)}
+      </div>`;
+  }
+
+  /* ---------- 13. 档案对比卡（compare_dossiers：两份档案的只读 diff） ----------
+     由后端 tools_compare 产出：card = {card_type:"comparison", status, degraded,
+     left, right, similarity{suspected_same_source, basis}, conclusion_delta{changed,
+     from_label, to_label, from_as_of, to_as_of}, evidence_diff{added_count,
+     removed_count, added[{url,title,relation}], removed}, source_diff{added_domains,
+     removed_domains}, limits, gaps}。单侧形如 {id, title, label, 置信度档位, as_of,
+     versions, evidence_count, domains}，读失败 / 不存在时为 null。
+     口径诚实铁律同全文件：置信度只出 high/medium/low 档位徽章（无数值分）；相似度
+     只标「疑似同源」徽章，卡内不出任何相似度数值与阈值（只在 data 层留档），也不出
+     风险分；标签演进只述「从 X 变为 Y（as_of …）」，不做升级/降级判断；证据与信源
+     URL 是外部内容，纯文本展示；任一侧缺结论如实说「尚无结论」，不编造。 */
+
+  /* 单侧档案：缺结论 / 缺置信度 / 缺 as_of 都如实标注，不拿默认值冒充 */
+  function comparisonSide(side, name) {
+    if (!side || typeof side !== "object") {
+      return `<div class="chat-cmp-side">
+          <div class="chat-cmp-side-name">${escapeHtml(name)}</div>
+          <p class="chat-insight-sub muted">该侧读取失败或不可用（见缺口，不编造）。</p>
+        </div>`;
+    }
+    const label = String(side.label || "");
+    return `<div class="chat-cmp-side">
+        <div class="chat-cmp-side-name">${escapeHtml(name)}：#${escapeHtml(String(side.id || "未知"))} 《${escapeHtml(String(side.title || "未命名"))}》</div>
+        <div class="chat-cmp-side-label">${label ? escapeHtml(label) : '<span class="muted">尚无结论（该档案还没有跑过核查）</span>'}</div>
+        <div class="chat-badges">
+          ${confTierBadge(side)}
+          <span class="badge gray">证据 ${Number(side.evidence_count) || 0} 条</span>
+        </div>
+        <p class="chat-ev-url">结论 as_of：${escapeHtml(String(side.as_of || "未知"))}</p>
+      </div>`;
+  }
+
+  /* 证据条目：+/- 增减标记 + 立场原文 + URL 纯文本（外部内容不造可点链接） */
+  function comparisonEvidenceEntry(entry, sign) {
+    entry = cardObj(entry);
+    const urlText = monitorUrlText(entry.url);
+    return `<li><span class="chat-ev-stance">${escapeHtml(sign)}</span>` +
+      `${escapeHtml(String(entry.title || entry.url || "（无标题）"))}` +
+      `<span class="muted">（${escapeHtml(String(entry.relation || "立场未标注"))}）</span>` +
+      (urlText ? `<div class="chat-ev-url">${urlText}</div>` : "") + "</li>";
+  }
+
+  function renderComparison(c) {
+    c = cardObj(c);
+    const limits = cardList(c.limits);
+    const gaps = cardList(c.gaps);
+    const delta = cardObj(c.conclusion_delta);
+    const evDiff = cardObj(c.evidence_diff);
+    const srcDiff = cardObj(c.source_diff);
+    const sim = cardObj(c.similarity);
+    const statusText = EVIDENCE_STATUS[String(c.status || "")] || String(c.status || "未知");
+
+    const deltaHtml = delta.changed
+      ? `<li class="chat-cmp-diff-item">标签演进：从「${escapeHtml(String(delta.from_label || ""))}」（as_of ${escapeHtml(String(delta.from_as_of || "未知"))}）变为「${escapeHtml(String(delta.to_label || ""))}」（as_of ${escapeHtml(String(delta.to_as_of || "未知"))}）</li>`
+      : '<li class="chat-cmp-diff-item">标签演进：两端标签未变（或任一侧缺结论，见缺口）</li>';
+
+    const simBadge = sim.suspected_same_source
+      ? '<span class="badge amber">疑似同源（仅标注，不作同一性断言）</span>'
+      : '<span class="badge gray">未见明显同源（仅标注，不作同一性断言）</span>';
+    const simHtml = `<li class="chat-cmp-diff-item">指纹相似度：${simBadge}</li>` +
+      (sim.basis ? `<li class="chat-cmp-diff-item muted">${escapeHtml(String(sim.basis))}</li>` : "");
+
+    const evAdded = cardList(evDiff.added);
+    const evRemoved = cardList(evDiff.removed);
+    const evHtml = (c.evidence_diff === undefined || c.evidence_diff === null) ? "" : `
+        <div class="chat-auth-section-title">证据增减（按 url 去重，以左档案为基准）</div>
+        <ul class="chat-ev-list">
+          ${evAdded.map((e) => comparisonEvidenceEntry(e, "+")).join("")}
+          ${evRemoved.map((e) => comparisonEvidenceEntry(e, "-")).join("")}
+        </ul>
+        <p class="chat-insight-sub muted">新增 ${Number(evDiff.added_count) || 0} 条 · 减少 ${Number(evDiff.removed_count) || 0} 条</p>`;
+
+    const addDomains = cardList(srcDiff.added_domains);
+    const remDomains = cardList(srcDiff.removed_domains);
+    const srcHtml = (c.source_diff === undefined || c.source_diff === null) ? "" : `
+        <div class="chat-auth-section-title">信源域名增减</div>
+        <p class="chat-insight-sub">新增 ${addDomains.length ? escapeHtml(addDomains.join("、")) : "无"} · 减少 ${remDomains.length ? escapeHtml(remDomains.join("、")) : "无"}</p>`;
+
+    const limitHtml = limits.length
+      ? `<div class="chat-auth-section-title">本轮的对比限制</div>` +
+        `<ul class="chat-auth-limits">${limits.map((x) => `<li>${escapeHtml(String(x))}</li>`).join("")}</ul>`
+      : "";
+
+    return `
+      <div class="chat-card chat-card-comparison">
+        <div class="chat-card-title">🆚 档案对比<span class="badge gray">只读 diff · 不重算 · 无分数</span>${degradedBadge(c)}</div>
+        <div class="chat-badges">
+          <span class="badge gray">${escapeHtml(statusText)}</span>
+        </div>
+        <div class="chat-cmp-sides">
+          ${comparisonSide(c.left, "左档案")}
+          ${comparisonSide(c.right, "右档案")}
+        </div>
+        <div class="chat-cmp-diff">
+          <div class="chat-auth-section-title">结论差异</div>
+          <ul class="chat-cmp-diff-list">
+            ${deltaHtml}
+            ${simHtml}
+          </ul>
+          ${evHtml}
+          ${srcHtml}
+        </div>
+        ${limitHtml}
+        ${cardIssueFold(gaps, [])}
+        <p class="chat-insight-note muted">纯读取 diff：只陈述两侧档案已记录的内容，不重算、不判断真假、不做升级/降级判断；相似度只用于标注疑似同源。要核查具体说法请用事实核查 / 权威核验。</p>
+        ${asOfLine(c.as_of)}
+      </div>`;
+  }
+
+  /* ---------- 14. 事件时间线卡（event_timeline：按主题整理带引文事件） ----------
+     由后端 tools_timeline 产出：card = {card_type:"timeline", status, task_status,
+     as_of, degraded, query, state, state_label, events[{date, precision, event,
+     source_url, source_title, quote, evidence_id}], undated[{event, source_url,
+     source_title, quote}], range{earliest, latest}, limits, gaps, errors, counts
+     {searches,pages,llm_calls,events,dropped}}。
+     口径诚实铁律同全文件：引文逐字透传（折叠呈现，不改写、不补造）；日期精度只做
+     中文文字徽章（day/month/year 三值封闭枚举，未知原样）；来源 URL 是外部内容，
+     只做纯文本展示（与监测卡同口径，不造可点链接）；「时间不详」事件单独成区，
+     不混入主线；只述有来源记录的事件，不判真假、不外推趋势。 */
+  const TIMELINE_PRECISION_META = {
+    day: "精确到日",
+    month: "精确到月",
+    year: "精确到年",
+  };
+
+  /* 时间线条目（有日期 / 时间不详共用）：引文折叠 + 来源纯文本；URL 不做可点链接 */
+  function timelineEventItem(ev, dated) {
+    ev = cardObj(ev);
+    const meta = [];
+    if (dated) {
+      meta.push(`<span class="chat-timeline-date">${escapeHtml(String(ev.date || "日期未知"))}</span>`);
+      meta.push(`<span class="badge gray">${escapeHtml(TIMELINE_PRECISION_META[String(ev.precision || "")] || String(ev.precision || "精度未知"))}</span>`);
+    }
+    if (ev.evidence_id) meta.push(`<span class="chat-ev-stance">${escapeHtml(String(ev.evidence_id))}</span>`);
+    const urlText = monitorUrlText(ev.source_url);
+    return `<li class="chat-timeline-item">
+        <div class="chat-timeline-head">${meta.join("")}</div>
+        <div class="chat-timeline-event">${escapeHtml(String(ev.event || ""))}</div>
+        ${ev.quote ? `<details class="chat-evidence-fold"><summary>引文（逐字）</summary><blockquote class="chat-ev-quote">${escapeHtml(String(ev.quote))}</blockquote></details>` : ""}
+        ${(ev.source_title || urlText) ? `<div class="chat-ev-url">《${escapeHtml(String(ev.source_title || "（无标题）"))}》${urlText ? ` · ${urlText}` : ""}</div>` : ""}
+      </li>`;
+  }
+
+  function renderTimeline(c) {
+    c = cardObj(c);
+    const counts = cardObj(c.counts);
+    const events = cardList(c.events);
+    const undated = cardList(c.undated);
+    const limits = cardList(c.limits);
+    const gaps = cardList(c.gaps);
+    const errors = cardList(c.errors);
+    const range = cardObj(c.range);
+    const statusText = EVIDENCE_STATUS[String(c.status || "")] || String(c.status || "未知");
+    const taskText = EVIDENCE_TASK[String(c.task_status || "")] || "";
+    const stateText = String(c.state_label || c.state || "");
+
+    const eventsHtml = events.length
+      ? `<ul class="chat-timeline-events">${events.map((ev) => timelineEventItem(ev, true)).join("")}</ul>`
+      : '<p class="chat-insight-sub muted">本次没有带日期的事件（不编造）。</p>';
+    const undatedHtml = undated.length ? `
+        <div class="chat-timeline-undated-title">时间不详（${undated.length} 条，不混入主线）</div>
+        <ul class="chat-timeline-events">${undated.map((u) => timelineEventItem(u, false)).join("")}</ul>` : "";
+    const limitHtml = limits.length
+      ? `<div class="chat-auth-section-title">本轮的整理限制</div>` +
+        `<ul class="chat-auth-limits">${limits.map((x) => `<li>${escapeHtml(String(x))}</li>`).join("")}</ul>`
+      : "";
+
+    return `
+      <div class="chat-card chat-card-timeline">
+        <div class="chat-card-title">🗓️ 事件时间线<span class="badge gray">只述有来源记录的事件 · 不外推</span>${degradedBadge(c)}</div>
+        <div class="chat-badges">
+          <span class="badge gray">${escapeHtml(statusText)}</span>
+          ${taskText ? `<span class="badge gray">${escapeHtml(taskText)}</span>` : ""}
+          <span class="badge gray">有日期 ${events.length} 条 · 时间不详 ${undated.length} 条</span>
+          ${stateText ? `<span class="badge gray">运行状态：${escapeHtml(stateText)}</span>` : ""}
+        </div>
+        <p class="chat-insight-sub">主题：${escapeHtml(String(c.query || "（未记录）"))}</p>
+        <p class="chat-insight-count">时间范围：${escapeHtml(String(range.earliest || "未知"))} 至 ${escapeHtml(String(range.latest || "未知"))}</p>
+        ${eventsHtml}
+        ${undatedHtml}
+        ${limitHtml}
+        ${cardIssueFold(gaps, errors)}
+        <p class="chat-insight-note muted">已执行 ${countText(counts.searches)} 次搜索 · ${countText(counts.pages)} 次读页 · ${countText(counts.llm_calls)} 次模型调用；收录 ${countText(counts.events)} 条事件 · 丢弃 ${countText(counts.dropped)} 条。只述有来源记录的事件，不判真假、不外推趋势。</p>
+        ${asOfLine(c.as_of)}
+      </div>`;
+  }
+
   /* ---------- 分发：优先 claim_answer，其次保留既有业务卡片兼容 ---------- */
   function renderCard(payload) {
     if (!payload || typeof payload !== "object") return "";
@@ -1411,6 +1713,9 @@
     if (type === "authority") return renderAuthority(payload);
     if (type === "source") return renderSource(payload);
     if (type === "guide") return renderGuide(payload);
+    if (type === "statistics") return renderStatistics(payload);
+    if (type === "comparison") return renderComparison(payload);
+    if (type === "timeline") return renderTimeline(payload);
     if (type === "batch_summary") return renderBatchSummary(payload);
     if (type === "monitor_change") return renderMonitorChange(payload);
     if (type === "conclusion") return renderConclusion(payload);
@@ -1444,6 +1749,7 @@
     renderCard, renderClaimAnswer, renderConclusion, renderSpeech, renderHeat,
     renderInsights, renderEvidence, renderResearch, renderAuthority,
     renderSource, renderGuide,
+    renderStatistics, renderComparison, renderTimeline,
     renderBatchSummary, renderMonitorChange,
     mountCard, escapeHtml,
   };

@@ -2,7 +2,7 @@
 """workflow 编排引擎层测试（registry/plan/runner + v9 迁移 + session_store 扩参）。
 
 锁定（Agent工作流规格 §2/§3）：
-  - 能力注册表：入口 action ↔ capability 映射（11 入口 + 6 横向工具不注册）；
+  - 能力注册表：入口 action ↔ capability 映射（14 入口 + 6 横向工具不注册）；
   - Plan 展开：单步/claim 六步计划形状、plan_id、to_dict、plan_step_tool；
   - ordered_steps 拓扑序与依赖校验；aggregate_execution_status 归并口径；
   - derive_task_status / shell_to_three_axis 三轴拆分；
@@ -40,7 +40,8 @@ from mylocalai.assistant.session_store import SessionStore  # noqa: E402
 from mylocalai.core.claim_workflow import PLAN_STEPS, _DEPS  # noqa: E402
 from mylocalai.dossier.store import SCHEMA_VERSION, connect, migrate  # noqa: E402
 
-#: 规格清单：11 个入口 action（按能力分组）+ 6 个横向工具（对话跟进，不注册）。
+#: 规格清单：14 个入口 action（按能力分组）+ 6 个横向工具（对话跟进，不注册）。
+#: 第五波新增三个只读对话能力（统计说法核查/档案对比/事件时间线），各带 1 个入口。
 _ENTRY_ACTIONS = {
     "claim-checking": ("verify_claim", "recheck_dossier"),
     "evidence-research": ("collect_evidence",),
@@ -50,14 +51,17 @@ _ENTRY_ACTIONS = {
     "speech-understanding": ("analyze_speech",),
     "source-credibility": ("check_source",),
     "fact-check-guide": ("guide_fact_check",),
+    "statistical-claim-checking": ("check_statistics",),
+    "dossier-comparison": ("compare_dossiers",),
+    "event-timeline": ("event_timeline",),
 }
 
 
 class CapabilityRegistryTests(unittest.TestCase):
     """能力注册表：机器可读契约的封闭性。"""
 
-    def test_all_seventeen_actions_covered(self):
-        """17 个 action 全覆盖：11 个入口 → 能力 ID；6 个横向工具 → None。"""
+    def test_all_twenty_actions_covered(self):
+        """20 个 action 全覆盖：14 个入口 → 能力 ID；6 个横向工具 → None。"""
         entry_total = 0
         for capability_id, actions in _ENTRY_ACTIONS.items():
             for action in actions:
@@ -65,7 +69,7 @@ class CapabilityRegistryTests(unittest.TestCase):
                 entry_total += 1
         for action in HORIZONTAL_TOOLS:
             self.assertIsNone(capability_for_action(action), action)
-        self.assertEqual(entry_total, 11)
+        self.assertEqual(entry_total, 14)
         self.assertEqual(len(HORIZONTAL_TOOLS), 6)
         # 未注册名同样 None（不猜能力）
         self.assertIsNone(capability_for_action("not_a_tool"))
@@ -78,7 +82,7 @@ class CapabilityRegistryTests(unittest.TestCase):
         for capability_id, capability in CAPABILITIES.items():
             for action in capability.entry_actions:
                 self.assertEqual(capability_for_action(action), capability_id)
-        self.assertEqual(len(CAPABILITIES), 10)
+        self.assertEqual(len(CAPABILITIES), 13)
 
     def test_capabilities_machine_view_is_copy_safe(self):
         """机器可读视图是副本：改返回值不影响注册表内部。"""

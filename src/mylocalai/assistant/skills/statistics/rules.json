@@ -1,0 +1,16 @@
+{
+  "_comment": "统计说法核查的预算与开关。改这里不改代码：load_rules 会做类型校验，缺键/坏类型逐键回退内置默认，数值越界夹到安全区间，未知键丢弃。口径：每主张最多 2 个检索词、2 个页面（per_claim_max_queries/per_claim_max_pages），总量 max_searches=8/max_pages=8 与 max_llm_calls=12 对齐（1 次结构化 + 每主张每页 1 次段落定位 + 1 次可选补充说明）；不判内容真假、不给数值分、不建档不写库。计数类键（max_searches/max_pages/max_llm_calls）由 collect_core.CollectBudget 记账。",
+  "max_input_chars": 4000,
+  "max_claims": 5,
+  "max_searches": 8,
+  "max_pages": 8,
+  "per_claim_max_queries": 2,
+  "per_claim_max_pages": 2,
+  "max_llm_calls": 12,
+  "total_deadline_s": 90,
+  "io_timeout_s": 10,
+  "max_page_bytes": 1500000,
+  "max_text_chars": 20000,
+  "max_redirect_hops": 3,
+  "max_quote_chars": 300
+}

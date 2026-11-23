@@ -61,6 +61,8 @@
 │   │   │                       取证三技能 / 资料收集 / 权威核验（只读对话能力）
 │   │   ├── tools_source.py / tools_guide.py
 │   │   │                       信源可信度速查 / 辟谣方法指南（第四波只读对话能力）
+│   │   ├── tools_statistics.py / tools_compare.py / tools_timeline.py
+│   │   │                       统计说法核查 / 档案对比 / 事件时间线（第五波专用只读对话能力）
 │   │   ├── tools_batch.py      材料批次编排（阶段 2：同源分组 + 逐条核查 + 双预算）
 │   │   ├── tools_monitor.py    领域监测编排（阶段 3：授权闸 + 检索 + 变化摘要）
 │   │   ├── fingerprint.py      话术指纹纯函数（归一化/shingle/Jaccard——谣言库秒回的地基）
@@ -69,13 +71,14 @@
 │   │   ├── events.py           SSE 事件协议（封闭枚举：meta…done/error）
 │   │   ├── session_store.py    会话域三表读写（sessions/messages/tool_runs）
 │   │   ├── mcp_server.py       助手 MCP（python -m mylocalai.assistant.mcp_server）
-│   │   ├── capabilities/       用户能力层：10 份人读 SKILL.md（头注释带 分类/适用角色，
+│   │   ├── capabilities/       用户能力层：13 份人读 SKILL.md（头注释带 分类/适用角色，
 │   │   │                       不注入模型；机器契约唯一来源=registry+对应 pipeline）
 │   │   ├── skills/             技能执行层（SKILL.md 注入模型，注释头带 分类/服务能力）：
 │   │   │                       取证三技能 domain/sources/evidence、资料收集 research/、
-│   │   │                       权威核验 authority/、信源速查 source/、辟谣指南 guide/
+│   │   │                       权威核验 authority/、信源速查 source/、辟谣指南 guide/、
+│   │   │                       第五波专用三技能 statistics/comparison/timeline
 │   │   ├── workflow/           编排引擎（Agent工作流规格 §3 Router/Plan/Run）：registry
-│   │   │                       （能力注册表 10 条 + 6 个横向工具裁定）、plan（expand_plan
+│   │   │                       （能力注册表 13 条 + 6 个横向工具裁定）、plan（expand_plan
 │   │   │                       代码展开，claim-checking 六步复用 core/claim_workflow）、
 │   │   │                       runner（三轴状态/拓扑步序/持久化包装）、claim（六步执行器：
 │   │   │                       state 共享 + 传播取证首次接入 + compile_answer 答案编译）
@@ -297,8 +300,11 @@ python -m mylocalai.cli --attention-online "某段待分析的文本"
 - `src/mylocalai/attention/society_issues.json` —— 封闭议题清单（40 项，LLM 只能从中选 `issue_tags`）
 - `src/mylocalai/attention/prompts.json` —— 深读受控生成提示词（system 硬约束 + few-shot 正反对比）
 - `src/mylocalai/assistant/assistant_rules.json` 的 `role_tool_allowlists` 段 —— 四角色对话工具
-  白名单（按 skill 分类裁剪：通用 7 能力全角色可用，专用 verify_claim/recheck_dossier 仅
-  layperson+full；缺段/缺角色回落全局 tool_allowlist=fail-open，改这里不改代码，2026-11-22）
+  白名单（按 skill 分类裁剪：通用 7 能力全角色可用；专用工具按主角色分发——
+  verify_claim/recheck_dossier/check_statistics 仅 layperson+full，compare_dossiers 仅
+  analyst+full，event_timeline 仅 monitor+full（analyst 与 monitor 不再同集）；缺段/缺角色
+  回落全局 tool_allowlist=fail-open，full 恒全量，改这里不改代码；2026-11-22 起、
+  2026-11-23 第五波扩）
 用 `RUMOR_RULES_PATH` / `RUMOR_SOURCES_PATH` / `RUMOR_PROMPTS_PATH` / `LLM_PROVIDERS_PATH` /
 `DEEP_READ_RULES_PATH` / `DEEP_READ_ISSUES_PATH` / `DEEP_READ_PROMPTS_PATH` /
 `ASSISTANT_PROMPTS_PATH`（对话层人设整套替换）/ `ASSISTANT_PROMPTS_EXTRA_PATH`
@@ -356,12 +362,19 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 1764 个用例（unittest discover 全量，2026-11-22 角色 Agent 工作流（编排引擎 +
-角色工具白名单 + 全面去数值）落地后实测，含编排层 `tests/test_workflow_engine.py` 20 例、
-`tests/test_workflow_claim.py` 13 例、角色白名单 `tests/test_role_allowlists.py` 38 例与
-跨层对拍 `tests/test_workflow_integration.py` 5 例，以及隐私与授权可操作面板的
-UI 契约与 PUT /api/privacy/preferences 接口用例；**M4 起由 `tests.test_readme_counts`
-自动校验此数字与 mock 闸门条数，改动后须同步回写**）：
+离线套件共 1985 个用例（unittest discover 全量，2026-11-23 第五波三条专用技能落地后实测；
+此前 2026-11-22 角色 Agent 工作流（编排引擎 + 角色工具白名单 + 全面去数值）落地时为 1764 例，
+含编排层 `tests/test_workflow_engine.py` 20 例、`tests/test_workflow_claim.py` 13 例、
+角色白名单 `tests/test_role_allowlists.py` 38 例与跨层对拍
+`tests/test_workflow_integration.py` 5 例，以及隐私与授权可操作面板的
+UI 契约与 PUT /api/privacy/preferences 接口用例；第五波新增 221 例——
+统计说法核查 `tests/test_statistics_pipeline.py` 51 例 + `tests/test_statistics_tool.py`
+20 例、档案对比 `tests/test_comparison.py` 33 例 + `tests/test_compare_tool.py` 18 例、
+事件时间线 `tests/test_timeline_pipeline.py` 43 例 + `tests/test_timeline_tool.py` 20 例、
+前端三卡 `tests/test_statistics_ui.py` / `tests/test_comparison_ui.py` /
+`tests/test_timeline_ui.py` 各 12 例，另有 `test_role_prompts` / `test_workflow_engine` /
+`test_role_allowlists` / `test_workflow_integration` 四个对拍模块扩到 13 能力 / 20 action；
+**M4 起由 `tests.test_readme_counts` 自动校验此数字与 mock 闸门条数，改动后须同步回写**）：
 M1-M3 的全部回归（详见 git 历史），加上 M4 新增模块：
 **成本真实计数**（llm_client 进程级计数器：真实上游调用数 + usage tokens，缓存命中/
 single-flight 等待不计、取不到 usage 如实 0；loop 按"段前段后快照 delta"接线进
@@ -462,6 +475,10 @@ CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
 - `docs/Skill分类与提示词规范-v1.0.md` —— skill 通用/专用分类体系（按角色绑定）、
   提示词【角色身份/任务目标/边界】三段结构、谣言引擎链提示词外置与
   ASSISTANT_PROMPTS_PATH 覆盖机制、信源可信度速查/辟谣方法指南两条新能力的实施记录。
+- `docs/第五波专用技能-2026-11-23.md` —— 统计说法核查（check_statistics）/ 档案对比
+  （compare_dossiers）/ 事件时间线（event_timeline）三条专用只读对话能力的实施规格：
+  决策记录（含《Skill分类与提示词规范》§7 候选池三项从"留扩展位"到"已落地"）、
+  三条流水线口径、预算外置、状态/失败矩阵、测试矩阵与已知局限。
 - `src/mylocalai/rumor/README.md` —— 谣言 Agent 的架构、证据本、受控浏览、MCP 与降级行为。
 - `my_website/README.md` —— 展示网站的启动方式与页面功能。
 
@@ -498,7 +515,7 @@ CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
 - **回合预算与取消**：`CHAT_TURN_DEADLINE_S`（默认 180s）经 llm_cache 预算继承进引擎链；
   前端 AbortController → SSE 断开 → 协作取消（agent 轮询 cancel_check、judge 四取消位），
   超时/取消都诚实降级、已有卡片照发。
-- **取证三技能与用户能力分层**（2026-11-20）：面向用户的能力共**八项**（事实核查 /
+- **取证三技能与用户能力分层**（2026-11-20；该时点八项，后经第四波/第五波扩到**十三项**，见下方「Skill 通用/专用分类」与「第五波专用技能」两节）：彼时面向用户的能力共**八项**（事实核查 /
   证据研究 / 话题理解 / 言论理解 / 材料分析〔批量复合〕 / 领域监测〔持续复合〕 /
   资料收集 / 权威核验，`src/mylocalai/assistant/capabilities/`，各一份人读的
   SKILL.md；机器可执行契约的唯一规范来源是 registry 注册表 + 对应 pipeline，
@@ -545,10 +562,11 @@ CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
   **判定语义与角色无关**（RumorAgent 引擎提示词保持共享，同一说法在任何工作区同结论）。
   角色 ↔ 能力 ↔ Skill ↔ 通道的映射总表与防漂移测试见
   `docs/用户角色与Profile规格-v1.0.md` §8 与 `tests/test_role_prompts.py`。
-- **Skill 通用/专用分类**（2026-11-21）：面向用户的能力十项按角色绑定分两档——**通用**
+- **Skill 通用/专用分类**（2026-11-21，2026-11-23 第五波扩到十三项）：面向用户的能力按角色绑定分两档——**通用**
   （横向，任何工作区可用：证据研究 / 资料收集 / 权威核验 / 话题理解 / 言论理解 /
   信源可信度速查 / 辟谣方法指南）与**专用**（角色主能力：事实核查→普通用户 /
-  材料分析→分析师 / 领域监测→监测员）。分类登记在各能力 SKILL.md 头注释
+  材料分析→分析师 / 领域监测→监测员，第五波新增统计说法核查→普通用户 /
+  档案对比→分析师 / 事件时间线→监测员）。分类登记在各能力 SKILL.md 头注释
   （`分类` / `适用角色`）与执行层 SKILL.md 注释头（`分类` / `服务能力`），
   `tests/test_role_prompts.py` 做封闭枚举与映射对拍防漂移；新增能力先定分类再登记。
 - **信源可信度速查与辟谣方法指南**（2026-11-21 第四波只读对话能力，不建档、无分数；
@@ -574,20 +592,51 @@ CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
   `attention/prompts.json`）。
 - **角色 Agent 工作流与编排引擎**（2026-11-22；详见 `docs/角色Agent工作流规格-v1.0.md`）：
   按《Agent工作流规格》§3 落地 Plan/Run 编排层——`assistant/workflow/` 能力注册表
-  （10 条能力 + 6 个横向工具裁定：档案查询/导出/检索/画像/观点属对话跟进机制，不注册为
+  （13 条能力 + 6 个横向工具裁定：档案查询/导出/检索/画像/观点属对话跟进机制，不注册为
   能力）+ `expand_plan` 代码展开（模型不拼工具）+ claim-checking 六步执行器
   （state 共享复用 RumorAgent 完整取证链；**传播取证首次接入**：授权闸 fail-closed、
   失败 partial 级联不阻断；`compile_answer` 答案编译，旧引擎无引文锚定时 partial+诚实
   出口）+ 执行三轴（execution_status/task_status/assessment）随 tool_runs v9 落库
   （plan_id/step_id/两轴新列）。
   **角色工具白名单**：`assistant_rules.json` 的 `role_tool_allowlists` 按 skill 分类裁剪——
-  通用 7 能力全角色可用，专用 verify_claim/recheck_dossier 仅 layperson+full
-  （analyst/monitor 对话核查走既有 clarify 降级 + addon 导流到面板），fail-open 缺省回落
-  全量；路由工具目录按角色过滤（registry.catalog(allowlist)）；材料批次/领域监测面板
-  REST 加服务端角色闸（写端点 403，读端点仍按工作区归属）。
+  通用 7 能力全角色可用；专用工具按主角色分发（verify_claim/recheck_dossier/
+  check_statistics 仅 layperson+full，compare_dossiers 仅 analyst+full，event_timeline
+  仅 monitor+full；analyst 与 monitor 不再同集），被裁 action 走既有 clarify 降级 +
+  addon 导流到对应面板或工作区，fail-open 缺省回落全量；路由工具目录按角色过滤
+  （registry.catalog(allowlist)）；材料批次/领域监测面板 REST 加服务端角色闸
+  （写端点 403，读端点仍按工作区归属）。
   **全面去数值**：界面层去、数据层留档——risk_score 不进任何角色的对话卡片（原 layperson
   简化卡口径扩展到全角色；档案库/REST/导出留档），情绪强度改档位文案，批次条目与版本
   对比表以结论标签替代分数；置信度档位徽章与 E 分（关注度代理估计）保留。
+- **第五波专用技能**（2026-11-23；三条**专用**只读对话能力——按角色绑定、对话工具直调、
+  read-only 不建档无分数；详见 `docs/第五波专用技能-2026-11-23.md`）：
+  - **`check_statistics`**（text；"这个数字对吗 / 说得是不是这个数 / 口径一样吗 / 帮我核对下数据"）：
+    **统计说法核查**（layperson 主责）——贴一段含数字的说法，逐条把数字与已读来源正文做
+    口径比对，给四态判语"一致 / 不一致 / 口径不一致 / 未核实到"；数值抽取、千分位与
+    单位进率归一、约数容差（约/近 ±10%、超过=来源不低于、不足=来源不高于）与比对矩阵
+    **全部由代码完成**，LLM 只做摘录结构化与段落定位（引文不逐字锚定即丢弃）；
+    只比数字不判真假，「未核实到」不写成"数字为假"；原文一个数字都没有 →
+    `no_factual_claim` 合法空出口。检索/读页各受 public-search/public-web 授权闸
+    fail-closed，未授权零外发、状态如实。
+  - **`compare_dossiers`**（left_id/right_id；"对比档案 #3 和 #7 / 这两份档案差在哪"）：
+    **档案对比**（analyst 主责）——两份档案的只读 diff：结论标签演进（左档案首版 →
+    右档案末版）+ as_of + 置信度档位徽章、证据条目与信源域名增减（按 url 去重）、
+    两条声明原文的指纹相似度（达阈值只标「疑似同源」，**不是同一性证明**）；
+    纯函数从档案库直读派生，**零模型零网络**，不做升级/降级判断、不评证据强弱与
+    域名可信度；档案不存在/跨工作区同形拒绝，相同 id 指路 `get_dossier` 看版本历史。
+  - **`event_timeline`**（query；"把某话题的事件按时间排一下 / 这事先后顺序是怎样的"）：
+    **事件时间线**（monitor 主责）——按主题从授权检索渠道找来源、逐页读正文，抽出
+    "有来源记录的事件"（归一日期 + 一句描述 + 逐字引文 + 来源 URL）按时间排成一条线；
+    无日期事件单独成区不混主线，同源转载去重（合并不并结论）；不判真假、不外推趋势、
+    不给分数，读页域名锁定为候选来源自己的域。
+  - 三条的共享接线：`router.TOOL_ACTIONS` 17 → 20、`workflow/registry.py` 能力注册表
+    10 → 13 条、`assistant_rules.json` 的 `role_tool_allowlists` 按主角色分发专用工具
+    （check_statistics 仅 layperson+full、compare_dossiers 仅 analyst+full、
+    event_timeline 仅 monitor+full，**analyst 与 monitor 不再同集**）+ 新增
+    `statistics_model` / `timeline_model` 两个模型段（档案对比无模型段）、
+    `loop._CARD_TYPE` 三条卡片映射 + `statistics_skills` / `timeline_skills` 两个服务工厂
+    （档案对比不进服务盒）、`prompts.json` 的 router_system 目录补三条 action 与分流提示、
+    前端 `cards.js` 新增 renderStatistics / renderComparison / renderTimeline 三张卡。
 - **MCP 同期交付**：见下节。
 
 ## 记忆与完整性（2026-10-31，M3）

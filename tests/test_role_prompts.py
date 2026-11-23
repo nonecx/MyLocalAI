@@ -5,8 +5,8 @@
   一、_prompts_for_role 合并规则（addon 追加 / 覆盖 / full 逐位不变 / 未知角色回落）；
   二、loop 集成：三角色会话的 router/narrate system 按角色不同，full 与基座逐位一致；
   三、导流口径：analyst/monitor 的路由附加段包含面板导流与"不拼工具"指令；
-  四、SKILL.md 结构 lint（10 份能力文档的头字段与必备章节；通用/专用分类与
-      适用角色封闭枚举对拍；执行层 9 份 SKILL.md 的 分类/服务能力 映射对拍）；
+  四、SKILL.md 结构 lint（13 份能力文档的头字段与必备章节；通用/专用分类与
+      适用角色封闭枚举对拍；执行层 12 份 SKILL.md 的 分类/服务能力 映射对拍）；
   五、对拍：prompts.json 的 roles 键 ↔ dossier/profiles.py 的 ROLES；
      SKILL.md 的能力 id ↔ capabilities 目录名。
 
@@ -36,7 +36,8 @@ from mylocalai.dossier.store import DossierStore  # noqa: E402
 PROMPTS_PATH = ROOT / "src" / "mylocalai" / "assistant" / "prompts.json"
 CAPS_DIR = ROOT / "src" / "mylocalai" / "assistant" / "capabilities"
 
-#: 十个用户能力（目录名 ↔ 能力 id 的连字符形式）
+#: 十三个用户能力（目录名 ↔ 能力 id 的连字符形式；第五波新增统计说法核查/
+#: 档案对比/事件时间线三个只读对话能力）
 EXPECTED_CAPS = {
     "claim_checking": "claim-checking",
     "evidence_research": "evidence-research",
@@ -48,6 +49,9 @@ EXPECTED_CAPS = {
     "authority_verification": "authority-verification",
     "source_credibility": "source-credibility",
     "fact_check_guide": "fact-check-guide",
+    "statistical_claim_checking": "statistical-claim-checking",
+    "dossier_comparison": "dossier-comparison",
+    "event_timeline": "event-timeline",
 }
 
 #: 通用/专用分类与适用角色（按角色绑定，2026-11-21 分类体系）：
@@ -64,10 +68,21 @@ EXPECTED_CLASSIFICATION = {
     "authority_verification": ("通用", "全部"),
     "source_credibility": ("通用", "全部"),
     "fact_check_guide": ("通用", "全部"),
+    "statistical_claim_checking": ("专用", "layperson"),
+    "dossier_comparison": ("专用", "analyst"),
+    "event_timeline": ("专用", "monitor"),
+}
+
+#: 能力 id → 分类（由 EXPECTED_CAPS + EXPECTED_CLASSIFICATION 反查）：
+#: 执行层 SKILL.md 的「分类」必须与其服务的能力同分类（通用能力→通用，专用能力→专用）。
+CATEGORY_BY_CAP_ID = {
+    EXPECTED_CAPS[dirname]: category
+    for dirname, (category, _role) in EXPECTED_CLASSIFICATION.items()
 }
 
 #: 执行层 SKILL.md（skills/ 下，会注入模型）→ 服务的上层能力 id：
-#: 注释头带 `分类：通用` 与 `服务能力：<capability id>`，建立执行层→能力层映射。
+#: 注释头带 `分类：<与服务能力同分类>` 与 `服务能力：<capability id>`，建立执行层→能力层映射。
+#: 第五波新增 statistics/comparison/timeline 三份（分类：专用，服务第五波三个专用能力）。
 EXPECTED_SKILL_SERVICE = {
     "domain": "evidence-research",
     "sources": "evidence-research",
@@ -78,6 +93,9 @@ EXPECTED_SKILL_SERVICE = {
     "authority/adjudicate": "authority-verification",
     "source": "source-credibility",
     "guide": "fact-check-guide",
+    "statistics": "statistical-claim-checking",
+    "comparison": "dossier-comparison",
+    "timeline": "event-timeline",
 }
 
 #: SKILL.md 头注释必备字段与正文必备章节
@@ -287,7 +305,7 @@ class TestLoopRolePrompts(unittest.TestCase):
 
 class TestCapabilitySkillDocs(unittest.TestCase):
     def test_capability_docs_exist_with_header_and_sections(self):
-        """十个能力目录各有一份 SKILL.md：头字段齐全（含分类/适用角色）、必备章节齐全。"""
+        """十三个能力目录各有一份 SKILL.md：头字段齐全（含分类/适用角色）、必备章节齐全。"""
         dirs = {p.name for p in CAPS_DIR.iterdir()
                 if p.is_dir() and p.name != "__pycache__"}
         self.assertEqual(dirs, set(EXPECTED_CAPS), f"能力目录集合漂移: {dirs}")
@@ -321,13 +339,17 @@ class TestCapabilitySkillDocs(unittest.TestCase):
                               f"{dirname} 标专用但适用角色不是三角色之一")
 
     def test_execution_skill_docs_marked_with_service_capability(self):
-        """执行层 9 份 SKILL.md 注释头带 分类：通用 与 服务能力：<能力 id>（映射对拍）。"""
+        """执行层 12 份 SKILL.md 注释头带 分类（与服务能力同分类：通用/专用）
+        与 服务能力：<能力 id>（映射对拍）。"""
         skills_dir = ROOT / "src" / "mylocalai" / "assistant" / "skills"
+        self.assertEqual(len(EXPECTED_SKILL_SERVICE), 12)
         for rel, cap_id in EXPECTED_SKILL_SERVICE.items():
             path = skills_dir / rel / "SKILL.md"
             self.assertTrue(path.is_file(), f"缺少执行层 {path}")
             head = path.read_text(encoding="utf-8").split("-->", 1)[0]
-            self.assertIn("分类：通用", head, f"skills/{rel} 注释头缺 分类：通用")
+            category = CATEGORY_BY_CAP_ID[cap_id]
+            self.assertIn(f"分类：{category}", head,
+                          f"skills/{rel} 注释头缺 分类：{category}（应与服务能力同分类）")
             self.assertIn(f"服务能力：{cap_id}", head,
                           f"skills/{rel} 注释头缺 服务能力：{cap_id}（执行层映射漂移）")
 

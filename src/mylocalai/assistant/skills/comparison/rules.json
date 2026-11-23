@@ -1,0 +1,7 @@
+{
+  "_comment": "档案对比的呈现裁剪与相似度阈值。改这里不改代码：load_rules 会做类型校验，缺键/坏类型逐键回退内置默认，数值越界夹到安全区间，未知键丢弃。口径：三个 max_* 键只裁剪呈现量（版本历史/证据条目/域名清单各显示多少），不动判定、不改写任何数据；similarity_threshold 与 assistant_rules.json 的 fingerprint_threshold 同值（0.72），只用于标「疑似同源」徽章，不作同一性断言、不给任何评分。",
+  "max_versions": 10,
+  "max_evidence_items": 20,
+  "max_domain_items": 20,
+  "similarity_threshold": 0.72
+}

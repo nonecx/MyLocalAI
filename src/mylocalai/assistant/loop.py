@@ -40,9 +40,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from mylocalai.llm import llm_cache
 from mylocalai.assistant import router as router_mod
-from mylocalai.assistant import (tools_authority, tools_chapters, tools_evidence,
-                                 tools_guide, tools_heat, tools_insights, tools_memory,
-                                 tools_research, tools_source, tools_verify)
+from mylocalai.assistant import (tools_authority, tools_chapters, tools_compare,
+                                 tools_evidence, tools_guide, tools_heat,
+                                 tools_insights, tools_memory, tools_research,
+                                 tools_source, tools_statistics, tools_timeline,
+                                 tools_verify)
 from mylocalai.assistant.workflow import (capability_for_action, expand_plan,
                                           plan_step_tool, shell_to_three_axis)
 from mylocalai.assistant.context import build_context
@@ -83,6 +85,12 @@ _CARD_TYPE = {
     # 通用技能第四波：check_source → source 卡、guide_fact_check → guide 卡
     "check_source": "source",
     "guide_fact_check": "guide",
+    # 专用技能第五波（按角色绑定）：check_statistics → statistics 卡
+    # （cards.js renderStatistics）、compare_dossiers → comparison 卡
+    # （renderComparison）、event_timeline → timeline 卡（renderTimeline）
+    "check_statistics": "statistics",
+    "compare_dossiers": "comparison",
+    "event_timeline": "timeline",
 }
 
 _ARGS_PREVIEW_WIDTH = 60
@@ -744,6 +752,121 @@ def _real_service(name: str, rules: Dict[str, Any],
             return GuideSkills(llm_fn=_llm)
         return _guide_skills
 
+    # 第五波：statistics_skills / timeline_skills 两个流水线工厂（dossier-comparison
+    # 是确定性纯函数比对，tools_compare 直接调用，不建服务工厂）。两工厂均与
+    # research_skills 同口径：函数内 lazy import（装配期不依赖三技能落地）、
+    # consent 双门（public-search/public-web）、transport 按各自 rules.json 的
+    # 取页上限构造、llm_fn 按各自模型段。
+    if name == "statistics_skills":
+        def _statistics_skills():
+            from mylocalai.assistant.skills.statistics import StatisticsSkills
+            from mylocalai.assistant.skills.statistics.pipeline import load_rules
+            from mylocalai.assistant.skills.transport import default_transport
+            from mylocalai.core.privacy import load_preferences
+            from mylocalai.llm import llm_client
+
+            cfg = (rules or {}).get("statistics_model") or {}
+            pipe_rules = load_rules()
+
+            def _llm(system: str, user: str) -> Any:
+                return llm_client.chat_json(system, user,
+                                            temperature=float(cfg.get("temperature", 0)),
+                                            max_tokens=int(cfg.get("max_tokens", 800)),
+                                            namespace=str(cfg.get("cache_namespace",
+                                                                  "assistant_statistics")))
+
+            def _search(query, k=6):
+                # 与 research_skills / authority_skills 同口径：consent 门 +
+                # SearchResult 转 dict + degraded 判定（网络故障不是空结果）。
+                if not load_preferences().external_allowed("public-search"):
+                    return {"results": [], "degraded": True,
+                            "error": "consent_denied: 外部检索未授权"}
+                from mylocalai.retrieval.search import search_all
+                raw = search_all(str(query), k=k)
+                engines = raw.get("engines") or {}
+                error = str(raw.get("error") or "")
+                degraded = (bool(raw.get("blocked")) or bool(error)
+                            or not any((e or {}).get("ok") for e in engines.values()))
+                if degraded and not error:
+                    error = "检索后端均不可用"
+                rows = [r.to_dict() if hasattr(r, "to_dict") else r
+                        for r in (raw.get("results") or [])]
+                return {"results": rows, "degraded": degraded,
+                        "error": error, "engines": engines}
+            # rules.json 是取页上限的唯一来源（同 research_skills/authority_skills
+            # 口径）：不按本技能规则构造 transport 的话，运维改 max_page_bytes/
+            # io_timeout_s/max_redirect_hops/max_text_chars 对真实取页毫无作用。
+            transport = default_transport(
+                max_bytes=int(pipe_rules["max_page_bytes"]),
+                max_text_chars=int(pipe_rules["max_text_chars"]),
+                timeout_s=float(pipe_rules["io_timeout_s"]),
+                max_hops=int(pipe_rules["max_redirect_hops"]))
+
+            def _fetch(url, *, allowed_domains=None, cancel_check=None, deadline=None):
+                if not load_preferences().external_allowed("public-web"):
+                    return {"status": "error", "category": "consent_denied",
+                            "detail": "外部取页未授权", "url": url, "final_url": ""}
+                return transport.fetch(url, allowed_domains=allowed_domains,
+                                       cancel_check=cancel_check, deadline=deadline)
+            return StatisticsSkills(rules=pipe_rules, search_fn=_search,
+                                    fetch_fn=_fetch, llm_fn=_llm)
+        return _statistics_skills
+
+    if name == "timeline_skills":
+        def _timeline_skills():
+            from mylocalai.assistant.skills.timeline import TimelineSkills
+            from mylocalai.assistant.skills.timeline.pipeline import load_rules
+            from mylocalai.assistant.skills.transport import default_transport
+            from mylocalai.core.privacy import load_preferences
+            from mylocalai.llm import llm_client
+
+            cfg = (rules or {}).get("timeline_model") or {}
+            pipe_rules = load_rules()
+
+            def _llm(system: str, user: str) -> Any:
+                return llm_client.chat_json(system, user,
+                                            temperature=float(cfg.get("temperature", 0)),
+                                            max_tokens=int(cfg.get("max_tokens", 900)),
+                                            namespace=str(cfg.get("cache_namespace",
+                                                                  "assistant_timeline")))
+
+            def _search(query, k=6):
+                # 与 statistics_skills / research_skills 同口径：consent 门 +
+                # SearchResult 转 dict + degraded 判定（网络故障不是空结果）。
+                if not load_preferences().external_allowed("public-search"):
+                    return {"results": [], "degraded": True,
+                            "error": "consent_denied: 外部检索未授权"}
+                from mylocalai.retrieval.search import search_all
+                raw = search_all(str(query), k=k)
+                engines = raw.get("engines") or {}
+                error = str(raw.get("error") or "")
+                degraded = (bool(raw.get("blocked")) or bool(error)
+                            or not any((e or {}).get("ok") for e in engines.values()))
+                if degraded and not error:
+                    error = "检索后端均不可用"
+                rows = [r.to_dict() if hasattr(r, "to_dict") else r
+                        for r in (raw.get("results") or [])]
+                return {"results": rows, "degraded": degraded,
+                        "error": error, "engines": engines}
+            # rules.json 是取页上限的唯一来源（同 statistics_skills 口径）：运维改
+            # max_page_bytes/io_timeout_s/max_redirect_hops/max_text_chars 必须对
+            # 真实取页生效，不然就是"两处漂移"。
+            transport = default_transport(
+                max_bytes=int(pipe_rules["max_page_bytes"]),
+                max_text_chars=int(pipe_rules["max_text_chars"]),
+                timeout_s=float(pipe_rules["io_timeout_s"]),
+                max_hops=int(pipe_rules["max_redirect_hops"]))
+
+            def _fetch(url, *, allowed_domains=None, cancel_check=None, deadline=None):
+                if not load_preferences().external_allowed("public-web"):
+                    return {"status": "error", "category": "consent_denied",
+                            "detail": "外部取页未授权", "url": url, "final_url": ""}
+                return transport.fetch(url, allowed_domains=allowed_domains,
+                                       cancel_check=cancel_check, deadline=deadline)
+            return TimelineSkills(rules=pipe_rules, search_fn=_search,
+                                  fetch_fn=_fetch, llm_fn=_llm)
+        return _timeline_skills
+
     if name == "route_llm":
         cfg = (rules or {}).get("route_model") or {}
 
@@ -942,6 +1065,14 @@ class AssistantLoop:
             # 路由枚举与 allowlist 同步补 "check_source" / "guide_fact_check"。
             tools_source.register_all(reg, None)
             tools_guide.register_all(reg, None)
+            # 第五波三技能（统计说法核查 / 档案对比 / 事件时间线）：check_statistics
+            # 核数字与口径（layperson 主责），compare_dossiers 确定性比对两份档案
+            # （analyst 主责），event_timeline 按时间排事件（monitor 主责）；均只读、
+            # 不建档。路由枚举与 allowlist 同步补 "check_statistics" /
+            # "compare_dossiers" / "event_timeline"。
+            tools_statistics.register_all(reg, None)
+            tools_compare.register_all(reg, None)
+            tools_timeline.register_all(reg, None)
             self._registry = reg
         return self._registry
 

@@ -35,7 +35,8 @@ class Capability:
     composite: bool = False          # True=已登记复合形态（材料分析/领域监测）
 
 
-#: 十条能力（规格 §2 表 + 2026-11-20 修订的两个只读对话能力 + 两个面板复合形态）。
+#: 十三条能力（规格 §2 表 + 2026-11-20 修订的两个只读对话能力 + 两个面板复合形态
+#: + 第五波三个只读对话能力：统计说法核查 / 档案对比 / 事件时间线）。
 #: claim-checking 版本 "2" 与 core.ClaimCheckingPlan.to_dict 的 capability_version 同源。
 CAPABILITIES: Dict[str, Capability] = {
     # 事实核查：专用能力（主角色 layperson + full）；六步固定图见 core/claim_workflow.py。
@@ -80,6 +81,25 @@ CAPABILITIES: Dict[str, Capability] = {
     "domain-monitoring": Capability(
         capability_id="domain-monitoring", version="1", category="专用",
         roles=("monitor", "full"), channel="面板", entry_actions=(), composite=True),
+    # 统计说法核查（第五波）：专用能力（主角色 layperson + full）——"这个数对不对、
+    # 口径有没有问题"是普通用户工作区的主责（与 claim-checking 核"说法真假"分工：
+    # 本技能核数字与统计口径，只读、不建档、不出真假分）。
+    "statistical-claim-checking": Capability(
+        capability_id="statistical-claim-checking", version="1", category="专用",
+        roles=("layperson", "full"), channel="对话",
+        entry_actions=("check_statistics",)),
+    # 档案对比（第五波）：专用能力（主角色 analyst + full）——两份档案的并排比对是
+    # 专业用户·材料分析的主责；确定性纯函数比对（无检索、无模型，故不设模型段）。
+    "dossier-comparison": Capability(
+        capability_id="dossier-comparison", version="1", category="专用",
+        roles=("analyst", "full"), channel="对话",
+        entry_actions=("compare_dossiers",)),
+    # 事件时间线（第五波）：专用能力（主角色 monitor + full）——把零散事件按时间
+    # 排成线是专业用户·领域监测的主责。
+    "event-timeline": Capability(
+        capability_id="event-timeline", version="1", category="专用",
+        roles=("monitor", "full"), channel="对话",
+        entry_actions=("event_timeline",)),
 }
 
 #: 横向工具（对话跟进机制，不入能力枚举——见模块 docstring）。

@@ -1,0 +1,14 @@
+{
+  "_comment": "事件时间线流水线的预算与开关（第五波，服务 monitor 角色）。改这里不改代码：load_rules 会做类型校验，缺键/坏类型逐键回退内置默认，数值越界夹到安全区间，未知键丢弃。口径：只述「有来源记录的事件」——每条事件必须带 ≥1 条已读正文逐字锚定引文 + 来源 URL，缺一丢弃记 limits；无日期事件进 undated 区不混主线；不判真假、不外推趋势、不给分数、不建档。计数类键（max_searches/max_pages/max_llm_calls）由 collect_core.CollectBudget 记账；max_events/max_input_chars/max_quote_chars 由 pipeline 自行按上限截断。",
+  "max_input_chars": 200,
+  "max_events": 20,
+  "max_searches": 6,
+  "max_pages": 8,
+  "max_llm_calls": 10,
+  "total_deadline_s": 90,
+  "io_timeout_s": 10,
+  "max_page_bytes": 1500000,
+  "max_text_chars": 20000,
+  "max_redirect_hops": 3,
+  "max_quote_chars": 300
+}

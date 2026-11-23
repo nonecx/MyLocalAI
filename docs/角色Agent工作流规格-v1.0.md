@@ -10,6 +10,10 @@
 > -v1.0.md》（通用/专用分类）、《用户角色与Profile规格-v1.0.md》（四角色工作区）。
 > 原则延续：**模型不拼工具**；**判定语义全角色一致**；**每个出口都有降级**；
 > 白名单 fail-open 回落既有行为；全离线可测（测试一律 stub）。
+> 2026-11-23 回流：第五波三条专用技能（统计说法核查 / 档案对比 / 事件时间线）落地后，
+> 本文 §2（四角色工作流）、§3（注册表 13 条）、§4.1（角色白名单按主角色分发，
+> analyst 与 monitor 不再同集）、§6/§7（测试与局限）已同步更新；实施口径见
+> `docs/第五波专用技能-2026-11-23.md`。
 
 ## 1. 决策记录
 
@@ -31,7 +35,7 @@
 ### 2.1 layperson 普通用户（核查主线 · 简化语气）
 
 ```
-消息 → router.route(role="layperson")：白名单 17 工具 + 3 元动作（含专用 verify_claim/recheck_dossier）
+消息 → router.route(role="layperson")：白名单 18 工具 + 3 元动作（含专用 verify_claim/recheck_dossier/check_statistics）
     → expand_plan：verify_claim/recheck_dossier → claim-checking 六步计划
     → loop 折叠为一次承载工具调用 → workflow.claim 六步执行器
     → 卡片去数值 + presentation="simple"（简化标题/语气，narrate 禁数值）
@@ -40,6 +44,7 @@
 | 能力 | 编排 | 出口姿态 |
 |---|---|---|
 | claim-checking〔专用〕 | verify_claim / recheck_dossier → 六步计划（提取→事实取证→传播→评估→校验→提交） | 人话结论先行；无主张短出口不调取证；卡片无 risk_score |
+| statistical-claim-checking〔专用·第五波〕 | check_statistics → 单步计划（检索 + 读页 + 代码口径比对） | 四态判语只比数字；「未核实到」不写成「数字为假」 |
 | 通用 7 能力 | 各自单步计划 | 只述证据/档位，不下真假结论 |
 | 面板（材料批次/领域监测） | 无权限（403） | addon 一句话导流："那是专业用户工作区的功能，顶栏可切换" |
 
@@ -49,12 +54,13 @@
 批量材料："我收集了一批材料/帮我批量查" → addon 导流左栏「材料批次」面板
     → POST /api/batch（角色闸 role∈{analyst,full}，403 detail 见 §4.2）
     → 逐条 RumorAgent.analyze + 建档 → 汇总卡（计数与分布）
-对话内：通用 7 能力 + 横向工具（白名单 15 工具，无 verify_claim/recheck_dossier）
+对话内：通用 7 能力 + 横向工具 + 专用 compare_dossiers（白名单 16 工具，无 verify_claim/recheck_dossier/check_statistics）
 ```
 
 | 能力 | 编排 | 出口姿态 |
 |---|---|---|
 | material-analysis〔专用·面板·复合〕 | REST 通道，不占对话枚举 | 汇总转述只复述汇总卡计数与分布，不新增/改写条目结论 |
+| dossier-comparison〔专用·第五波〕 | compare_dossiers → 单步直执（纯函数，无模型无网络，不进服务盒） | 只陈述两侧已记录的 diff，不做升级/降级判断；「疑似同源」不是同一性证明 |
 | 通用 7 能力 | 单步计划 | 可带档案号与 as_of，展开关键证据/缺口/降级原因 |
 | 专用核查工具 | 白名单裁剪 | 用户明确只查一条 → addon 引导去材料批次面板或普通用户工作区 |
 
@@ -64,18 +70,20 @@
 盯领域："帮我盯着某领域/有新消息提醒我" → addon 导流左栏「领域监测」面板
     → 订阅 CRUD + run-now（角色闸 role∈{monitor,full}）→ 调度线程到点跑检
     → 变化卡（URL 差集 + E 分首末差，只在面板呈现）
-对话内：check_heat/compute_heat/deep_read 回答话题热度（白名单 15 工具）
+对话内：check_heat/compute_heat/deep_read 回答话题热度 + 专用 event_timeline（白名单 16 工具，无 verify_claim/recheck_dossier/check_statistics/compare_dossiers）
 ```
 
 | 能力 | 编排 | 出口姿态 |
 |---|---|---|
 | domain-monitoring〔专用·面板·复合〕 | REST + 调度通道，不占对话枚举 | 只述检索结果与变化，不做真假断言；E 分注明代理估计 |
+| event-timeline〔专用·第五波〕 | event_timeline → 单步计划（检索 + 读页 + 事件抽取 + 排序） | 只述有来源记录的事件；无日期事件单独成区；不外推趋势 |
 | topic-understanding〔通用〕 | check_heat/compute_heat/deep_read | 热度不代表真实性 |
 | 专用核查工具 | 白名单裁剪 | addon："单条说法的直接核查不在本工作区对话内，可切普通用户工作区" |
 
 ### 2.4 full 全量
 
-白名单 17 工具 + 3 元动作（与 layperson 同集）；`roles.full = {}` → 提示词基座原样注入；
+白名单 20 工具 + 3 元动作（与全局 `tool_allowlist` 同集，含全部专用对话工具）；
+`roles.full = {}` → 提示词基座原样注入；
 两个面板服务端闸都放行（full 同时在 {analyst,full} 与 {monitor,full} 内）；
 路由行为与加角色前逐位一致（`role="full"` 恒走全局 `tool_allowlist`）。
 
@@ -87,6 +95,9 @@
 | 批量材料 | addon 一句话说明是专业用户·材料分析工作区功能 | addon 导流左栏「材料批次」面板 | 无专属 addon 指令 | 无 addon；服务端面板闸放行（analyst,full） |
 | 盯领域/订阅 | addon 一句话说明是专业用户·领域监测工作区功能 | 无专属 addon 指令 | addon 导流左栏「领域监测」面板 | 无 addon；服务端面板闸放行（monitor,full） |
 | 通用 7 能力 | 就地执行 | 就地执行 | 就地执行 | 就地执行 |
+| 核对数字/口径（check_statistics） | 就地执行（layperson 专用） | 被裁 → clarify（导流口径同"单条说法核查"行） | 被裁 → clarify（导流口径同"单条说法核查"行） | 就地执行 |
+| 对比两份档案（compare_dossiers） | 被裁 → clarify（导流切 analyst 工作区） | 就地执行（analyst 专用） | 被裁 → clarify（导流切 analyst 工作区） | 就地执行 |
+| 事件时间线（event_timeline） | 被裁 → clarify（导流切 monitor 工作区） | 被裁 → clarify（导流切 monitor 工作区） | 就地执行（monitor 专用） | 就地执行 |
 
 ## 3. 编排引擎架构（新包 `src/mylocalai/assistant/workflow/`）
 
@@ -99,7 +110,7 @@
         → loop per-step 持久化（plan_id/step_id/execution_status/task_status，v9）
 ```
 
-- **registry.py**：`CAPABILITIES` 10 条（frozen dataclass：capability_id/version/
+- **registry.py**：`CAPABILITIES` 13 条（frozen dataclass：capability_id/version/
   category（通用|专用）/roles/channel（对话|面板）/entry_actions/composite）。映射：
   claim-checking v2 专用 (layperson,full) entry=`("verify_claim","recheck_dossier")`；
   evidence-research→`("collect_evidence",)`；information-collection→`("collect_research",)`；
@@ -107,7 +118,11 @@
   `("check_heat","compute_heat","deep_read")`；speech-understanding→`("analyze_speech",)`；
   source-credibility→`("check_source",)`；fact-check-guide→`("guide_fact_check",)`；
   material-analysis 专用 (analyst,full) 面板 composite；domain-monitoring 专用
-  (monitor,full) 面板 composite；`HORIZONTAL_TOOLS` 6 个横向工具明确不注册（D4）。
+  (monitor,full) 面板 composite；第五波三条专用对话能力：
+  statistical-claim-checking 专用 (layperson,full) entry=`("check_statistics",)`、
+  dossier-comparison 专用 (analyst,full) entry=`("compare_dossiers",)`、
+  event-timeline 专用 (monitor,full) entry=`("event_timeline",)`；
+  `HORIZONTAL_TOOLS` 6 个横向工具明确不注册（D4）。
 - **plan.py**：`expand_plan(action, args, *, role="full")` 代码展开——claim-checking
   六步 phase 计划复用 `core/claim_workflow.py` 的 `build_claim_checking_plan`；其余
   单步（横向工具/未注册名 → capability_id=None 单步直执）。`CLAIM_STEPS` 与
@@ -158,12 +173,20 @@
 
 ### 4.1 对话白名单（assistant_rules.json `role_tool_allowlists`）
 
-- **layperson / full**：17 工具 + 3 元动作（chitchat/clarify/refuse）——含专用
-  verify_claim/recheck_dossier；
-- **analyst / monitor**：15 工具 + 3 元动作——无 verify_claim/recheck_dossier；
+- **layperson**：18 工具 + 3 元动作（chitchat/clarify/refuse）——含专用
+  verify_claim/recheck_dossier **与第五波 check_statistics**（单条说法核查与统计说法核查
+  都是普通用户工作区的主责）；
+- **analyst**：16 工具 + 3 元动作——无 verify_claim/recheck_dossier/check_statistics，
+  **含第五波专用 compare_dossiers**（档案对比是专业用户·材料分析的主责）；
+- **monitor**：16 工具 + 3 元动作——无 verify_claim/recheck_dossier/check_statistics，
+  **含第五波专用 event_timeline**（事件时间线是专业用户·领域监测的主责）；
+  **analyst 与 monitor 自第五波起不再同集**（差集各为自家专用对话工具，
+  `tests/test_role_allowlists.py` 锁定 analyst − monitor = {compare_dossiers}、
+  monitor − analyst = {event_timeline}）；
+- **full**：20 工具 + 3 元动作，与全局 `tool_allowlist` 同集（full 恒全量，不读配置）。
 - 解析在 `router._role_allowlist`：role 缺省 / `"full"` → 全局 `tool_allowlist`
   （full 恒全量，不读配置）；段缺失/角色缺项/非列表/空列表 → 回落全局（fail-open，
-  D5）；路由枚举 = 角色白名单 ∪ META。
+  D5）；路由枚举 = 角色白名单 ∪ META（META 恒 3 个元动作）。
 - 路由模型目录按 `assistant/registry.py catalog(allowlist=...)` 过滤（D7）；loop 的
   action 通道 `resolve_action(action, role)` 用同一份白名单。
 
@@ -210,16 +233,20 @@ addon 维持各角色 posture（§2 各表"出口姿态"列）。
 
 | 测试模块 | 用例数 | 覆盖要点 |
 |---|---|---|
-| `tests/test_workflow_engine.py` | 20 | 17 action 映射全覆盖/entry_action_set 封闭；单步与 claim 计划形状（plan_id 前缀、to_dict）；拓扑序（依赖顺序/未知依赖/循环 ValueError）；归并口径与 core 对拍；三轴映射；v9 迁移幂等 + start/finish_run 扩参 + 老调用点不变；StepRunRecorder 落 plan/step |
+| `tests/test_workflow_engine.py` | 20 | 20 action 映射全覆盖/entry_action_set 封闭；单步与 claim 计划形状（plan_id 前缀、to_dict）；拓扑序（依赖顺序/未知依赖/循环 ValueError）；归并口径与 core 对拍；三轴映射；v9 迁移幂等 + start/finish_run 扩参 + 老调用点不变；StepRunRecorder 落 plan/step |
 | `tests/test_workflow_claim.py` | 13 | 无主张短出口；六步推进与状态；state 共享 compute-once；授权闸 fail-closed（零外发）；取消/传播失败折 partial；编译路径与 legacy 诚实出口 |
-| `tests/test_role_allowlists.py` | 38 | 配置对拍（rules 段 ↔ 注册表语义）；fail-open 回落矩阵；catalog 过滤；route 角色行为（被裁 action → clarify）；REST 闸（403/detail/读端点不动/fail-open） |
+| `tests/test_role_allowlists.py` | 38 | 配置对拍（rules 段 ↔ 注册表语义）；fail-open 回落矩阵；catalog 过滤；route 角色行为（被裁 action → clarify）；REST 闸（403/detail/读端点不动/fail-open）；第五波起 analyst − monitor = {compare_dossiers}、monitor − analyst = {event_timeline}、layperson 含 check_statistics |
 | `tests/test_workflow_integration.py` | 5 | 注册表 ↔ SKILL.md 头注释逐字对拍；role_tool_allowlists ↔ 注册表语义对拍；full 恒全量 |
 
 适配既有测试：test_chat_action_channel / test_research_tool / test_authority_tool /
 test_research_assistant（plan 形状 + capability_id）、test_cost_accounting（verify 段
 (1,321)→(2,642)：编排主张提取为真实新增调用，stub 未收 state 故翻倍，生产路径 state
 共享）、test_profiles / test_assistant_e2e / test_mcp_assistant / test_assistant_injection
-（去数值口径反转 + assertNotIn）。**全量 1758 例**（本轮实测 unittest discover 计数）。
+（去数值口径反转 + assertNotIn）。第五波（2026-11-23）新增三条专用技能的对拍与实现测试
+（统计说法核查 71 例、档案对比 51 例、事件时间线 63 例、前端三卡 36 例，合计 221 例，
+详见 `docs/第五波专用技能-2026-11-23.md` §7），既有对拍模块同步扩到 13 能力 / 20 action。
+**全量 1985 例**（2026-11-23 第五波落地后实测 unittest discover 计数；用例数由
+`tests/test_readme_counts.py` 自动守护，以 README 测试段实记为准）。
 
 ## 7. 已知局限与后续
 
@@ -239,6 +266,13 @@ test_research_assistant（plan 形状 + capability_id）、test_cost_accounting�
    （§3 持久化段）。
 6. **路由枚举仍以 action 名为界**（D1）：capability_id 直出路由枚举（v0.1 §3.1 的
    封闭结构）是后续波次；本层由代码映射达成同等的封闭性。
+7. **第五波专用工具按主角色分发后的可达性**（2026-11-23）：check_statistics 仅
+   layperson/full、compare_dossiers 仅 analyst/full、event_timeline 仅 monitor/full——
+   **analyst 与 monitor 不再同集**。monitor 想对比档案、analyst 想排时间线都要切工作区
+   （与材料批次/领域监测面板闸同一套角色口径）；full 工作区恒全量，是"什么都能干"的出口。
+8. **档案对比不进服务盒**（2026-11-23）：compare_dossiers 是零模型零网络纯函数，
+   不走 `_ServiceBox`（无模型段、无授权门、无死线），其"降级"只有参数拒绝/不存在/
+   单边读失败三类，没有检索类降级——文档与测试都不要按流水线五态套它。
 
 ## 8. 机器契约唯一来源
 

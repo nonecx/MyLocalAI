@@ -4,6 +4,9 @@
 > agent-claim-checking-v02）。本文记录本次升级的四件事：**skill 通用/专用分类体系**、
 > **提示词三段结构（角色身份/任务目标/边界）**、**提示词外置与覆盖机制**、
 > **两条新只读对话能力**（信源可信度速查 / 辟谣方法指南）。
+> 2026-11-23 第五波回流：§7 候选池三条候选（统计说法核查 / 档案对比 / 事件时间线）
+> 已落地为三条**专用**只读对话能力，§2 能力层映射表由 10 项扩到 13 项、执行层由 9 份扩到
+> 12 份；实施口径见 `docs/第五波专用技能-2026-11-23.md`。
 > 读者：项目作者、后续执行会话、评审者。
 > 原则延续（不变铁律）：**判定语义与角色/提示词措辞无关**（白名单、封闭枚举、
 > 状态机、JSON 键名契约逐字保留）；**大模型不参与判定**；**每个出口都有降级**；
@@ -31,7 +34,7 @@
 - **通用 skill**：横向能力，不绑定特定角色，任何工作区（含 full）都可用。
 - **专用 skill**：绑定特定角色的主能力，是该角色工作区的核心产物形态。
 
-**能力层映射（10 项）**：
+**能力层映射（13 项）**：
 
 | 分类 | 能力（capability id） | 工具/通道 | 适用角色 |
 | --- | --- | --- | --- |
@@ -45,11 +48,16 @@
 | 专用 | claim-checking 事实核查 | verify_claim | layperson |
 | 专用 | material-analysis 材料分析 | 批次面板 + REST | analyst |
 | 专用 | domain-monitoring 领域监测 | 监测面板 + REST + 调度 | monitor |
+| 专用 | statistical-claim-checking 统计说法核查（第五波） | check_statistics | layperson |
+| 专用 | dossier-comparison 档案对比（第五波） | compare_dossiers | analyst |
+| 专用 | event-timeline 事件时间线（第五波） | event_timeline | monitor |
 
-**执行层映射（9 份 SKILL.md，均通用）**：domain / sources / evidence →
+**执行层映射（12 份 SKILL.md：9 份通用 + 3 份第五波专用）**：domain / sources / evidence →
 服务 evidence-research；research/scope、research/digest → 服务 information-collection；
 authority/authority、authority/adjudicate → 服务 authority-verification；
 source → 服务 source-credibility；guide → 服务 fact-check-guide。
+第五波三份（statistics / comparison / timeline）为**专用**，分别服务 statistical-claim-checking
+（layperson）/ dossier-comparison（analyst）/ event-timeline（monitor）。
 RumorAgent 引擎 SYSTEM_PROMPT 服务 claim-checking（专用；判定语义共享铁律不变，
 角色与分类都不改变判定）。
 
@@ -163,21 +171,27 @@ router `TOOL_ACTIONS` + allowlist 追加 `check_source` / `guide_fact_check`（1
 
 | 测试 | 守护点 |
 | --- | --- |
-| `tests/test_role_prompts.py` | 能力目录集合 == 10；头字段含 分类/适用角色；分类与适用角色按 `EXPECTED_CLASSIFICATION` 逐字对拍 + 语义对拍（通用=全部、专用=三角色之一）；执行层 9 份 `分类：通用` / `服务能力` 映射对拍；roles 键 ⊆ ROLES；addon ≤200 字；full/未知角色逐位不变 |
+| `tests/test_role_prompts.py` | 能力目录集合 == 13；头字段含 分类/适用角色；分类与适用角色按 `EXPECTED_CLASSIFICATION` 逐字对拍 + 语义对拍（通用=全部、专用=三角色之一）；执行层 12 份 `分类` / `服务能力` 映射对拍；roles 键 ⊆ ROLES；addon ≤200 字；full/未知角色逐位不变 |
 | `tests/test_source_skills.py`（30 例） | 官方后缀/正文官方标记/交叉提及≥2/单点信号/页面不可达/无战绩各判定路径；data 键名锁定；不建档；digest 不出现真假判定词 |
 | `tests/test_guide_skills.py`（23 例） | 五步法代码锁定；mock llm 正常/降级路径；讲解含 URL/真假判定词整条丢弃；零外发请求（无检索/取页注入位） |
 | `tests/test_prompt_config.py` | classic 四段与 `*_BUILTIN` 逐字同文（外置不漂移）；RUMOR_PROMPTS_PATH/_EXTRA 对新键生效 |
-| `tests/test_assistant_router.py` 等 | 路由防护链行为不变（无 action 数量断言，新 action 走封闭枚举 + allowlist + registry 三方一致：17 个工具 action） |
-| `tests/test_readme_counts.py` | README 用例数与 discover 实际数一致（1682） |
+| `tests/test_assistant_router.py` 等 | 路由防护链行为不变（无 action 数量断言，新 action 走封闭枚举 + allowlist + registry 三方一致：20 个工具 action） |
+| `tests/test_readme_counts.py` | README 用例数与 discover 实际数一致（以 README 测试段实记为准，2026-11-23 为 1985） |
 
 全量：`.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -p "test_*.py"`
-（1682 例 OK）；CI：`scripts\ci.cmd`。
+（用例数以 README 测试段实记为准，2026-11-23 为 1985）；CI：`scripts\ci.cmd`。
 
 ## 7. 已知局限与后续
 
-- **候选池（留扩展位，本期不做）**：统计说法核查（数字/百分比/口径类主张的专项
-  处理）、档案对比（两次核查结果的结论与证据差异）、事件时间线梳理。新增时按 §2
-  扩展规则先定分类再登记。
+- **候选池（2026-11-23 第五波落地三项，池内清空）**：
+  ~~统计说法核查（数字/百分比/口径类主张的专项处理）~~ → 已落地
+  **statistical-claim-checking**（专用，layperson，工具 `check_statistics`）；
+  ~~档案对比（两次核查结果的结论与证据差异）~~ → 已落地 **dossier-comparison**
+  （专用，analyst，工具 `compare_dossiers`）；
+  ~~事件时间线梳理~~ → 已落地 **event-timeline**（专用，monitor，工具 `event_timeline`）。
+  三条均为只读对话能力（不建档、无分数、不出真假结论），实施口径、预算/状态/失败矩阵与
+  测试矩阵见 `docs/第五波专用技能-2026-11-23.md`。候选池后续新增仍按 §2 扩展规则
+  先定分类再登记。
 - **平台线提示词未覆盖**：`feature/platform-monitor` 分支的领域分类助理提示词
   （platform/domains.py）不在本分支；等两线合并后按本规范 §4 补三段结构。
 - **对话层注入面的拼接失真未动**：`context.build_context` 的双串契约与假 assistant

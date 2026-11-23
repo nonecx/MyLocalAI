@@ -3,7 +3,8 @@
 > 状态：阶段 1 已实现（Profile 骨架 + 普通用户呈现）；阶段 2（材料批量分析）、
 > 阶段 3（领域监测订阅）按本文档的接口契约分阶段落地。
 > 日期：2026-11-20
-> 上游依据：`docs/Agent工作流规格-v0.1.md`（八项用户能力）、
+> 上游依据：`docs/Agent工作流规格-v0.1.md`（用户能力十三项，计数口径以
+> 《Skill分类与提示词规范-v1.0.md》§2 为准）、
 > `docs/工作指导-智能助手重塑-2026-10-30.md`（§2.4 非目标：不做多用户与鉴权）。
 
 ## 1. 定位与边界
@@ -122,26 +123,31 @@ loop.py 自动合并且经 review——角色扩展的 `_session_profile`/`_pres
 
 | 角色 | 主能力（capability id，〔分类〕） | 能力 SKILL（capabilities/） | 提示词 posture（prompts.json roles 段） | 通道 |
 | --- | --- | --- | --- | --- |
-| layperson 普通用户 | claim-checking〔专用〕（**呈现档位**：简化卡、无数值） | claim_checking/SKILL.md | roles.layperson（router 偏向 verify_claim；narrate 人话结论禁数值） | 对话 |
-| analyst 专业·材料分析 | material-analysis〔专用〕（claim-checking 批量复合）+ evidence-research〔通用〕 | material_analysis/SKILL.md、evidence_research/SKILL.md | roles.analyst（识别"批量/我收集的材料"→ 导流面板，不拼工具） | 材料批次面板 + REST |
-| monitor 专业·领域监测 | domain-monitoring〔专用〕（topic-understanding 持续复合） | domain_monitoring/SKILL.md、topic_understanding/SKILL.md | roles.monitor（识别"盯着某领域"→ 导流面板；只述变化） | 领域监测面板 + REST + 调度 |
-| full 全部能力 | 十项能力全量 | 十份 SKILL | 不合并（roles.full = {}） | 对话 |
+| layperson 普通用户 | claim-checking〔专用〕（**呈现档位**：简化卡、无数值）+ statistical-claim-checking〔专用·第五波〕 | claim_checking/SKILL.md、statistical_claim_checking/SKILL.md | roles.layperson（router 偏向 verify_claim；narrate 人话结论禁数值） | 对话 |
+| analyst 专业·材料分析 | material-analysis〔专用〕（claim-checking 批量复合）+ evidence-research〔通用〕+ dossier-comparison〔专用·第五波〕 | material_analysis/SKILL.md、evidence_research/SKILL.md、dossier_comparison/SKILL.md | roles.analyst（识别"批量/我收集的材料"→ 导流面板，不拼工具） | 材料批次面板 + REST |
+| monitor 专业·领域监测 | domain-monitoring〔专用〕（topic-understanding 持续复合）+ event-timeline〔专用·第五波〕 | domain_monitoring/SKILL.md、topic_understanding/SKILL.md、event_timeline/SKILL.md | roles.monitor（识别"盯着某领域"→ 导流面板；只述变化） | 领域监测面板 + REST + 调度 |
+| full 全部能力 | 十三项能力全量 | 十三份 SKILL | 不合并（roles.full = {}） | 对话 |
 
 **角色四件事（2026-11-22 起，§1"只改三件事"增补第四件）**：在原有"入口与呈现 /
 数据范围 / 专属面板"三件之上，新增**权限第四件**——对话工具白名单按 skill 分类裁剪
-（`assistant_rules.json role_tool_allowlists`：通用 7 能力全角色可用，专用工具
-verify_claim/recheck_dossier 仅 layperson/full；fail-open 缺配置回落全局白名单）+
+（`assistant_rules.json role_tool_allowlists`：通用 7 能力全角色可用，专用核查工具
+verify_claim/recheck_dossier 仅 layperson/full；第五波起专用工具按主角色分发——
+check_statistics 仅 layperson/full、compare_dossiers 仅 analyst/full、event_timeline
+仅 monitor/full，**analyst 与 monitor 不再同集**；fail-open 缺配置回落全局白名单）+
 两个面板 REST 写端点服务端角色闸（/api/batch：analyst/full；/api/subscriptions 写端点：
 monitor/full）。**判定语义与防护链不放宽不变**：verdict.assess 打分、隐私 fail-closed、
 路由四层防护链均不随角色放宽（白名单外 action 走既有"枚举外 → clarify"降级）。
 白名单语义、REST 闸与 fail-open 矩阵详见 `docs/角色Agent工作流规格-v1.0.md` §4。
 
-**通用/专用分类**（2026-11-21 分类体系，详见 `docs/Skill分类与提示词规范-v1.0.md`）：
-十项能力按角色绑定分两档——**通用**（横向，任何工作区可用，适用角色=全部）：
+**通用/专用分类**（2026-11-21 分类体系，2026-11-23 第五波扩到十三项，详见
+`docs/Skill分类与提示词规范-v1.0.md`）：
+十三项能力按角色绑定分两档——**通用**（横向，任何工作区可用，适用角色=全部）：
 evidence-research / information-collection / authority-verification / topic-understanding /
 speech-understanding / source-credibility / fact-check-guide；**专用**（角色主能力，
 适用角色=绑定角色）：claim-checking→layperson、material-analysis→analyst、
-domain-monitoring→monitor。分类登记在各能力 SKILL.md 头注释（`分类` / `适用角色`）
+domain-monitoring→monitor，以及第五波新增 statistical-claim-checking→layperson、
+dossier-comparison→analyst、event-timeline→monitor（三条均为只读对话能力，实施口径见
+`docs/第五波专用技能-2026-11-23.md`）。分类登记在各能力 SKILL.md 头注释（`分类` / `适用角色`）
 与执行层 SKILL.md 注释头（`分类` / `服务能力`），由 test_role_prompts 封闭枚举对拍防漂移；
 新增能力先定分类再登记。对话跟进机制不按角色裁剪，全部工作区可用。
 
@@ -161,12 +167,12 @@ domain-monitoring→monitor。分类登记在各能力 SKILL.md 头注释（`分
    角色逐位一致且 narrate 与基座相等；
 3. 导流口径：analyst/monitor 附加段含"材料批次/领域监测"面板导流与"不拼工具/
    不新开 action"指令；
-4. SKILL.md lint：十份能力文档头字段（能力 id/版本/一句话目标/文档性质/**分类/
+4. SKILL.md lint：十三份能力文档头字段（能力 id/版本/一句话目标/文档性质/**分类/
    适用角色**）与必备章节齐全、能力 id 与目录名一致、**无悬空《总览》引用**；
-   通用/专用分类与适用角色按映射表逐字对拍（2026-11-21 起），执行层 9 份 SKILL.md
-   注释头的 `分类：通用` / `服务能力：<能力 id>` 映射对拍；
+   通用/专用分类与适用角色按映射表逐字对拍（2026-11-21 起，第五波补三条专用），
+   执行层 12 份 SKILL.md 注释头的 `分类` / `服务能力：<能力 id>` 映射对拍；
 5. 对拍：prompts.json 的 roles 键 ⊆ `dossier/profiles.py` 的 ROLES（`_` 开头为
-   注释键）；capabilities 目录集合 == 十个预期能力；
+   注释键）；capabilities 目录集合 == 十三个预期能力；
 6. 角色工作流对拍（2026-11-22 增补）：`tests/test_workflow_integration.py` 锁定
    注册表 ↔ 能力 SKILL.md 头注释逐字一致、role_tool_allowlists ↔ 注册表语义对拍、
    full 恒全量；`tests/test_role_allowlists.py` 锁定白名单配置对拍、fail-open 回落、
