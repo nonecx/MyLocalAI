@@ -405,12 +405,23 @@ class TestProviderBinding(unittest.TestCase):
         # 注册表/密钥/隐私偏好指向临时空目录：本组测"env 密钥与提供方成组绑定"，
         # 不能读用户在设置面板保存的 models.json——否则 active 提供方与 stored
         # 密钥会让"错配必须报错"的断言失去前提（默认提供方被改成别的了）。
+        # 偏好写"授权全开"：本组测的是密钥绑定，隐私授权闸不该在这里挡路——
+        # validate_config 与调用链同序（先隐私后密钥），不授权就只会看到
+        # PrivacyAuthorizationError，"密钥错配必须报错"的断言就失去对象。
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         base = Path(self._tmp.name)
         os.environ["MYLOCALAI_MODELS_PATH"] = str(base / "models.json")
         os.environ["MYLOCALAI_MODEL_SECRETS_PATH"] = str(base / "secrets.json")
         os.environ["MYLOCALAI_PRIVACY_PREFERENCES_PATH"] = str(base / "privacy.json")
+        (base / "privacy.json").write_text(json.dumps({
+            "schema_version": 1,
+            "save_enabled": {"results": True, "raw_input": True, "external_cache": True},
+            "retention_days": {"results": 90, "raw_input": 30, "external_cache": 7},
+            "external_processing_enabled": True,
+            "external_processing_providers": ["longcat", "deepseek", "openai",
+                                              "public-search", "public-web"],
+        }, ensure_ascii=False), encoding="utf-8")
         llm_client.reset_cache()
 
     def tearDown(self):

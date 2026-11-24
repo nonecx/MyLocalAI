@@ -35,12 +35,16 @@
   const API = { health: "/api/health" };
 
   /* ---------- 服务状态 ----------
-     两维健康度（P0-2 密钥健康度显性化）：/api/health 除服务活性外还带 llm 段
-     （{usable, provider, model, base_url, error}）。服务活着但 llm.usable=false
-     （密钥没配好）时，所有分析都会静默降级——只报"服务运行中"会让用户误以为
-     一切就绪，所以这里把 chip 变成琥珀警示态（.status-chip.warn，样式在 chat.css，
-     跨文件约定）并在 title 里说明后果。纯 textContent/className 更新：
-     chip 上不拼 HTML，既有可访问性属性（结构在 index.html）原样保留。 */
+     健康度（P0-2 密钥健康度显性化，WS2 增补隐私这一维）：/api/health 除服务活性外
+      还带 llm 段（{usable, provider, model, base_url, error, error_kind}）。服务活着
+      但 llm.usable=false 时所有分析都会静默降级——只报"服务运行中"会让用户误以为
+      一切就绪，所以这里把 chip 变成琥珀警示态（.status-chip.warn，样式在 chat.css，
+      跨文件约定）并在 title 里说明后果。
+      error_kind 分流（口径与 llm_client._config_diagnosis() 同序：隐私授权是第一道
+      闸，排在密钥检查之前）：privacy = 当前提供方没在「设置 → 隐私与授权」里勾选
+      （或外部处理总开关关着），配密钥也救不了，必须先授权；其余（key/unknown/
+      缺字段）维持原"模型未配置"话术。纯 textContent/className 更新：chip 上不拼
+      HTML，既有可访问性属性（结构在 index.html）原样保留。 */
   async function checkHealth() {
     const chip = $("#apiStatus");
     if (!chip) return;
@@ -50,6 +54,12 @@
       const health = await resp.json().catch(() => null);
       const llm = (health && health.llm && typeof health.llm === "object") ? health.llm : null;
       if (llm && llm.usable === false) {
+        if (llm.error_kind === "privacy") {
+          chip.textContent = "● 服务运行中 · 模型未授权";
+          chip.className = "status-chip warn";
+          chip.title = "外部处理未授权：分析将以降级模式运行。打开「设置 → 隐私与授权」勾选当前提供方，或切换到已授权的提供方";
+          return;
+        }
         chip.textContent = "● 服务运行中 · 模型未配置";
         chip.className = "status-chip warn";
         chip.title = "分析将以降级模式运行：证据发现不可用";

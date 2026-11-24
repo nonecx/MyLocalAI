@@ -234,6 +234,37 @@ class GetModelsApiTest(ModelsApiTestBase):
         ids = {view["id"] for view in payload["providers"]}
         self.assertIn("longcat", ids, "坏配置应退回内置提供方表")
 
+    def test_runtime_snapshot_reports_source_and_env_provider(self):
+        """runtime 段带 source/env_provider（WS2）：无 env 覆盖时来源是 registry。"""
+        resp = self.client.get("/api/models")
+        self.assertEqual(200, resp.status_code, resp.text)
+        runtime = resp.json()["runtime"]
+        self.assertEqual("registry", runtime["source"], "没有 LLM_PROVIDER 时生效提供方来自注册表")
+        self.assertEqual("", runtime["env_provider"], "没有 env 覆盖时该字段为空串")
+        # 加法不破坏既有键（前端 buildKeyHealthCard 等按旧键取值）
+        for key in ("provider", "model", "base_url", "key_source", "protocol"):
+            self.assertIn(key, runtime, f"runtime 段缺少既有键 {key}")
+        self.assertNotIn("api_key", runtime)
+
+    def test_runtime_snapshot_env_provider_overrides_active(self):
+        """.env 的 LLM_PROVIDER 压过面板选择：runtime.provider != active.provider 且 source=env。
+
+        这是设置面板「模型」Tab 错配警示卡的触发条件（前端按这两个字段的差异弹卡），
+        所以错配必须在载荷里显性可见，而不是让用户以为面板的选择生效了。
+        """
+        with mock.patch.dict(os.environ, {"LLM_PROVIDER": " DeepSeek "}):
+            resp = self.client.get("/api/models")
+        self.assertEqual(200, resp.status_code, resp.text)
+        payload = resp.json()
+        runtime = payload["runtime"]
+        self.assertEqual("env", runtime["source"])
+        self.assertEqual("deepseek", runtime["env_provider"],
+                         "env_provider 与 runtime_resolution 同口径：strip + lower")
+        self.assertEqual("deepseek", runtime["provider"])
+        self.assertEqual("longcat", payload["active"]["provider"],
+                         "环境变量只影响运行期解析，不改写面板的当前选择")
+        self.assertNotEqual(runtime["provider"], payload["active"]["provider"])
+
 
 class ProviderWriteApiTest(ModelsApiTestBase):
     """提供方增删改 + 密钥：状态码、掩码、内置保护。"""
@@ -979,6 +1010,12 @@ class RouteRegistrationTest(ModelsApiTestBase):
         for key in ("status", "time", "history_count", "llm", "llm_cache", "models"):
             self.assertIn(key, body, f"/api/health 缺少字段 {key}")
         self.assertIsInstance(body["models"]["warnings"], int)
+        # WS2：llm.error_kind 与调用链同序（隐私授权是第一道闸）。本夹具没写隐私偏好
+        # （外部处理默认关闭，fail-closed），所以第一道闸就卡住，类别是 privacy，
+        # 而不是排在它后面的 key——"诊断与真实失败原因一致"正是这个字段的目的。
+        self.assertIn("error_kind", body["llm"], "/api/health 的 llm 段缺少 error_kind")
+        self.assertFalse(body["llm"]["usable"])
+        self.assertEqual("privacy", body["llm"]["error_kind"])
 
 
 if __name__ == "__main__":
