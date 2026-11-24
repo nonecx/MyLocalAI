@@ -57,21 +57,36 @@ from mylocalai.web.profiles_api import router as profiles_router  # noqa: E402
 from mylocalai.web.batch_api import router as batch_router  # noqa: E402
 from mylocalai.web.materials_api import router as materials_router  # noqa: E402
 from mylocalai.web.monitor_api import router as monitor_router  # noqa: E402
+from mylocalai.web.platform_api import router as platform_router  # noqa: E402
 
 
 @asynccontextmanager
 async def _lifespan(_app: Any):
-    """应用生命周期：起领域监测调度 daemon 线程（阶段 3）。
+    """应用生命周期：起领域监测调度 daemon 线程（阶段 3）+ 监测平台巡检调度。
 
     调度只在**服务运行期间**有效（关服即停，产品口径如实告知用户）；多 worker
     部署时只有主进程调度（启动告警复用 _warn_if_multiworker 的口径）。
+
+    平台巡检调度（docs/监测平台规格-2026-11-20.md §7）：走
+    start_scheduler_if_enabled——规则 enabled=false（默认）时**不构造**调度器
+    （import 期零副作用、不起线程、不碰数据库），手动巡检 POST /api/platform/scan
+    仍可用（trigger_async 不受 enabled 门控）；enabled=true 时每 worker 一个
+    调度器会重复巡检，故显式 _WORKERS<=1 门控（monitor 侧同款告警口径）。
+    关服时只有真启动过才 stop：没启动时 get_scheduler() 会当场惰性构造一个
+    调度器，那本身就是副作用。
     """
     from mylocalai.web import monitor_api
+    from mylocalai.web import platform_api
     monitor_api.start_scheduler()
+    _platform_started = False
+    if _WORKERS <= 1:
+        _platform_started = platform_api.start_scheduler_if_enabled()
     try:
         yield
     finally:
         monitor_api.stop_scheduler()
+        if _platform_started:
+            platform_api.get_scheduler().stop()
 
 # 非 UTF-8 控制台（英文 Windows 的 cp1252 等）下，日志里的中文会抛 UnicodeEncodeError。
 force_utf8_stdio()
@@ -127,11 +142,18 @@ app.include_router(privacy_router)
 # 模型管理（设置面板）：与 privacy_router 紧挨——两者都是"用户在本机改自己的配置"，
 # 前缀/异常口径保持一致（404 未知、400 中文 detail、写后 llm_client.reset_cache()）
 app.include_router(models_router)
-# 档案工作区 / 材料批次 / 领域监测（角色扩展，v6-v8）
+# 档案工作区 / 材料批次 / 领域监测 / 监测平台（角色扩展，v6-v11）
 app.include_router(profiles_router)
 app.include_router(batch_router)
 app.include_router(materials_router)
 app.include_router(monitor_router)
+# 监测平台（v10/v11 数据层 + API）：前缀 /api/platform，17 条路由（状态/信息流/预警/
+# 监控词 CRUD/巡检触发/巡检记录/信息源 CRUD 与试运行/领域/监控词领域手设）——
+# 前端 platform.js 的 PLATFORM_API 清单全部落在这一条上；漏挂它时平台视图每个请求
+# 都是 404（用户侧现象：「触发失败：HTTP 404」）。口径与 monitor 同族：400 中文
+# detail、404 未知（前端把 404 当"已删"消费，不要改这些状态码）。
+# 巡检调度钩子在 _lifespan（规则 enabled=false 默认不巡检，手动触发不受门控）。
+app.include_router(platform_router)
 
 
 def _active_profile_id() -> Optional[int]:

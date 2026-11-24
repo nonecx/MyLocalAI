@@ -15,13 +15,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 import sqlite3
 import threading
 import unicodedata
 import hashlib
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+
+logger = logging.getLogger("mylocalai.dossier.store")
 
 __all__ = ["SCHEMA_VERSION", "DEFAULT_DB_PATH", "connect", "migrate",
            "DossierStore", "default_db_path", "title_similarity"]
@@ -555,21 +559,107 @@ def title_similarity(a: Any, b: Any) -> float:
         return 0.0
 
 
+#: 迁移脚本里的 ALTER TABLE ... ADD COLUMN（表名/列名取标识符，供实态核对用）。
+_STMT_ALTER_RE = re.compile(
+    r"ALTER\s+TABLE\s+[\"'`\[]?(\w+)[\"'`\]]?\s+ADD\s+COLUMN\s+[\"'`\[]?(\w+)",
+    re.IGNORECASE)
+#: CREATE TABLE [IF NOT EXISTS] <name>（…）。
+_STMT_CREATE_TABLE_RE = re.compile(
+    r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[\"'`\[]?(\w+)", re.IGNORECASE)
+#: CREATE [UNIQUE] INDEX [IF NOT EXISTS] <name> ON …。
+_STMT_CREATE_INDEX_RE = re.compile(
+    r"CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?[\"'`\[]?(\w+)",
+    re.IGNORECASE)
+
+
+def _split_statements(script: str) -> List[str]:
+    """迁移脚本 → 语句清单（去注释行、去空语句；脚本内无字符串分号，可直接切）。"""
+    lines = [ln for ln in (script or "").splitlines() if not ln.strip().startswith("#")]
+    return [s.strip() for s in "\n".join(lines).split(";") if s.strip()]
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                       (table,)).fetchone()
+    return row is not None
+
+
+def _index_exists(conn: sqlite3.Connection, index: str) -> bool:
+    row = conn.execute("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",
+                       (index,)).fetchone()
+    return row is not None
+
+
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(row[1] == column for row in conn.execute(f'PRAGMA table_info("{table}")'))
+
+
+def _statement_kind(stmt: str) -> str:
+    """语句分类：alter / create_table / create_index / other（UPDATE 回填等）。"""
+    for kind, pattern in (("alter", _STMT_ALTER_RE),
+                          ("create_table", _STMT_CREATE_TABLE_RE),
+                          ("create_index", _STMT_CREATE_INDEX_RE)):
+        if pattern.match(stmt):
+            return kind
+    return "other"
+
+
+def _statement_present(conn: sqlite3.Connection, stmt: str) -> bool:
+    """语句的 DDL 效果是否已在场（other 类不可判定，按不在场）。"""
+    kind = _statement_kind(stmt)
+    if kind == "alter":
+        m = _STMT_ALTER_RE.match(stmt)
+        return _column_exists(conn, m.group(1), m.group(2))
+    if kind == "create_table":
+        return _table_exists(conn, _STMT_CREATE_TABLE_RE.match(stmt).group(1))
+    if kind == "create_index":
+        return _index_exists(conn, _STMT_CREATE_INDEX_RE.match(stmt).group(1))
+    return False
+
+
 def migrate(conn: sqlite3.Connection) -> int:
-    """把库迁到 SCHEMA_VERSION；返回应用了的迁移数。幂等，可重复调用。"""
+    """把库迁到 SCHEMA_VERSION；返回应用了的迁移数。幂等，可重复调用。
+
+    判定是**双重的**：版本账本（schema_migrations）+ schema 实态核对。只信账本
+    会在两种真实事故上失灵——① 发布线重编号过迁移序号（2026-11-24 提取监测平台
+    数据层：分支线内 v6=平台三表 / v7=领域列，主线把 profiles / batches 插成
+    v6 / v7，老库「账记了 v6 但 profiles 表根本没建」）；② 执行中途进程被杀
+    （executescript 的 DDL 每条自提交，版本行还没写上，「没入账但已建」）。
+    对策：
+      - 入账且效果齐全 → 跳过（健康快路径，零写入）；
+      - 入账但有效果缺席 → 只补跑缺席的 DDL，**不重放 UPDATE 回填**（数据动作
+        只随脚本首次执行施加一次，重复跑会覆盖已回填的值）；
+      - 未入账 → 逐语句执行，效果已在场的跳过（重编号后重跑不再炸
+        duplicate column name）。
+    """
     conn.execute("""CREATE TABLE IF NOT EXISTS schema_migrations (
                         version    INTEGER PRIMARY KEY,
                         applied_at TEXT NOT NULL)""")
     done = {r["version"] for r in conn.execute("SELECT version FROM schema_migrations")}
     applied = 0
     for i, script in enumerate(MIGRATIONS, start=1):
+        stmts = _split_statements(script)
         if i in done:
+            missing = [s for s in stmts
+                       if _statement_kind(s) != "other" and not _statement_present(conn, s)]
+            if not missing:
+                continue
+            with conn:
+                for stmt in missing:
+                    conn.execute(stmt)
+            applied += 1
+            logger.warning("迁移 v%d 已入账但 schema 有缺（%d 条语句不在场），"
+                           "按缺失项补跑；UPDATE 回填不重放", i, len(missing))
             continue
         with conn:
-            conn.executescript(script)
+            for stmt in stmts:
+                if _statement_kind(stmt) != "other" and _statement_present(conn, stmt):
+                    continue               # 效果已在场：跳过，不重复施加
+                conn.execute(stmt)
             conn.execute("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
                          (i, _now()))
         applied += 1
+        logger.info("迁移 v%d 首次应用（%d 条语句）", i, len(stmts))
     _ensure_default_profile(conn)
     return applied
 

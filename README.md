@@ -45,7 +45,7 @@
 │   │   ├── attn_rules.json / deep_read_rules.json / society_issues.json / prompts.json
 │   │   └── README.md           关注度与深读的完整说明（公式、触发、护栏、隔离）
 │   ├── dossier/                档案库（SQLite 单文件 + WAL）
-│   │   ├── store.py            连接工厂、schema_version 顺序迁移（v4 指纹表+话术标记表、v6 Profile 工作区、v7 材料批次、v8 监测订阅、v9 编排 plan/三轴列、v10 监测平台三表、v11 平台信息源与领域列）、档案域七表 + 会话域三表
+│   │   ├── store.py            连接工厂、schema_version 顺序迁移（v4 指纹表+话术标记表、v6 Profile 工作区、v7 材料批次、v8 监测订阅、v9 编排 plan/三轴列、v10 监测平台三表、v11 平台信息源与领域列；双重判定 = 版本账本 + schema 实态核对，重编号/半途中断自愈补跑、UPDATE 回填不重放）、档案域七表 + 会话域三表
 │   │   ├── profiles.py         Profile 工作区（多档案数据分家 + 角色，v6）
 │   │   ├── batches.py          材料批次存储（v7）
 │   │   ├── batch_summary.py    批次汇总纯函数（零 LLM，永不抛）
@@ -95,16 +95,16 @@
 │   │   ├── rules.py / scheduler.py / __main__.py  规则外置 / 巡检调度 / CLI 入口（python -m mylocalai.platform）
 │   │   └── platform_domains.json / platform_rules.json  领域表与预算开关——改这里而非改代码
 │   ├── web/                    FastAPI 网站 + static/（src/mylocalai/web/app.py）
-│   │   ├── app.py              REST API 全貌（分析/关注度/对话/会话/档案/画像/Profile/批次/监测）+ lifespan 调度
+│   │   ├── app.py              REST API 全貌（分析/关注度/对话/会话/档案/画像/Profile/批次/监测/监测平台）+ lifespan 调度（监测订阅 + 平台巡检）
 │   │   ├── profiles_api.py     Profile 工作区 CRUD + 激活（v6）
 │   │   ├── batch_api.py        材料批次 API + SSE 进度（v7）
 │   │   ├── materials_api.py    上传文件内存解析（txt/md/csv/json，不落盘）
 │   │   ├── monitor_api.py      监测订阅 API + 调度线程（v8）
-│   │   ├── platform_api.py     监测平台 API（状态/信息流/预警/监控词 CRUD/巡检触发/信息源 CRUD 与试运行/领域；主线未挂载，随接线分支启用）
+│   │   ├── platform_api.py     监测平台 API（状态/信息流/预警/监控词 CRUD/巡检触发/信息源 CRUD 与试运行/领域；前缀 /api/platform，已挂载进 app.py）
 │   │   └── static/             单一对话页的全部界面：index.html + shell.js（file:// 引导/服务状态）
 │   │                           + chat.js/cards.js（会话、档案库、事件流与全部卡片渲染）+ chat.css
 │   │                           + profiles.js（档案切换器）+ batch.js（材料批次面板）+ monitor.js（领域监测面板）
-│   │                           + platform.js/platform.css（监测平台视图，随接线分支启用）
+│   │                           + platform.js/platform.css（监测平台视图，index.html 已接线）
 │   ├── util/                   text_safety（代理项规整）/ console_io（stdio 规整）
 │   └── cli.py                  命令行入口（python -m mylocalai.cli）
 ├── my_website/                 启动器（start.bat / start.sh）与说明，实际代码在 src/mylocalai/web/
@@ -373,7 +373,9 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 2436 个用例（unittest discover 全量，2026-11-24 收拢 model-settings
+离线套件共 2442 个用例（unittest discover 全量，2026-11-24 修「触发失败：HTTP 404」
+（platform_router 挂载）+ 本地库迁移漂移自愈（账本 + schema 实态双重判定）后实测；
+此前 2026-11-24 收拢 model-settings
 worktree 未提交工作（模型管理规格 §8 收尾）后实测；此前 2026-11-24 合入
 user-profiles-roles 分支后为 2369 例，提取监测平台数据层与 API 层后为 2299 例，
 合入信息收集 v2 分支只读资产后为 2049 例，2026-11-23 第五波三条专用技能落地后为 1985 例，
@@ -392,8 +394,9 @@ UI 契约与 PUT /api/privacy/preferences 接口用例；第五波新增 221 例
 受限 Agent 循环 `tests/test_agent_loop.py`、追问续接 `tests/test_continuation.py`、
 技能偏好 `tests/test_skills_preferences.py` 三模块共 64 例；
 再 2026-11-24 自 user-profiles-roles 分支提取监测平台数据层与 API 层（`platform/` 包 +
-`tools_platform` + `platform_api` + `tests/test_platform_*` 十一模块，前端/路由接线
-留待后续分支，相应接线断言用例未纳入）；
+`tools_platform` + `platform_api` + `tests/test_platform_*` 十一模块；前端骨架本已就位，
+2026-11-24 同日补上 `platform_router` 挂载与调度钩子——修「触发失败：HTTP 404」，
+应用级挂载断言与平台视图结构契约随修复恢复纳入）；
 另 2026-11-24 同分支整分支合并（用户裁决：冲突以最新主线为准）带入的增量：
 检索多源融合 `tests/test_search_fusion.py` / `tests/test_search_api_source.py`、
 LLM 韧性 `tests/test_llm_resilience.py`、提示注入防护 `tests/test_injection_guard.py`、
