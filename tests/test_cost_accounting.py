@@ -95,6 +95,45 @@ def _load_json(name: str) -> dict:
 # 1. llm_client 进程计数器
 # ===========================================================================
 
+def _isolate_local_state(test: unittest.TestCase) -> None:
+    """把 MYLOCALAI_* 三个本地状态路径重定向到临时空目录，并写授权全开的临时隐私
+    偏好；还原 env 与清注册表缓存的清理挂在 test 上。
+
+    为什么：本文件全部 mock 上游客户端，但隐私授权闸是真实读
+    data/privacy_preferences.json 的，默认提供方也真实读 data/models.json 的
+    active——用户在设置面板调整授权列表或切换 active 提供方，会让"错配应报错"
+    "缓存命中只打一次"这类用例挂掉。隔离后回到"内置默认 + 授权全开"的干净基线。
+    """
+    tmp = TemporaryDirectory()
+    test.addCleanup(tmp.cleanup)
+    base = Path(tmp.name)
+    keys = ("MYLOCALAI_MODELS_PATH", "MYLOCALAI_MODEL_SECRETS_PATH",
+            "MYLOCALAI_PRIVACY_PREFERENCES_PATH")
+    saved = {k: os.environ.get(k) for k in keys}
+
+    def _restore():
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        llm_client.reset_cache()
+
+    test.addCleanup(_restore)
+    os.environ["MYLOCALAI_MODELS_PATH"] = str(base / "models.json")
+    os.environ["MYLOCALAI_MODEL_SECRETS_PATH"] = str(base / "secrets.json")
+    os.environ["MYLOCALAI_PRIVACY_PREFERENCES_PATH"] = str(base / "privacy.json")
+    (base / "privacy.json").write_text(json.dumps({
+        "schema_version": 1,
+        "save_enabled": {"results": True, "raw_input": True, "external_cache": True},
+        "retention_days": {"results": 90, "raw_input": 30, "external_cache": 7},
+        "external_processing_enabled": True,
+        "external_processing_providers": ["longcat", "deepseek", "openai",
+                                          "public-search", "public-web"],
+    }, ensure_ascii=False), encoding="utf-8")
+    llm_client.reset_cache()
+
+
 class UsageCounterBase(unittest.TestCase):
     """计数器测试公共夹具：清计数 + 清缓存 + 钉住缓存开启，结束后还原。"""
 
@@ -102,6 +141,7 @@ class UsageCounterBase(unittest.TestCase):
         env_patch = mock.patch.dict(os.environ, CACHE_ENV)
         env_patch.start()
         self.addCleanup(env_patch.stop)
+        _isolate_local_state(self)
         llm_client.reset_usage()
         self.addCleanup(llm_client.reset_usage)
         llm_cache.clear()
@@ -201,6 +241,7 @@ class LoopCostBase(unittest.TestCase):
         env_patch.start()
         self.addCleanup(env_patch.stop)
         os.environ.pop("CHAT_TURN_DEADLINE_S", None)
+        _isolate_local_state(self)
         llm_client.reset_usage()
         self.addCleanup(llm_client.reset_usage)
         llm_cache.clear()

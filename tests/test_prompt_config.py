@@ -107,10 +107,26 @@ class TestPromptConfig(unittest.TestCase):
 class TestProviderTable(unittest.TestCase):
     """G4：提供方表外置。"""
 
+    #: 连同注册表/密钥/隐私偏好路径一起隔离：providers() 会读 data/models.json，
+    #: 用户在设置面板自建的提供方会让"默认文件 == 内置表"的断言失效。
+    #: LLM_PROVIDER / ZHIPU_API_KEY 也要纳入：test_extra_path_adds_a_new_provider
+    #: 的 finally 会 pop 掉 LLM_PROVIDER（.env 加载的原值），不保存还原就会
+    #: 泄漏给后续测试（target：LLM_PROVIDER=None 时 claims 适配走空路径）。
+    KEYS = ("LLM_PROVIDERS_PATH", "LLM_PROVIDERS_EXTRA_PATH",
+            "MYLOCALAI_MODELS_PATH", "MYLOCALAI_MODEL_SECRETS_PATH",
+            "MYLOCALAI_PRIVACY_PREFERENCES_PATH",
+            "LLM_PROVIDER", "ZHIPU_API_KEY")
+
     def setUp(self):
-        self._saved = {k: os.environ.get(k) for k in ("LLM_PROVIDERS_PATH", "LLM_PROVIDERS_EXTRA_PATH")}
-        for key in self._saved:
+        self._saved = {k: os.environ.get(k) for k in self.KEYS}
+        for key in self.KEYS:
             os.environ.pop(key, None)
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        os.environ["MYLOCALAI_MODELS_PATH"] = str(Path(self._tmp.name) / "models.json")
+        os.environ["MYLOCALAI_MODEL_SECRETS_PATH"] = str(Path(self._tmp.name) / "secrets.json")
+        os.environ["MYLOCALAI_PRIVACY_PREFERENCES_PATH"] = str(Path(self._tmp.name) / "privacy.json")
         llm_client.reset_cache()
 
     def tearDown(self):

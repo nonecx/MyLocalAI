@@ -42,6 +42,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 import unittest
@@ -835,8 +836,14 @@ class SettingsApiLiveRoutesTest(unittest.TestCase):
                          "缺省 retry.policy 必须是 default（缺省行为不变，§8.1）")
         # 配置文件路径只回路径，不含密钥
         self.assertEqual(set(payload["paths"]), {"models", "secrets"})
-        # 密钥只以掩码/状态字段出现
-        self.assertNotIn("sk-", resp.text, "响应里出现了疑似明文密钥")
+        # 密钥只以掩码/状态字段出现：完整密钥绝不出现。注意不能禁整个 "sk-"
+        # 子串——合法掩码形如 sk-…xxxx（api_key_masked），有 stored 密钥的提供方
+        # 会让那条过宽的断言误报；这里逐值比对本地密钥文件里的完整密钥。
+        secrets_file = Path(__file__).resolve().parent.parent / "data" / "model_secrets.json"
+        if secrets_file.is_file():
+            stored = json.loads(secrets_file.read_text(encoding="utf-8")).get("secrets") or {}
+            for value in stored.values():
+                self.assertNotIn(str(value), resp.text, "响应里出现了明文密钥")
         self.assertNotIn("api_key\"", resp.text)
 
 
