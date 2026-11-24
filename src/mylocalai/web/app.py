@@ -606,6 +606,34 @@ def index() -> FileResponse:
     return FileResponse(os.path.join(_STATIC_DIR, "index.html"))
 
 
+# ---- PWA「添加到桌面」的两个根路径资源 ----
+# 这两个文件不能挂在 /static 下：
+#   * manifest 的 scope 由它自己的 URL 决定，放根路径才能覆盖整站；
+#   * Service Worker 的作用域上限是脚本所在目录，必须从 / 提供才能接管全站，
+#     且 Content-Type 必须是 JS（.webmanifest/.js 由 StaticFiles 猜 MIME 不可靠）。
+@app.get("/manifest.webmanifest")
+def pwa_manifest() -> FileResponse:
+    """Web App Manifest（手机/桌面「添加到主屏幕」的元数据）。"""
+    return FileResponse(
+        os.path.join(_STATIC_DIR, "manifest.webmanifest"),
+        media_type="application/manifest+json",
+    )
+
+
+@app.get("/sw.js")
+def service_worker() -> FileResponse:
+    """Service Worker（界面壳缓存；/api/* 一律不缓存，见 sw.js 的注释）。"""
+    resp = FileResponse(
+        os.path.join(_STATIC_DIR, "sw.js"),
+        media_type="application/javascript",
+    )
+    # 允许 SW 以 / 为作用域（虽然同目录已是 /，显式声明避免以后挪文件时踩坑）
+    resp.headers["Service-Worker-Allowed"] = "/"
+    # 脚本本身必须每次都回源校验，否则浏览器会长期跑旧版 SW
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
 # ===========================================================================
 # 智能助手对话层（M2）：/api/chat（SSE）+ /api/sessions + /api/dossiers
 # ===========================================================================

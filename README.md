@@ -105,9 +105,12 @@
 │   │                           + chat.js/cards.js（会话、档案库、事件流与全部卡片渲染）+ chat.css
 │   │                           + profiles.js（档案切换器）+ batch.js（材料批次面板）+ monitor.js（领域监测面板）
 │   │                           + platform.js/platform.css（监测平台视图，index.html 已接线）
+│   │                           + mobile.css（手机/平板小屏覆盖层，最后引入）
+│   │                           + install.js / sw.js / manifest.webmanifest / icons/（添加到桌面：PWA 快捷入口）
 │   ├── util/                   text_safety（代理项规整）/ console_io（stdio 规整）
 │   └── cli.py                  命令行入口（python -m mylocalai.cli）
-├── my_website/                 启动器（start.bat / start.sh）与说明，实际代码在 src/mylocalai/web/
+├── my_website/                 启动器（start.bat / start.sh，支持 --lan 开局域网）与说明，实际代码在 src/mylocalai/web/
+├── scripts/                    仓库级辅助脚本（gen_pwa_icons.py：生成添加到桌面所需图标）
 ├── tests/                      离线测试套件与真实 API 端到端脚本（import mylocalai.*）
 ├── docs/                       检验报告、修复说明、项目/研究报告与关注度标定报告
 ├── pyproject.toml              src 布局包定义（pip install -e .）
@@ -147,7 +150,9 @@ cp .env.example .env        # Windows PowerShell: Copy-Item .env.example .env
 # 5. 展示网站
 双击 my_website/start.bat，或看 my_website/README.md 的命令行方式
 #    Linux / macOS：cd my_website && ./start.sh（端口用 PORT= 覆盖，解释器用 PYTHON= 覆盖）
-#    实际启动命令：python -m uvicorn mylocalai.web.app:app --host 127.0.0.1 --port 8000
+#    默认只监听本机：python -m uvicorn mylocalai.web.app:app --host 127.0.0.1 --port 8000
+#    手机/平板也要用（配合「添加到桌面」）：加 --lan 换成 0.0.0.0 并打印局域网地址
+#      my_website/start.bat --lan      # 或 ./start.sh --lan
 ```
 
 `.env` 里最关键的只有两条：`LLM_PROVIDER`（默认 longcat）与对应提供方的密钥
@@ -373,7 +378,9 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 2442 个用例（unittest discover 全量，2026-11-24 修「触发失败：HTTP 404」
+离线套件共 2457 个用例（unittest discover 全量，2026-11-24 移动端快捷入口
+（PWA 添加到桌面 + 小屏适配 + 启动脚本 --lan）落地后实测，新增 `tests/test_mobile_pwa.py`
+15 例；此前 2026-11-24 修「触发失败：HTTP 404」
 （platform_router 挂载）+ 本地库迁移漂移自愈（账本 + schema 实态双重判定）后实测；
 此前 2026-11-24 收拢 model-settings
 worktree 未提交工作（模型管理规格 §8 收尾）后实测；此前 2026-11-24 合入
@@ -817,3 +824,36 @@ E 分首末差，不外推）。
   域名明细只进卡片、不进模型上下文。
   测试：`tests.test_insights_api`（端点 + 前后端自洽）、`tests.test_insights`、
   `tests.test_source_profile_lift`。
+
+## 移动端快捷入口（2026-11-24，PWA 添加到桌面 + 小屏适配）
+
+目标：手机上不输网址、不找书签，点桌面图标直接进对话页；笔记本上装成独立窗口。
+三块拼起来才算完整，缺一块就用不了：
+
+1. **可安装（PWA）**：`/manifest.webmanifest`（后端按 `application/manifest+json` 送出）
+   + `static/icons/`（192 / 512 / maskable 三张，另有 iOS 用的 `apple-touch-icon`；
+   由 `scripts/gen_pwa_icons.py` 纯标准库生成，不新增依赖）
+   + `static/sw.js`（从 `/` 提供，带 `Service-Worker-Allowed: /` 才能接管全站）。
+   Service Worker **只缓存界面壳，且一律 network-first**：`/api/*` 永不进缓存——
+   缓存对话与档案会给出过期结论，比打不开更糟。
+2. **入口（页内按钮）**：顶栏「＋ 添加到桌面」，逻辑在 `static/install.js`。
+   - 浏览器给了 `beforeinstallprompt`（Chrome/Edge，localhost 或 HTTPS）→ 点一下直接弹系统安装框；
+   - 没给（iOS Safari，或手机经局域网 http 打开）→ 弹分平台手动引导：iOS 走「分享 → 添加到主屏幕」，
+     Android 走「⋮ → 添加到主屏幕 / 安装应用」，桌面浏览器走地址栏安装图标或菜单「安装 MyLocalAI」；
+   - 已是独立窗口（`display-mode: standalone`）或刚装好（`appinstalled`）→ 按钮自动隐藏。
+3. **能连上**：服务默认只监听 `127.0.0.1`，手机根本连不上。加 `--lan` 启动
+   （`my_website/start.bat --lan` 或 `./start.sh --lan`）改成 `0.0.0.0` 并在控制台打印局域网地址；
+   首次运行记得放行 Windows 防火墙。默认值不变（仍只有本机能访问），要开才开。
+
+小屏适配（`static/mobile.css`，最后引入、只覆盖不改旧规则）：≤900px 单列后把**对话区提到左栏之前**
+（否则手机首屏只看到会话列表与档案库）；≤720px 收紧顶栏与面板内边距、输入框字号统一 16px
+（低于 16px 时 iOS 聚焦会自动放大整页）、表格改为横向滚动、弹层占满可用高度；≤420px 隐藏顶栏副标题；
+独立窗口下补 `env(safe-area-inset-bottom)`，避免 iPhone 底部小横条压住发送按钮。
+
+已知边界：Android 对 `http://192.168.x.x` 这类非安全上下文**不提供完整安装**，只做「添加到主屏幕」的
+快捷方式；完整 PWA（离线壳、独立窗口）只在 localhost 或 HTTPS 下成立。本项目本地优先，
+不为手机安装去自建自签证书。
+
+测试：`tests/test_mobile_pwa.py`（15 例：manifest 字段与图标实存、两个根路径资源的
+Content-Type 与 `Service-Worker-Allowed`、四段前端接线、`mobile.css` 的引入顺序与覆盖点、
+启动脚本 `--lan`）。
