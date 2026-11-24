@@ -147,6 +147,18 @@ class SubscriptionStore:
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM subscriptions WHERE id = ?", (int(sub_id),))
 
+    def mark_running(self, sub_id: int) -> None:
+        """起跑即置 last_status='running'（R2 竞态修复，最小写：只动这一个字段）。
+
+        前端以 last_status ∈ {ok,error,blocked,partial} 判完成；run-now/调度起跑
+        若不先写 running，首轮轮询会把上一轮的旧终态误读为"已完成"。终态仍由
+        各收尾分支照常写，这里不碰 enabled/next_run_at/paused_reason。
+        """
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE subscriptions SET last_status = 'running', updated_at = ?"
+                " WHERE id = ?", (_now(), int(sub_id)))
+
     def due_subscriptions(self, now: str, limit: int = 5) -> List[Dict[str, Any]]:
         """到期订阅：enabled 且 next_run_at <= now（ISO 字符串可比，同库同源时戳）。"""
         with self._lock:

@@ -34,18 +34,34 @@
 
   const API = { health: "/api/health" };
 
-  /* ---------- 服务状态 ---------- */
+  /* ---------- 服务状态 ----------
+     两维健康度（P0-2 密钥健康度显性化）：/api/health 除服务活性外还带 llm 段
+     （{usable, provider, model, base_url, error}）。服务活着但 llm.usable=false
+     （密钥没配好）时，所有分析都会静默降级——只报"服务运行中"会让用户误以为
+     一切就绪，所以这里把 chip 变成琥珀警示态（.status-chip.warn，样式在 chat.css，
+     跨文件约定）并在 title 里说明后果。纯 textContent/className 更新：
+     chip 上不拼 HTML，既有可访问性属性（结构在 index.html）原样保留。 */
   async function checkHealth() {
     const chip = $("#apiStatus");
     if (!chip) return;
     try {
       const resp = await fetch(API.health);
       if (!resp.ok) throw new Error("bad status");
-      chip.textContent = "● 服务运行中";
+      const health = await resp.json().catch(() => null);
+      const llm = (health && health.llm && typeof health.llm === "object") ? health.llm : null;
+      if (llm && llm.usable === false) {
+        chip.textContent = "● 服务运行中 · 模型未配置";
+        chip.className = "status-chip warn";
+        chip.title = "分析将以降级模式运行：证据发现不可用";
+        return;
+      }
+      chip.textContent = "● 服务运行中" + (llm && llm.usable && llm.provider ? " · " + llm.provider : "");
       chip.className = "status-chip ok";
+      chip.removeAttribute("title");
     } catch (e) {
       chip.textContent = "● 服务不可用";
       chip.className = "status-chip bad";
+      chip.removeAttribute("title");
     }
   }
 

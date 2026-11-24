@@ -649,6 +649,46 @@ def _response_total_tokens(resp: Any) -> int:
     return int(value)
 
 
+# ---------------------------------------------------------------------------
+# 空 content 连续计数器（P1-2，上游质量可观测）
+# ---------------------------------------------------------------------------
+# LongCat 有返回空 content 的前科（README 已知局限，2026-10-14 检验报告），运行期需要
+# "上游质量可观测"。这里在 _chat_raw_once 的既有"正文为空"探测点上挂一个进程级连续
+# 计数：真实上游调用返回**空 content**（含"仅思考内容"被兜底返回的情况——上游确实
+# 给了空正文）时 +1，返回非空 content 时清零，只记连续值；不做任何阈值动作，只供
+# /api/health 等处读取。口径对齐上方 M4 计数器：threading.Lock + 读时锁拷贝；计数的
+# 是"真实返回了响应"的尝试，异常/超时/预算耗尽（没有响应）不经过探测点，自然不计。
+_empty_content_lock = threading.Lock()
+_empty_content_streak = 0
+
+
+def _note_empty_content() -> None:
+    """空 content 探测点调用：连续空正文 +1（内部使用）。"""
+    global _empty_content_streak
+    with _empty_content_lock:
+        _empty_content_streak += 1
+
+
+def _note_nonempty_content() -> None:
+    """拿到非空正文时调用：连续计数清零（内部使用）。"""
+    global _empty_content_streak
+    with _empty_content_lock:
+        _empty_content_streak = 0
+
+
+def empty_content_streak() -> int:
+    """当前"连续返回空 content"的上游调用次数（读时锁拷贝；拿到非空正文即清零）。"""
+    with _empty_content_lock:
+        return int(_empty_content_streak)
+
+
+def reset_empty_content_streak() -> None:
+    """清零空正文连续计数（测试与检验脚本用，口径同 reset_usage）。"""
+    global _empty_content_streak
+    with _empty_content_lock:
+        _empty_content_streak = 0
+
+
 def extract_json_obj(text: str) -> Optional[dict]:
     """
     从模型返回的文本中稳健地抽取 JSON 对象。
@@ -777,7 +817,11 @@ def _chat_raw_once(
 
     content = resp.choices[0].message.content if resp.choices else ""
     if content and content.strip():
+        _note_nonempty_content()
         return content.strip(), ""
+    # 既有"空 content"探测点（P1-2 计数接线处）：上游返回了空正文即 +1——即使下面的
+    # 思考内容兜底救回了正文，"上游给了空 content"这个事实也如实计数（LongCat 前科）
+    _note_empty_content()
     try:
         reasoning = resp.choices[0].message.model_dump().get("reasoning_content") or ""
     except Exception:  # noqa: BLE001

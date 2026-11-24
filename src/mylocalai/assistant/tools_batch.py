@@ -14,7 +14,9 @@ POST /api/batch → 后台线程 + SSE 进度"的独立通道，与对话回合�
      所属工作区）→ record_analysis；单条失败记 error 不阻断后续；
   4. 取消（cancel_check）与总预算用尽 → 剩余条目标 not_run/cancelled，
      **绝不把"没跑"显示成"没发现"**；
-  5. 收尾：summary 纯函数汇总 + batch_summary 卡片（card 事件 + 落库）。
+  5. 收尾：summary 纯函数汇总（含规格 §5 三要素，原料为条目档案证据）+
+     batch_summary 卡片（card 事件 + 落库）；done 事件 cost 取 llm_client
+     进程级计数器的段前/段后快照差值（缓存命中如实为 0，不估算）。
 
 依赖方向：assistant → dossier（allowed）；引擎经 services 注入（测试可打桩）。
 """
@@ -181,6 +183,16 @@ def run_batch(batch_id: int, *, store: Any, dossiers: Any, services: Dict[str, A
         except Exception:  # noqa: BLE001
             return False
 
+    # R7：进程级真实用量计数器的段前快照（llm_client.usage_snapshot，与 loop.py
+    # 成本汇总同款读法）。计数面不可用（导入/读取失败）退回 0 起点——段后差值
+    # 自然为 0，与既有"如实降级"口径一致。
+    cost_before = {"requests": 0, "tokens": 0}
+    try:
+        from mylocalai.llm.llm_client import usage_snapshot
+        cost_before = dict(usage_snapshot())
+    except Exception:  # noqa: BLE001  计数面不可用不影响编排
+        cost_before = {"requests": 0, "tokens": 0}
+
     # 同源预分组（raw_text 可能还是空——URL 条目此时未抓取；用 url 兜底参与分组）
     group_ids = group_similar(
         [str(it.get("raw_text") or it.get("url") or "") for it in items],
@@ -276,23 +288,64 @@ def run_batch(batch_id: int, *, store: Any, dossiers: Any, services: Dict[str, A
              status="ok", label=label, dossier_id=dossier_id, version=version)
 
     items = store.items(int(batch_id))
-    summary = batch_summary.summarize(items)
-    counts = {"ok": summary["ok"], "failed": summary["failed"] + summary["blocked"],
-              "not_run": summary["not_run"]}
-    status = ("cancelled" if cancelled() and not_run and not ok
-              else "done" if not (counts["failed"] or counts["not_run"])
-              else "partial" if ok else "failed")
+    # 规格 §5 三要素原料：批次各条目档案的库内证据（BatchStore 只读口）。store
+    # 没有该口（注入替身）或读取失败时按无证据降级——三要素空结构，如实省略。
+    evidence_by_dossier = None
+    dossier_ids = []
+    for it in items:
+        try:
+            did = int(it.get("dossier_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if did:
+            dossier_ids.append(did)
+    if dossier_ids:
+        getter = getattr(store, "evidence_for_dossiers", None)
+        if callable(getter):
+            try:
+                evidence_by_dossier = getter(dossier_ids)
+            except Exception:  # noqa: BLE001  证据读不到不影响主汇总
+                evidence_by_dossier = None
+    summary = batch_summary.summarize(items, evidence_by_dossier=evidence_by_dossier)
+    # R7：段后快照与段前的差值 = 本批次真实用量（缓存命中不计数、提供方不回
+    # usage 时如实为 0——与 record_usage 的口径一致，绝不按字数估算）。这里先
+    # 算好并入 summary 落库：完结批次刷新后的 SSE 重放 done 事件也如实带成本。
+    cost = {"requests": 0, "tokens": 0}
+    try:
+        from mylocalai.llm.llm_client import usage_snapshot
+        after = usage_snapshot()
+        cost = {"requests": max(0, int(after.get("requests", 0))
+                                - int(cost_before.get("requests", 0))),
+                "tokens": max(0, int(after.get("tokens", 0))
+                              - int(cost_before.get("tokens", 0)))}
+    except Exception:  # noqa: BLE001  计数面不可用：如实退 0（既有降级口径）
+        cost = {"requests": 0, "tokens": 0}
+    summary["cost"] = dict(cost)
+    # R5：blocked 与 failed 分列落库（failed_count 只记条目 error），blocked 走
+    # summary JSON（BatchStore 读侧派生 blocked_count，表结构不动）。
+    counts = {"ok": summary["ok"], "failed": summary["failed"],
+              "blocked": summary["blocked"], "not_run": summary["not_run"]}
+    # status 判定（R5 最小改动方案）：
+    #   cancelled —— 用户取消且确实停下了后续条目（not_run>0；R1 接线后"停止"
+    #                按钮断开 SSE 是主取消源，哪怕已有部分条目成功也如实记已取消）；
+    #   done     —— 无 failed/blocked/not_run（全部成功）；
+    #   partial  —— 有产出（ok>0）或有被拦截条目（blocked>0，全 blocked 不再落 failed）；
+    #   failed   —— 剩余情形（无 ok 无 blocked：全是失败或未跑）。
+    status = ("cancelled" if cancelled() and counts["not_run"]
+              else "done" if not (counts["failed"] or counts["blocked"]
+                                  or counts["not_run"])
+              else "partial" if counts["ok"] or counts["blocked"] else "failed")
     store.set_batch_status(int(batch_id), status, ok_count=counts["ok"],
                            failed_count=counts["failed"],
                            not_run_count=counts["not_run"],
                            summary=summary)
     batch = store.get_batch(int(batch_id)) or batch
-    card = batch_summary.summary_card(batch, items)
+    card = batch_summary.summary_card(batch, items, summary=summary)
     out["items"] = items
     out["summary"] = summary
     emit("card", **card)
     emit("narrative", delta=_narrative(summary))
-    emit("done", cost={"requests": 0, "tokens": 0})
+    emit("done", cost=cost)
     return out
 
 

@@ -6,6 +6,10 @@
 
 分家：batches.profile_id 归属档案工作区（v6），list/get 按 profile_id 过滤；
 跨工作区访问由 web 层按"不存在"处理（不泄露存在性）。
+
+R5 语义分列（2026-11）：failed_count 只记真失败（条目 error），blocked 落在
+summary JSON、由 get/list 读侧派生 blocked_count（表结构不动）。另开
+evidence_for_dossiers 只读口，供批次汇总三要素取档案证据。
 """
 
 from __future__ import annotations
@@ -22,6 +26,9 @@ VALID_SOURCES = ("text", "file", "urls")
 VALID_BATCH_STATUS = ("running", "done", "partial", "failed", "cancelled")
 VALID_ITEM_STATUS = ("pending", "running", "ok", "error", "blocked", "not_run")
 
+#: R5 语义分列后的批次终态集合（登记表清理等处共用口径）
+TERMINAL_BATCH_STATUS = ("done", "partial", "failed", "cancelled")
+
 
 def _dump(value: Any) -> str:
     return json.dumps(value if value is not None else {}, ensure_ascii=False)
@@ -34,6 +41,19 @@ def _load(raw: Any, default: Any) -> Any:
         return json.loads(raw)
     except (TypeError, ValueError):
         return default
+
+
+def _blocked_of(summary: Any) -> int:
+    """从 summary JSON 派生 blocked 计数（R5 读写对齐的读侧）。
+
+    batches 表没有 blocked_count 列（schema 不动），blocked 落在 summary JSON 里；
+    get/list 两处出口在此统一派生，web 列表"已拦截 N"与汇总卡同口径。
+    """
+    try:
+        value = (summary or {}).get("blocked")
+        return max(0, int(value)) if value is not None else 0
+    except (TypeError, ValueError, AttributeError):
+        return 0
 
 
 class BatchStore:
@@ -94,14 +114,19 @@ class BatchStore:
             return None
         out = dict(row)
         out["summary"] = _load(out.get("summary"), {})
+        out["blocked_count"] = _blocked_of(out["summary"])   # R5 读侧分列
         return out
 
     def list_batches(self, profile_id: Optional[int] = None,
                      limit: int = 50) -> List[Dict[str, Any]]:
-        """批次列表（created_at 倒序）；profile_id 非 None 时只列该工作区。"""
+        """批次列表（created_at 倒序）；profile_id 非 None 时只列该工作区。
+
+        R5：failed_count 只记真失败（error），blocked 从 summary JSON 派生为
+        blocked_count 一并列出——列表页"失败/已拦截"从此分列。
+        """
         sql = ("SELECT id, profile_id, title, source, item_count, ok_count,"
-               " failed_count, not_run_count, status, created_at, updated_at"
-               " FROM batches")
+               " failed_count, not_run_count, status, summary, created_at,"
+               " updated_at FROM batches")
         args: List[Any] = []
         if profile_id is not None:
             sql += " WHERE profile_id = ?"
@@ -109,7 +134,11 @@ class BatchStore:
         sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
         args.append(max(1, int(limit)))
         with self._lock:
-            return [dict(r) for r in self._conn.execute(sql, args)]
+            rows = [dict(r) for r in self._conn.execute(sql, args)]
+        for row in rows:
+            row["blocked_count"] = _blocked_of(_load(row.get("summary"), {}))
+            row.pop("summary", None)   # 列表不背 JSON 正文（与旧形状兼容）
+        return rows
 
     def set_batch_status(self, batch_id: int, status: str, *,
                          ok_count: Optional[int] = None,
@@ -145,6 +174,35 @@ class BatchStore:
             row = self._conn.execute("SELECT profile_id FROM batches WHERE id = ?",
                                      (int(batch_id),)).fetchone()
         return int(row["profile_id"]) if row and row["profile_id"] is not None else None
+
+    def evidence_for_dossiers(self, dossier_ids: List[Any]) -> Dict[int, List[Dict[str, Any]]]:
+        """按档案 id 批量读证据行（规格 §5 三要素的原料；只读）。
+
+        同库 evidence_entries 表——批次条目带 dossier_id，汇总层的立场矩阵/
+        证据重合/信源战绩都从这里取数。编排（assistant/tools_batch.py）与 web
+        层都只持有本门面、不直连 SQL（文件头同口径），所以读取口放在这里。
+        返回 {dossier_id: [证据 dict]}；id 非法/无证据的键不出现。
+        """
+        ids: List[int] = []
+        for raw in (dossier_ids or []):
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                ids.append(value)
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM evidence_entries"
+                f" WHERE dossier_id IN ({placeholders}) ORDER BY dossier_id, batch, id",
+                ids).fetchall()
+        out: Dict[int, List[Dict[str, Any]]] = {}
+        for row in rows:
+            out.setdefault(int(row["dossier_id"]), []).append(dict(row))
+        return out
 
     # ---- 条目 ----
 
