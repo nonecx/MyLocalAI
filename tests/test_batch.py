@@ -476,10 +476,11 @@ class TestMaterialsApi(unittest.TestCase):
         self.assertEqual(resp.json()["items"], ["甲", "乙"])
 
     def test_rejections(self):
-        """扩展名/大小/坏编码/空内容 → 400。"""
+        """扩展名/大小/坏编码/空内容 → 400（超限 413：R11 分块读改进，自
+        user-profiles-roles 分支合并保留——贴线文件不误伤、超大文件不整载内存）。"""
         self.assertEqual(self._upload("a.exe", "x").status_code, 400)
         big = "x" * (2 * 1024 * 1024 + 10)
-        self.assertEqual(self._upload("a.txt", big).status_code, 400)
+        self.assertEqual(self._upload("a.txt", big).status_code, 413)
         self.assertEqual(self._upload("a.txt", b"\xff\xfe\x00bad").status_code, 400)
         self.assertEqual(self._upload("a.txt", "   ").status_code, 400)
         self.assertEqual(self._upload("a.json", '{"not": "a list"}').status_code, 400)

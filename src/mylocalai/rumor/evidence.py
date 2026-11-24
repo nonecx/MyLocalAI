@@ -7,6 +7,9 @@
   2. 第一轮中性搜索 "{查询词}"，了解事件的全貌。
   3. 若第一轮没有任何可靠来源反驳，自动补搜一轮 "{查询词} 辟谣"——谣言识别场景里
      定向找辟谣信息往往一击即中（隔夜茶致癌、微波炉致癌都有现成辟谣）。
+  3.5 （可选）领域定向补搜：调用方给出领域检索提示（domain_hints）时，在既有轮次
+     之后追加一轮 "{查询词} site:h1 OR site:h2 OR site:h3"——提示只决定去哪儿找，
+     不决定找到的资料算不算证据（仍走来源分级与立场判定）。
   4. 对可靠级别且摘要太短的条目机会式抓全文（fetch 失败不影响证据成立）。
   5. 立场判定：一次 LLM 调用批量判断每条证据对主张的态度（反驳/支持/无关）；
      LLM 失败时回退到关键词规则（可靠来源 + 标题/摘要含"辟谣/不实"→ 反驳）。
@@ -418,6 +421,60 @@ def _profile_host(key: str) -> str:
     return host[4:] if host.startswith("www.") else host
 
 
+#: 领域定向轮最多带几个 site: 提示（再多只会稀释查询词）
+_DOMAIN_HINTS_MAX = 3
+
+
+def _domain_hint_hosts(hints: Any) -> List[str]:
+    """检索提示归一成 host：去空白、转小写、去协议前缀、只留主机名（去路径/端口）。
+
+    只做"能不能拼进 site:"的规整，不做可信判断——提示不是权威认定。
+    """
+    out: List[str] = []
+    if not isinstance(hints, (list, tuple)):
+        return out
+    for raw in hints:
+        host = str(raw or "").strip().lower()
+        if not host:
+            continue
+        if "://" in host:
+            host = host.split("://", 1)[1]
+        host = host.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+        if ":" in host:                      # 去端口（检索提示都是域名，不考虑 IPv6）
+            host = host.split(":", 1)[0]
+        host = host.strip(".")
+        if host and host not in out:
+            out.append(host)
+    return out
+
+
+def _run_domain_round(book: Dict[str, Any], query: str, hosts: List[str],
+                      search_fn: Callable[[str, int], Dict[str, Any]],
+                      seen_urls: set) -> None:
+    """领域定向补搜：追加一轮 site: 查询，结果按同一套去重/落账进证据本。
+
+    放在既有轮次之后跑，因此不影响"要不要补搜辟谣"的既有判定；搜索异常与
+    blocked 都只让这一轮落空，不影响已经拿到的证据。
+    """
+    q = f"{query} " + " OR ".join("site:" + h for h in hosts[:_DOMAIN_HINTS_MAX])
+    book["domain_round"] = True
+    try:
+        result = search_fn(q, 6)
+    except Exception:  # noqa: BLE001  定向补搜失败只是少一轮线索
+        return
+    if not isinstance(result, dict) or result.get("blocked"):
+        return
+    book["queries"].append({"query": q, "extra": False, "engines": result.get("engines", {})})
+    for r in result.get("results", []):
+        if hasattr(r, "to_dict"):   # search_all 返回 SearchResult 对象；测试桩可能直接给 dict
+            r = r.to_dict()
+        url = (r.get("url") or "").rstrip("/")
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        book["entries"].append(_entry_from_result(r, q))
+
+
 def collect_evidence(
     text: str,
     claims: Optional[Dict[str, Any]] = None,
@@ -426,6 +483,7 @@ def collect_evidence(
     fetch_fn: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
     llm_judge: bool = True,
     source_profile: Optional[Dict[str, Dict[str, int]]] = None,
+    domain_hints: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """搜索并整理证据本。text 仅用于在 claims 未提供时做兜底，不发给搜索引擎。
 
@@ -439,6 +497,15 @@ def collect_evidence(
     profile_refute 两个键——个人档案库里反复辟谣同一类谣言的信源值得信任加权。
     不传 / 传 None / 传 {} 时不加任何键，输出与没有此参数时逐位一致
     （official 口径不受影响：画像域名只进 reliable 集合）。
+
+    domain_hints（平台领域线程，可选）：领域判定的**检索提示**域名（host 清单，
+    见 platform/domains.py 的 domain_hints）。仅当传入**非空**列表时生效：在既有
+    轮次（中性轮 + 按需的辟谣轮）结束后追加一轮 site: 定向搜索
+    （"{查询词} site:h1 OR site:h2 OR site:h3"，最多取前 3 个 host），并把
+    book["domain_round"] 置 True。提示只影响"去哪儿找"，不影响"找到的资料算不算
+    证据"——定向轮搜到的条目与普通条目走同一套来源分级与立场判定。
+    不传 / 传 None / 传 [] 时整段跳过、book 不含 domain_round 键，输出与没有
+    此参数时逐位一致（tests/test_rumor_domain_hints.py 锁定）。
     """
     search_fn = search_fn or search_all
     fetch_fn = fetch_fn or fetch_article
@@ -498,6 +565,15 @@ def collect_evidence(
             book["entries"].append(_entry_from_result(r, q))
         if not extra and not _has_rule_refute(book) and len(rounds) < 2:
             rounds.append([query + " 辟谣", True])
+
+    # 2.5 领域定向补搜（可选，平台领域线程）：既有轮次跑完后，按领域检索提示追加一轮
+    #   site: 定向搜索。只补搜、不回改上面"要不要辟谣轮"的判定；被墙或搜索异常时
+    #   这一轮落空即可，不影响已拿到的证据。不传/传空时整段跳过——book 不含
+    #   domain_round 键，输出与没有此参数时逐位一致（tests/test_rumor_domain_hints.py）。
+    if domain_hints and book.get("search_status") != "blocked":
+        hosts = _domain_hint_hosts(domain_hints)
+        if hosts:
+            _run_domain_round(book, query, hosts, search_fn, seen_urls)
 
     if not book["entries"]:
         if book.get("search_status") == "blocked":

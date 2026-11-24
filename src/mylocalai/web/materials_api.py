@@ -2,11 +2,11 @@
 """材料上传解析 API（专业用户 A · 阶段 2）：文件只在内存解析，不落盘。
 
 POST /api/materials/upload —— multipart 表单字段 file；支持 .txt/.md/.csv/.json，
-大小上限 2MB。解析规则：
+大小上限 2MB（超限 413；类型/解析/编码问题 400）。解析规则：
   - txt/md：按空行分段（一段 = 一条材料）；
   - json：字符串数组，或对象数组取 text/content/claim 字段；
   - csv：按列名取 text/content/claim，缺这些列则取每行第一个非空单元格。
-返回 {"items": [...], "count": N, "filename": "..."}；失败 400 {"detail": ...}。
+返回 {"items": [...], "count": N, "filename": "..."}；失败 400/413 {"detail": ...}。
 
 隐私口径：文件内容不写盘、不进档案库——用户随后点"开始分析"才经 POST /api/batch
 走既有链路（原始输入保存开关此时才生效）。上传本身零外部请求。
@@ -24,6 +24,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 router = APIRouter()
 
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024      # 2MB
+_CHUNK_BYTES = 256 * 1024               # R11：分块读取步长（边读边比上限）
 _ALLOWED_SUFFIXES = (".txt", ".md", ".csv", ".json")
 _TEXT_FIELDS = ("text", "content", "claim")
 
@@ -78,17 +79,28 @@ def _from_csv(text: str) -> List[str]:
 
 @router.post("/api/materials/upload")
 async def materials_upload(file: UploadFile = File(...)) -> Dict[str, Any]:
-    """解析上传的材料文件（不落盘）；扩展名/大小/解析失败 → 400。"""
+    """解析上传的材料文件（不落盘）；类型/编码/解析失败 → 400，超限 → 413。"""
     name = str(file.filename or "").strip()
     suffix = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
     if suffix not in _ALLOWED_SUFFIXES:
         raise HTTPException(
             status_code=400,
             detail=f"不支持的文件类型：{suffix or '（无扩展名）'}（支持 txt/md/csv/json）")
-    raw = await file.read()
-    if len(raw) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=400,
-                            detail=f"文件过大（最多 {MAX_UPLOAD_BYTES // 1024} KB）")
+    # R11：分块累计读、边读边比上限——不再把超大文件整载内存之后才拒（multipart
+    # 的 Content-Length 含表头/boundary 开销，按它精确预判会误伤贴线的文件，
+    # 所以用分块累计这个不依赖头部的口径）。
+    chunks: List[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413,
+                                detail=f"文件过大（最多 {MAX_UPLOAD_BYTES // 1024} KB）")
+        chunks.append(chunk)
+    raw = b"".join(chunks)
     try:
         text = raw.decode("utf-8-sig")
     except UnicodeDecodeError as exc:

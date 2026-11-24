@@ -373,8 +373,9 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 2299 个用例（unittest discover 全量，2026-11-24 提取监测平台数据层与 API 层后实测；
-此前 2026-11-24 合入信息收集 v2 分支只读资产后为 2049 例，2026-11-23 第五波三条专用技能落地后为 1985 例，
+离线套件共 2369 个用例（unittest discover 全量，2026-11-24 合入 user-profiles-roles
+分支后实测；此前 2026-11-24 提取监测平台数据层与 API 层后为 2299 例，
+合入信息收集 v2 分支只读资产后为 2049 例，2026-11-23 第五波三条专用技能落地后为 1985 例，
 2026-11-22 角色 Agent 工作流（编排引擎 + 角色工具白名单 + 全面去数值）落地时为 1764 例，
 含编排层 `tests/test_workflow_engine.py` 20 例、`tests/test_workflow_claim.py` 13 例、
 角色白名单 `tests/test_role_allowlists.py` 38 例与跨层对拍
@@ -392,6 +393,11 @@ UI 契约与 PUT /api/privacy/preferences 接口用例；第五波新增 221 例
 再 2026-11-24 自 user-profiles-roles 分支提取监测平台数据层与 API 层（`platform/` 包 +
 `tools_platform` + `platform_api` + `tests/test_platform_*` 十一模块，前端/路由接线
 留待后续分支，相应接线断言用例未纳入）；
+另 2026-11-24 同分支整分支合并（用户裁决：冲突以最新主线为准）带入的增量：
+检索多源融合 `tests/test_search_fusion.py` / `tests/test_search_api_source.py`、
+LLM 韧性 `tests/test_llm_resilience.py`、提示注入防护 `tests/test_injection_guard.py`、
+平台领域检索提示 `tests/test_rumor_domain_hints.py` 五模块（绑定主线未接线功能的
+少量用例未纳入）；
 **M4 起由 `tests.test_readme_counts` 自动校验此数字与 mock 闸门条数，改动后须同步回写**）：
 M1-M3 的全部回归（详见 git 历史），加上 M4 新增模块：
 **成本真实计数**（llm_client 进程级计数器：真实上游调用数 + usage tokens，缓存命中/
@@ -500,6 +506,13 @@ CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
 - `docs/角色工作流与Skill定位总览-2026-11-23.md` —— **角色工作流与 skill 定位人读总览**：
   通用执行底座 + 四角色工作流程示意图（Mermaid）、通用 7 项 / 专用 6 项 skill 的功能与
   定位、执行层 12 份 SKILL.md 到能力层的映射、能力 × 角色裁剪矩阵与新增能力的归类步骤。
+- `docs/监测平台规格-2026-11-20.md` —— 监测平台（巡检发现 → 热度估计 → 传播风险分级 →
+  信息流）的规格：平台包结构、三表存储、风险分级口径与管理抽屉契约。
+- `docs/优化方案-2026-11-22.md` —— 基于实测证据的 P0/P1/P2 优化路线（检索源结构化升级、
+  多源融合、用户角色与 Profile 收口）。
+- `docs/异步状态窗口清单-2026-11-22.md` —— 待办与状态口径清单（阶段进度对齐）。
+- `docs/评估-对比通用大模型-2026-11-22.md` —— 通用大模型（DeepSeek 等）对比评估报告
+  （含网页版真机实测章节与可复现对比实验脚本 `scripts/compare_llm.py`）。
 - `src/mylocalai/rumor/README.md` —— 谣言 Agent 的架构、证据本、受控浏览、MCP 与降级行为。
 - `my_website/README.md` —— 展示网站的启动方式与页面功能。
 

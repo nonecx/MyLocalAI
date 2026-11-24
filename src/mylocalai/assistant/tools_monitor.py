@@ -8,7 +8,8 @@
   1. 授权闸（fail-closed）：外部检索未授权 → 本轮记 blocked、订阅暂停并写明原因，
      **零外发**（与隐私模块既有口径一致）；
   2. 检索：search_all(topic+keywords, k=8, domains=订阅域名)——site: 变体由
-     检索层构造（≤3 个），不支持时按实到结果呈现，不谎报"已限定"；
+     检索层构造（≤3 个），不支持时按实到结果呈现；domain_scope_applied 与
+     scope_degraded（变体全空兜底）两个标注都如实写进 run.summary，不谎报"已限定"；
   3. 落库：订阅专属监测档案（input_kind='topic'）证据按批次追加；关注度快照用
      **本次检索结果**现算（estimate_from_search，零额外联网，best-effort）；
   4. 变化摘要（纯函数）：与上一轮的 URL 差集 + E 分首末差，只述事实不外推；
@@ -109,13 +110,24 @@ def _query_of(sub: Dict[str, Any]) -> str:
 
 
 def _advance(store: Any, sub_id: int, sub: Dict[str, Any], status: str) -> None:
-    """推进 last_run_at / next_run_at 并恢复启用（失败也不卡死订阅；best-effort）。"""
+    """推进 last_run_at / next_run_at 与终态标注（失败也不卡死订阅；best-effort）。
+
+    不隐式恢复启用（R8）：enabled=0（授权闸暂停等）的订阅保持暂停与暂停原因，
+    由用户显式"恢复"操作解，避免"跑一次→恢复→下一轮又暂停"的抖动；
+    enabled=1 时照旧清空 paused_reason。
+    """
     try:
         frequency = int(sub.get("frequency_s") or 3600)
         next_at = (datetime.now().astimezone() + timedelta(seconds=max(300, frequency)))
-        store.update_subscription(int(sub_id), last_run_at=now_iso(),
-                                  next_run_at=next_at.isoformat(timespec="seconds"),
-                                  last_status=status, paused_reason="", enabled=1)
+        fields: Dict[str, Any] = dict(
+            last_run_at=now_iso(),
+            next_run_at=next_at.isoformat(timespec="seconds"),
+            last_status=status)
+        if sub.get("enabled"):
+            fields["enabled"] = 1
+            fields["paused_reason"] = ""
+        # enabled=0：不写 enabled/paused_reason，保持暂停现场
+        store.update_subscription(int(sub_id), **fields)
     except Exception:  # noqa: BLE001  推进失败不挡收尾
         pass
 
@@ -143,9 +155,21 @@ def change_card(sub: Dict[str, Any], run: Dict[str, Any]) -> Dict[str, Any]:
 
 def run_subscription(store: Any, sub: Dict[str, Any], dossiers: Any,
                      events: Any = None,
-                     cancel_check: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
-    """跑一轮监测：授权闸 → 检索 → 落库 → 变化摘要 → 运行记录。永不抛。"""
-    run_id = store.start_run(int(sub["id"]))
+                     cancel_check: Optional[Callable[[], bool]] = None,
+                     run_id: Optional[int] = None) -> Dict[str, Any]:
+    """跑一轮监测：授权闸 → 检索 → 落库 → 变化摘要 → 运行记录。永不抛。
+
+    run_id（可选）：调用方预建的 subscription_runs 行 id——run-now 需要响应体
+    立即带 run_id，先建行再交给本函数执行；缺省自建一行（调度线程路径）。
+    """
+    if run_id is None:
+        run_id = store.start_run(int(sub["id"]))
+    else:
+        run_id = int(run_id)
+    try:
+        store.mark_running(int(sub["id"]))   # R2：起跑即置 running（调度路径同口径）
+    except Exception:  # noqa: BLE001  标注失败不挡运行；终态仍由收尾写
+        pass
     out: Dict[str, Any] = {"run_id": run_id, "status": "error", "results_count": 0,
                            "new_count": 0, "summary": {}}
 
@@ -253,6 +277,9 @@ def run_subscription(store: Any, sub: Dict[str, Any], dossiers: Any,
     summary["batch"] = batch
     summary["dossier_id"] = int(dossier_id) if dossier_id is not None else None
     summary["domain_scope_applied"] = bool(payload.get("domain_scope_applied"))
+    # R9：site: 变体全空兜底时检索层标 scope_degraded=True，两个标注都进
+    # run.summary，如实呈现"这一轮没限定住"，不谎报已限定。
+    summary["scope_degraded"] = bool(payload.get("scope_degraded"))
     summary["quality"] = str(snapshot.get("quality") or "") if snapshot else ""
 
     new_count = len(summary["new_urls"])
