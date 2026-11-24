@@ -117,6 +117,54 @@ def _safe_format(tpl: Any, fallback: str, **kwargs: Any) -> str:
         return fallback
 
 
+# ---------------------------------------------------------------------------
+# 路由模型不可用的诚实降级（2026-11-24）：与"意图不清"分开话术
+# ---------------------------------------------------------------------------
+#: 为什么必须分开：clarify 追问一次的话术（clarify_reply）隐含"我没听懂你的意图"；
+#: 路由模型整个不可用（提供方未授权/没密钥/网络断）时再拿它回话，是把系统故障
+#: 藏成"用户没说清"——用户被误导去改表述，真实故障零信号（实测事故：longcat
+#: PrivacyAuthorizationError → 路由全灭 → 热度问题被问"想核实真实性还是分析
+#: 煽动性"）。所以"模型不在场"要如实报告 + 给修复路径（prompts.route_unavailable_reply
+#: 模板），"意图不清"才多问一句。两者互不冒充。
+#: prompts.json 缺 route_unavailable_reply 时的内置兜底（与 JSON 同文）。
+_ROUTE_UNAVAILABLE_FALLBACK = (
+    "这句先不处理：路由模型这会不可用（{reason}），所以我没猜你的意图、也没调用任何工具。"
+    "建议下一步：{fix}。处理好后把原话再发一遍就行。")
+
+#: 从 error 文本里提取提供方名：provider 'xxx' 形式（llm_client 的隐私授权报错）。
+_ROUTE_PROVIDER_RE = re.compile(r"provider '([^']+)'")
+
+
+def _route_provider_name(err: str) -> str:
+    """error 文本 → 提供方名：先找 provider 'xxx'，再退冒号前的片段，最后"当前"。"""
+    m = _ROUTE_PROVIDER_RE.search(err)
+    if m:
+        return m.group(1)
+    head = err.split(":", 1)[0].strip()
+    return head or "当前"
+
+
+def _route_failure_guidance(err: str) -> Tuple[str, str]:
+    """路由失败 error → (reason, fix)：把机器错误翻译成用户可行动的诚实说明。
+
+    四类映射（隐私授权 / 未配密钥 / 网络超时 / 其它），纯函数、永不抛异常。
+    reason/fix 直接进 route_unavailable_reply 模板的 {reason}/{fix} 占位符。
+    """
+    text = str(err or "")
+    low = text.lower()
+    if "PrivacyAuthorizationError" in text:
+        return (f"外部处理未授权（提供方 {_route_provider_name(text)}）",
+                "打开右上角「设置 → 隐私与授权」勾选该提供方，或把当前提供方换成已授权的一家")
+    if "未配置" in text and ("API_KEY" in text or "密钥" in text):
+        return (f"提供方 {_route_provider_name(text)} 未配置 API 密钥",
+                "在「设置 → 模型」给该提供方填密钥，或切换到已配好密钥的提供方")
+    if "超时" in text or "timeout" in low or "连接" in text:
+        return (f"调用提供方 {_route_provider_name(text)} 失败（网络/超时）",
+                "检查网络与该提供方的接口地址，或临时切换提供方")
+    reason = text[:80] or "路由模型无响应"
+    return (reason, "查看服务日志里的原始错误，或重启服务后重试")
+
+
 def _opinions_payload(res: Any) -> Dict[str, Any]:
     """opinions 引擎结果 → 章节服务契约 payload（tools_chapters 消费形状）。
 
@@ -1203,7 +1251,11 @@ class AssistantLoop:
                                history_hint=history_hint, id_fallback=id_fallback, role=role)
         if res["action"] in router_mod.META_ACTIONS:
             return {"kind": "meta", "action": res["action"],
-                    "reply": res.get("reply", ""), "error": res.get("error", "")}
+                    "reply": res.get("reply", ""), "error": res.get("error", ""),
+                    # 透传"路由模型不可用"标记（router 的 LLM 失败分支才带）：
+                    # _turn 据此把 clarify 换成诚实降级话术；缺省 False（模型自选
+                    # clarify/路由成功时与旧版逐位一致）。
+                    "llm_failed": bool(res.get("llm_failed"))}
         wp = expand_plan(res["action"], res.get("args", {}), role=str(role or "full"))
         return {"kind": "tools", "plan_id": wp.plan_id,
                 "capability_id": capability_for_action(res["action"]),
@@ -1583,7 +1635,16 @@ class AssistantLoop:
             action = str(plan["action"])
             reply = str(plan.get("reply") or "")
             narrated = False
-            if action == "chitchat" and not reply.strip():
+            if action == "clarify" and plan.get("llm_failed"):
+                # 路由模型不可用的诚实降级（与"意图不清"分开话术，见上方常量注释）：
+                # 不猜意图、不调工具，如实报告故障 + 给修复路径；模板缺占位符也不炸
+                # （replace 而非 format）。degraded 如实置位——这一轮确实降级了。
+                reason, fix = _route_failure_guidance(str(plan.get("error") or ""))
+                tpl = (str(prompts.get("route_unavailable_reply") or "").strip()
+                       or _ROUTE_UNAVAILABLE_FALLBACK)
+                reply = tpl.replace("{reason}", reason).replace("{fix}", fix)
+                result["degraded"] = True
+            elif action == "chitchat" and not reply.strip():
                 # chitchat 路由没给 reply → narrate_llm 补一句（§5.1）；再失败用固定话术
                 # （roles 段的 chitchat_fallback 覆盖随局部 prompts 生效）
                 narrate_base = _usage_now()
