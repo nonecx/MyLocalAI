@@ -1,4 +1,4 @@
-﻿# MyLocalAI —— 网络言论智能分析与谣言识别
+# MyLocalAI —— 网络言论智能分析与谣言识别
 
 对一段网络文本（评论、帖子、聊天记录）做**多维度分析与风险判定**，并提供可交互的展示网站
 和可被 MCP 客户端接入的谣言识别 Agent。全部靠**提示词工程 + 大模型 API** 实现，无需 GPU。
@@ -479,6 +479,9 @@ CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
   （compare_dossiers）/ 事件时间线（event_timeline）三条专用只读对话能力的实施规格：
   决策记录（含《Skill分类与提示词规范》§7 候选池三项从"留扩展位"到"已落地"）、
   三条流水线口径、预算外置、状态/失败矩阵、测试矩阵与已知局限。
+- `docs/角色工作流与Skill定位总览-2026-11-23.md` —— **角色工作流与 skill 定位人读总览**：
+  通用执行底座 + 四角色工作流程示意图（Mermaid）、通用 7 项 / 专用 6 项 skill 的功能与
+  定位、执行层 12 份 SKILL.md 到能力层的映射、能力 × 角色裁剪矩阵与新增能力的归类步骤。
 - `src/mylocalai/rumor/README.md` —— 谣言 Agent 的架构、证据本、受控浏览、MCP 与降级行为。
 - `my_website/README.md` —— 展示网站的启动方式与页面功能。
 
@@ -715,6 +718,8 @@ DOSSIER_DB_PATH 可覆盖）。测试：`tests.test_mcp_assistant`（同核对�
   隐私 fail-closed 授权、路由四层防护链均不随角色放宽。
 - 测试：`tests.test_profiles`（迁移回填 / CRUD / 分家 / 跨区防护 / layperson 卡片 /
   Web API 全链）。
+- 四个角色各自的工作流程示意图、通用/专用 skill 的功能与定位、能力 × 角色裁剪矩阵：
+  `docs/角色工作流与Skill定位总览-2026-11-23.md`。
 
 ### 专业用户 A · 材料批量分析（阶段 2）
 
