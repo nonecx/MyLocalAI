@@ -343,6 +343,49 @@ class SettingsUiStructureTest(unittest.TestCase):
         self.assertIn("请在下方选择提供方并填写密钥", js,
                       "未配置分支缺少下一步动作提示")
 
+    def test_env_override_notice_flags_panel_runtime_mismatch(self):
+        """env 覆盖错配警示卡（WS2）：触发条件、文案锚点、DOM 手法、刷新路径。
+
+        锁四件事：
+          1. 卡片函数存在，且挂进 renderPane()——随「模型」Tab 重建，写操作先
+             loadAll() 重拉 /api/models 即刷新，不需要额外监听；
+          2. 触发条件是"active.provider 与 runtime.provider 都存在且不同"，
+             任一段缺省或两者一致都不渲染（不猜服务端状态）；
+          3. 文案锚点齐备：实际生效提供方、LLM_PROVIDER=、默认解析、
+             key_source=none 的补充句；
+          4. 仍然只走本文件的 el()（createElement/textContent），不拼 HTML。
+        """
+        js = self.js
+        self.assertIn("function buildEnvOverrideNotice", js,
+                      "settings.js 缺少 env 覆盖错配警示卡（buildEnvOverrideNotice）")
+        body = _function_body(js, "buildEnvOverrideNotice")
+        self.assertTrue(body, "解析不到 buildEnvOverrideNotice 的函数体")
+        # ① 挂进「模型」Tab 渲染，且排在密钥体检卡之后（体检卡保持 Tab 顶部第一行）
+        pane_body = _function_body(js, "renderPane")
+        self.assertTrue(_has(pane_body, "buildEnvOverrideNotice()"),
+                        "错配警示卡没有挂进 renderPane：用户永远看不到它")
+        self.assertLess(js.index("pane.appendChild(buildKeyHealthCard())"),
+                        js.index("buildEnvOverrideNotice()"),
+                        "错配警示卡应排在密钥体检卡之后")
+        # ② 触发条件：两段都存在且不同；缺一段/相同 → 返回 null 不渲染
+        self.assertTrue(_has(body, "state.data.active"), "没有读面板当前选择 active 段")
+        self.assertTrue(_has(body, "state.data.runtime"), "没有读运行期生效 runtime 段")
+        self.assertTrue(_matches(body, r"activeProvider\s*===\s*runtimeProvider"),
+                        "没有比较两个提供方：判断不出'面板选择是否生效'")
+        self.assertTrue(_matches(body, r"return null"),
+                        "不匹配时应返回 null（renderPane 据此跳过挂载）")
+        # ③ 文案锚点（用词面锚住，不锁整段字节）
+        for anchor in ("实际生效的提供方是", "LLM_PROVIDER=", "来自默认解析",
+                       "且当前生效提供方未配置密钥"):
+            self.assertIn(anchor, js, f"错配警示卡缺少文案锚点：{anchor}")
+        # ④ DOM 手法：el() 即 createElement/textContent，不出现 HTML 注入点
+        sinks = re.findall(r"\.(?:innerHTML|outerHTML)\b|insertAdjacentHTML\(|\bdocument\.write\(", body)
+        self.assertEqual(sinks, [], f"错配警示卡出现 HTML 注入点：{sinks}")
+        self.assertTrue(_has(body, "el("), "建 DOM 应走本文件的 el()（createElement/textContent）")
+        # 样式不造新 CSS：盒底 .settings-notice + chat.css 既有的 key-health-* 变体
+        self.assertTrue(_matches(body, r'settings-notice\s+key-health-card\s+key-health-none'),
+                        "错配警示卡应复用 .settings-notice 盒底与既有 key-health-none 配色变体")
+
     def test_key_health_classes_defined_in_chat_css(self):
         """settings.js 用到的 key-health-* 类在 chat.css 都有定义（体检卡配色跨文件契约）。
 
@@ -859,13 +902,16 @@ class SettingsConsumedFieldsTest(unittest.TestCase):
     #: runtime_supported），外加 §3.2 请求体字段 api_key（写密钥时前端要发这个键）、
     #: §8.2 的 retry_policies / paths，§8.3 的 models_exists / secrets_exists，
     #: §8.4 第 8 条隐私面板原样回传的 save_enabled / retention_days。
+    #: WS2：runtime 段的 env_provider（连同无下划线的 source，正则只查蛇形字段）
+    #: 供 env 覆盖错配警示卡判断"面板选择是否被 LLM_PROVIDER 压过"。
     DOCUMENTED = {
         "schema_version", "providers", "warnings", "protocols", "input_types",
         "reasoning_tiers", "retry_policies", "limits", "paths",
         "max_providers", "max_models_per_provider",
         "max_context_window", "max_output_tokens",
         "display_name", "base_url", "protocol_runtime_supported", "runtime_supported",
-        "key_env", "key_source", "api_key", "api_key_set", "api_key_source", "api_key_masked", "is_active",
+        "key_env", "key_source", "env_provider",
+        "api_key", "api_key_set", "api_key_source", "api_key_masked", "is_active",
         "default_models", "context_window", "active_tier", "api_value", "owned_by",
         "save_enabled", "retention_days", "external_processing_enabled",
         "external_processing_providers", "warning",

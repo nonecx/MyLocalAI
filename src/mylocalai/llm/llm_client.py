@@ -385,13 +385,75 @@ def config_error() -> str:
     return _CONFIG_ERROR
 
 
-def validate_config() -> Tuple[bool, str]:
-    """启动自检入口：返回 (是否可用, 说明)。不抛异常。"""
+def _config_error_kind(error: str) -> str:
+    """把 config_error() 的文案归类成给前端的类别词面（key / unknown）。
+
+    只做"这条错误是哪一类"的分类，与失败先后顺序无关：
+    密钥没配 / 密钥与服务商不匹配都算 key（用户要去配密钥或改提供方）；
+    "未知提供方"算 unknown（LLM_PROVIDER 指向 providers 表里没有的名字）；
+    其余一律 unknown——宁可不猜，也不给一个听起来很确定的错类别。
+    """
+    if any(token in error for token in ("未配置", "密钥", "不匹配")):
+        return "key"
+    if "未知提供方" in error:
+        return "unknown"
+    return "unknown"
+
+
+def _config_diagnosis() -> Tuple[bool, str, str]:
+    """(是否可用, 说明, 失败类别)，检查顺序与 `_chat_raw` 的调用链逐条同序。
+
+    为什么需要它：`/api/health` 原来只消费 `config_error()`（密钥口径），于是
+    "隐私授权没开"会被报成"未配置 XXX_API_KEY"——用户照着去配密钥，配完仍然
+    全链路降级，因为真正的第一道闸是隐私授权（WS2 实测故障：诊断与真实失败
+    原因不一致）。调用链 `_chat_raw_providers` 对主提供方的真实顺序是：
+        1. 提供方不在 providers 表里 → "未知提供方"（`spec is None` 直接 continue，
+           隐私门根本不会为它执行）；
+        2. `load_preferences().require_provider(provider, base_url)` —— fail-closed，
+           发生在建客户端与任何外发之前；loopback 豁免由 `allows_provider_url` 处理；
+        3. `create_client()` → `config_error()`（密钥 / 未知提供方 / 错配）。
+    这里照抄这个顺序：隐私闸不过时类别是 privacy，密钥类问题排在它后面。
+    隐私偏好**每次现取**（与调用链同构，不做缓存）：授权状态翻转后诊断必须立刻
+    跟着翻，否则"刚在面板里勾上、健康检查还说过期话"比不诊断更糟。
+    """
+    provider = _provider_names()[0]
+    spec = providers().get(provider)
+    if spec is not None:
+        # 未知提供方时调用链在隐私门之前就跳过（spec is None → continue），所以这里
+        # 同样不跑隐私门，直接由 config_error() 给出"未知提供方"（类别 unknown）——
+        # 否则"提供方不存在"会被误报成"未授权"，那是另一种诊断与实况不符
+        base_url = os.environ.get(spec["base_url_env"], "").strip() or spec["base_url"]
+        try:
+            from mylocalai.core.privacy import load_preferences
+            load_preferences().require_provider(provider, base_url)
+        except Exception as exc:  # noqa: BLE001  fail-closed：偏好读取失败也按未授权处理
+            return False, f"{type(exc).__name__}: {exc}", "privacy"
     error = config_error()
     if error:
-        return False, error
+        return False, error, _config_error_kind(error)
     info = _resolve()
-    return True, f"提供方 {info['provider']} · 模型 {info['model']} · 地址 {info['base_url']}"
+    return True, f"提供方 {info['provider']} · 模型 {info['model']} · 地址 {info['base_url']}", ""
+
+
+def validate_config() -> Tuple[bool, str]:
+    """启动自检入口：返回 (是否可用, 说明)。不抛异常。
+
+    返回形状不变（`/api/health` 与 tests/test_stability_config.py 都按两元组消费），
+    口径改走 `_config_diagnosis()`：隐私授权不过时说明写的是隐私错误原文，
+    而不是排在它后面的密钥错误。
+    """
+    ok, detail, _kind = _config_diagnosis()
+    return ok, detail
+
+
+def config_error_kind() -> str:
+    """配置不可用的类别词面：privacy / key / unknown；配置可用时是空串。
+
+    供 `/api/health` 的 `llm.error_kind` 消费（服务状态 chip 与设置面板据此分流
+    提示文案）。口径与检查顺序见 `_config_diagnosis()`。
+    """
+    ok, _detail, kind = _config_diagnosis()
+    return "" if ok else kind
 
 
 def get_provider() -> str:

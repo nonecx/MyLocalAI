@@ -176,12 +176,18 @@ class TestGuardChainClarifies(RouterTestBase):
             with self.subTest(action=bad):
                 r = self.route("u", {"action": bad})
                 self.assertEqual(r["action"], "clarify")
+                # LLM 返回了 dict（只是 action 枚举外）→ 不带 llm_failed：
+                # 这确实是"意图不清/参数坏"，该问，不是"模型不可用"（WS1 口径）。
+                self.assertNotIn("llm_failed", r)
 
     def test_route_llm_none_or_bad_json_clarifies(self):
         """route_llm 返回 (None, err)（坏 JSON/上游失败同形）→ clarify，绝不猜。"""
         r = self.route("u", err="模型返回无法解析的JSON")
         self.assertEqual(r["action"], "clarify")
         self.assertTrue(r["error"])
+        # LLM 失败分支的 clarify 带 llm_failed（WS1）：loop 层据此把"模型不可用"
+        # 与"意图不清"分开说——绝不装糊涂追问。
+        self.assertTrue(r.get("llm_failed"))
 
     def test_route_llm_non_dict_clarifies(self):
         """route_llm 返回非 dict（裸字符串）→ clarify。"""
@@ -193,10 +199,12 @@ class TestGuardChainClarifies(RouterTestBase):
 
         out = router_mod.route("u", self.registry, _llm, self.rules, self.prompts)
         self.assertEqual(out["action"], "clarify")
+        self.assertTrue(out.get("llm_failed"))   # 非 dict 同属 LLM 失败分支
 
     def test_route_llm_raises_clarifies(self):
         r = self.route("u", llm_raises=True)
         self.assertEqual(r["action"], "clarify")
+        self.assertTrue(r.get("llm_failed"))   # 抛异常同属 LLM 失败分支
 
     def test_tool_not_in_allowlist_clarifies(self):
         """工具不在 allowlist（check_allowed 层）→ clarify（§5.1：任何一步不过都追问）。"""

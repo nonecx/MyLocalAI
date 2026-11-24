@@ -348,7 +348,7 @@ python -m mylocalai.cli --attention-online "某段待分析的文本"
 | 空输入仍打大模型 | `judge()` 对空/纯空白输入直接短路返回本地结论，**一次 API 都不调**（改造前还会走一次报告生成） |
 | 配置写坏静默生效 | 阈值/封顶/抬分锚点/信源名单写坏时退回默认并留告警（`rules.load_warnings()`）；"整套替换漏段"与"增量文件读取失败"两类告警不会再被形状校验抹掉 |
 | 不同链路复用同一份 LLM 缓存互相串结果 | `llm_client.chat_text/chat_json` 支持 `namespace` 缓存分区名；深读用 `attn_deep_read`，与主分析算出不同缓存键（分区名为空时键与加参数前逐字节相同，不悄悄换掉全部缓存） |
-| 降级了但看不出来 | `/api/health` 增加 `llm{usable, provider, model, base_url, error}`；classic 的分析记录带 `degraded_components`（哪些组件不可用、报告是否走了本地模板回退） |
+| 降级了但看不出来 | `/api/health` 增加 `llm{usable, provider, model, base_url, error, error_kind}`（error_kind=privacy/key/unknown，口径与调用链同序：隐私授权是第一道闸，"未授权"不再被报成"未配置密钥"）；classic 的分析记录带 `degraded_components`（哪些组件不可用、报告是否走了本地模板回退） |
 | 英文/非 UTF-8 控制台打印中文崩溃 | 各命令行入口统一 `force_utf8_stdio()`（`errors="replace"`） |
 
 ## 测试
@@ -373,7 +373,7 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 2442 个用例（unittest discover 全量，2026-11-24 修「触发失败：HTTP 404」
+离线套件共 2502 个用例（unittest discover 全量，2026-11-24 修「触发失败：HTTP 404」
 （platform_router 挂载）+ 本地库迁移漂移自愈（账本 + schema 实态双重判定）后实测；
 此前 2026-11-24 收拢 model-settings
 worktree 未提交工作（模型管理规格 §8 收尾）后实测；此前 2026-11-24 合入
@@ -453,12 +453,23 @@ CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
  卡片字段与 digest 逐字、不建档不返 claim_answer）、**前端两张新卡**
  （`tests.test_research_ui` 12 例：渲染器/分发/导出、字段自洽、无分数无真假标签、
  safeUrl/escapeHtml、as_of、CSS 令牌）。
+  加上 2026-11-24「路由降级诚实化 + 会话标题治理」新增模块：**路由降级与
+  确定性兜底**（`tests.test_route_degradation` 33 例：LLM 不可用时热度疑问/
+  x/y/z 直算两类零 LLM 依赖意图的 salvage 正例与 carve-out 全族、仅 LLM 失败
+  触发、角色白名单同权、llm_failed 标记边界、四类失败原因→可行动说明的映射、
+  loop 级 salvage 出卡与诚实降级话术、route 永不抛），以及**会话标题派生与
+  改名端点**（`tests.test_session_store` 的 `TestDeriveSessionTitle` 9 例 +
+  `tests.test_website_chat` 的改名全路径 7 例：200/空串清空/代理项 400/不存在
+  与跨工作区 404、前端改名接线自洽）。
 另有 `tests/run_module_tests.py`（12 条内置用例全模块跑一遍并落盘）、
 `tests/smoke_api.py`（配置自检 + 连通性）。
 
 ## 已知局限
 
 - **单一提供方为默认**：默认只配 LongCat；备用链路需要自己填别家的密钥才生效。
+  （2026-11-24 提示：`.env` 的 `LLM_PROVIDER` 会**覆盖**「设置 → 模型」面板的当前选择，
+  两者不一致时设置面板顶部有错配警示卡、`/api/health` 的 `llm.error_kind` 会指出第一道
+  闸卡在哪；以面板为准就删掉 `.env` 里的 `LLM_PROVIDER` 并重启服务。）
 - **本地备选推理已归档**：`module_inference.py` 及两个本地模型的旧训练链路
   （modelscope 依赖缺失 / HF config 不兼容）已于 2026-10-30 移入 `archive/`，主链路只走 API。
 - **本地模型不认 seed**：LongCat 在 temperature=0 下仍有采样漂移，且忽略 `seed`，
@@ -534,6 +545,12 @@ CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
 - **结构化 action 通道**：`POST /api/chat` 支持可选 `action={"name","args"}`，供精确输入类入口
   （「算热度」的 x/y/z、「我的画像」的三种 kind）使用——只放行只读白名单工具，未注册/越界参数/
   写工具一律在 SSE 开始前 400 拒绝；合法时跳过路由模型直达工具，事件协议一个都不新增。
+- **会话标题与自助改名**（2026-11-24）：新会话标题取首条用户消息前 24 字（web 与 MCP 同源
+  派生，`session_store.derive_session_title`），标题里 `?` 占比达一半即判乱码返空串——显示
+  「（未命名会话）」而不是把乱码写进列表（2026-11-19 有四条历史会话这样坏过，标题已按当轮
+  实际内容修复，消息正文乱码属历史数据不可还原）。左栏会话行悬停/聚焦时出「改名」按钮：
+  `PUT /api/sessions/{id}/title`（空串=清空为未命名；含孤立代理项 400；非正整数/不存在/
+  跨档案工作区 404；截断 100 字；改名会刷新 updated_at 即列表换序）。
 - **我的画像（原参谋三块）**：话术模式库 / 信源画像 / 本周简报由 `insights` 只读工具
   （kind 封闭枚举、零 LLM、成本恒 0）在**消息流里出一张 insights 卡**呈现，数据只来自本机档案库。
 - **三档车道**：闲聊/追问（轻）；analyze_speech 言论土壤（快）；verify_claim/recheck 联网核查（慢查 30-120s，
@@ -541,6 +558,17 @@ CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
 - **路由四层防护链**：封闭枚举白名单 → 参数 schema 校验 → 工具 allowlist → 权限；任一步失败降级
   clarify（追问一次），绝不猜；用户消息里的"改分数/删档案/越权"指令一律 refuse，对话层注入由
   15 个变异用例锁定无效。
+- **路由不可用与确定性兜底**（2026-11-24）：路由模型整个不可用（提供方未授权/没密钥/
+  网络断，返回 None/坏 JSON/抛异常）时，与"意图不清"分开话术——先用一道与 pre_refuse/
+  mixed_choice 同族的确定性闸捞**零 LLM 依赖**的意图（热度疑问 → check_heat，话题词经
+  填充词/问句词/指示代词清理；`x=…, y=…, z=…` 三赋值齐全 → compute_heat 纯公式直算），
+  兜底产物与正常路由过同一套防护链（validate + 角色白名单 + 权限），且只在 LLM 失败时
+  触发（LLM 在场时路由是模型的职责，行为逐位不变）；carve-out：真假+热度同句（交给
+  mixed_choice 定先后）、档案引用（"档案#3的热度快照"是记忆类意图）、纯指代/空话题
+  （"这件事的热度"没有可检索的话题）。兜不住的降级 clarify 带 `llm_failed` 标记，loop
+  据此换**诚实降级话术**（`prompts.json` 的 `route_unavailable_reply`：如实报告"路由模型
+  这会不可用（原因）"+ 下一步修复路径，隐私授权/未配密钥/网络超时/其它四类映射），并置
+  `degraded=True`——不再把系统故障藏成"请澄清意图"。
 - **卡片三层信息架构**：标签+置信度 → 证据计数/as_of/degraded 徽章 → 证据本前 5 条；
   卡片永远在叙述之前；叙述失败时以卡片+固定模板收尾，永不丢结论。
   折叠细节：结论卡把证据本前 5 条收进 `<details>`，言论土壤卡把完整分析报告收进 `<details>`

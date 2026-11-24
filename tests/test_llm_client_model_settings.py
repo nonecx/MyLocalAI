@@ -566,5 +566,132 @@ class TestResetCacheAndPrivacyGate(LlmClientModelSettingsTestCase):
         self.assertEqual(seen["extra_params"], {"reasoning_effort": "low"})
 
 
+class TestConfigDiagnosis(LlmClientModelSettingsTestCase):
+    """`_config_diagnosis` / `config_error_kind`：诊断顺序与调用链同序（WS2）。
+
+    锁四件事：
+      1. 顺序：隐私授权是第一道闸（fail-closed，发生在建客户端之前）——未授权 +
+         没配密钥同时存在时报 privacy，而不是排在它后面的 key（这正是实测故障：
+         健康检查只说"未配置密钥"，用户配完密钥仍然全链路降级）；
+      2. 分类：授权放行后剩下的失败按文案归类（未配置/密钥/不匹配 → key；
+         未知提供方 → unknown，且**不会**被未授权误报成 privacy——调用链里
+         未知提供方先于隐私门被跳过，诊断必须同序）；都过 → ok、类别空串；
+      3. 不缓存：隐私偏好每次现取（与调用链同构），授权状态翻转后诊断立刻跟着翻；
+      4. loopback 豁免由 `allows_provider_url` 处理：deny-all 也不拦本地地址。
+    全部 mock `load_preferences`（真实 .env / 磁盘偏好都不碰）：三个路径环境变量
+    已被夹具重定向到临时目录，这里再显式 mock，保证"授权与否"只由本用例决定。
+    """
+
+    def _prefs(self, *pids: str):
+        """一份 PrivacyPreferences：总开关开着且只授权 pids（不传 = 谁都没授权）。"""
+        from mylocalai.core.privacy import DEFAULT_PREFERENCES, PrivacyPreferences
+        raw = copy.deepcopy(DEFAULT_PREFERENCES)
+        raw["external_processing_enabled"] = bool(pids)
+        raw["external_processing_providers"] = list(pids)
+        return PrivacyPreferences(raw)
+
+    def _diagnose(self, *allowed: str):
+        """在"只授权 allowed"的偏好下跑一遍诊断（mock load_preferences，不落盘）。"""
+        with mock.patch("mylocalai.core.privacy.load_preferences",
+                        return_value=self._prefs(*allowed)):
+            return llm_client._config_diagnosis()
+
+    def test_privacy_gate_comes_before_key_check(self):
+        """未授权 + 未配密钥同时存在：按调用链顺序报 privacy（不是 key）。"""
+        ok, detail, kind = self._diagnose()               # 谁都没授权；夹具也没配密钥
+        self.assertFalse(ok)
+        self.assertEqual("privacy", kind)
+        self.assertIn("PrivacyAuthorizationError", detail)
+        self.assertIn("longcat", detail, "说明里要点名是哪个提供方没授权")
+
+    def test_privacy_kind_reaches_public_entry_points(self):
+        """validate_config 形状不变（两元组）；config_error_kind 给出同一类别。"""
+        with mock.patch("mylocalai.core.privacy.load_preferences",
+                        return_value=self._prefs()):
+            result = llm_client.validate_config()
+            self.assertEqual(2, len(result), "validate_config 必须还是 (ok, detail) 两元组")
+            ok, detail = result
+            self.assertFalse(ok)
+            self.assertIn("PrivacyAuthorizationError", detail)
+            self.assertEqual("privacy", llm_client.config_error_kind())
+
+    def test_authorized_without_key_reports_key(self):
+        """授权放行后暴露出的下一个失败：没配密钥 → key。"""
+        ok, detail, kind = self._diagnose("longcat")
+        self.assertFalse(ok)
+        self.assertEqual("key", kind)
+        self.assertIn("未配置", detail)
+        self.assertIn("LONGCAT_API_KEY", detail)
+
+    def test_mismatched_key_is_key_kind(self):
+        """配了别家的密钥（错配）也算 key：用户要去配对密钥或改提供方。"""
+        os.environ["OPENAI_API_KEY"] = "sk-openai"
+        try:
+            llm_client.reset_cache()
+            ok, detail, kind = self._diagnose("longcat")
+        finally:
+            os.environ.pop("OPENAI_API_KEY", None)
+            llm_client.reset_cache()
+        self.assertFalse(ok)
+        self.assertEqual("key", kind)
+        self.assertIn("不匹配", detail)
+
+    def test_unknown_provider_is_unknown_kind_not_privacy(self):
+        """未知提供方在调用链里先于隐私门被跳过（spec is None → continue）：报 unknown。
+
+        若把隐私门排到它前面，未授权会把"提供方不存在"误报成"未授权"——那是另一种
+        诊断与实况不符，所以这里锁住"未知提供方优先报 unknown"。
+        """
+        os.environ["LLM_PROVIDER"] = "ghost"
+        try:
+            llm_client.reset_cache()
+            ok, detail, kind = self._diagnose()           # 谁都没授权
+        finally:
+            os.environ.pop("LLM_PROVIDER", None)
+            llm_client.reset_cache()
+        self.assertFalse(ok)
+        self.assertEqual("unknown", kind)
+        self.assertIn("未知提供方", detail)
+
+    def test_all_clear_returns_ok_with_empty_kind(self):
+        """授权 + 密钥都过：ok、detail 是现有成功文案、类别空串。"""
+        os.environ["LONGCAT_API_KEY"] = "sk-longcat"
+        try:
+            llm_client.reset_cache()
+            with mock.patch("mylocalai.core.privacy.load_preferences",
+                            return_value=self._prefs("longcat")):
+                ok, detail, kind = llm_client._config_diagnosis()
+                self.assertTrue(ok, detail)
+                self.assertEqual("", kind)
+                self.assertIn("提供方 longcat", detail)
+                self.assertEqual("", llm_client.config_error_kind(),
+                                 "可用时类别必须是空串（前端据此不显示警示）")
+        finally:
+            os.environ.pop("LONGCAT_API_KEY", None)
+            llm_client.reset_cache()
+
+    def test_privacy_gate_is_not_cached(self):
+        """隐私门每次现取偏好：授权状态翻转后诊断必须立刻跟着翻（调用链同构）。"""
+        ok, _detail, kind = self._diagnose()               # 先：未授权
+        self.assertEqual("privacy", kind)
+        ok, detail, kind = self._diagnose("longcat")       # 再：授权放行
+        self.assertFalse(ok, "授权放行后剩下的失败是没配密钥（夹具没配密钥）")
+        self.assertEqual("key", kind)
+        self.assertIn("未配置", detail)
+
+    def test_loopback_base_url_exempt_from_privacy_gate(self):
+        """loopback 地址本就免授权（allows_provider_url）：deny-all 也不报 privacy。"""
+        os.environ["LONGCAT_BASE_URL"] = "http://127.0.0.1:11434/v1"
+        try:
+            llm_client.reset_cache()
+            ok, detail, kind = self._diagnose()            # 谁都没授权
+        finally:
+            os.environ.pop("LONGCAT_BASE_URL", None)
+            llm_client.reset_cache()
+        self.assertFalse(ok)
+        self.assertEqual("key", kind, "过了隐私门，剩下的失败是没配密钥")
+        self.assertIn("未配置", detail)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

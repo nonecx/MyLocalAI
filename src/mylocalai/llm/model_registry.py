@@ -1082,15 +1082,32 @@ def provider_view(pid: str) -> Optional[Dict[str, Any]]:
     }
 
 
+def _env_provider_name() -> str:
+    """LLM_PROVIDER 环境变量的归一化值（strip + lower）；未设置/空白时返回空串。
+
+    与 `runtime_resolution()` 里判"是不是 env 覆盖"的算法同一口径（抽成 helper
+    就是为了两处永远一致）：`_runtime_snapshot()` 要靠它回答"当前生效提供方
+    是不是 .env 压过面板选择"，两边各写一份迟早会对不上。
+    """
+    return (os.environ.get("LLM_PROVIDER") or "").strip().lower()
+
+
 def _runtime_snapshot() -> Dict[str, Any]:
     """runtime_resolution 的安全子集（不含 api_key / params），可直接进 HTTP 响应。"""
     resolved = runtime_resolution()
+    env_provider = _env_provider_name()
     return {
         "provider": resolved["provider"],
         "model": resolved["model"],
         "base_url": resolved["base_url"],
         "key_source": resolved["key_source"],
         "protocol": resolved["protocol"],
+        # env 覆盖显性化（加法，不破坏既有键）：source=env 表示当前生效提供方来自
+        # LLM_PROVIDER 环境变量（压过设置面板的选择），env_provider 给归一化后的值；
+        # source=registry 表示来自 models.json 的当前选择（env_provider 为空串）。
+        # 设置面板据此把"面板选了 A、实际生效是 B"的错配直接讲出来（WS2）。
+        "source": "env" if env_provider else "registry",
+        "env_provider": env_provider,
     }
 
 
@@ -1382,7 +1399,7 @@ def runtime_resolution() -> Dict[str, Any]:
     """
     state, _warns = _ensure_models()
     providers = state["providers"]
-    env_provider = (os.environ.get("LLM_PROVIDER") or "").strip().lower()
+    env_provider = _env_provider_name()
     provider = env_provider or state["active"]["provider"]
     if provider not in providers:
         provider = _default_provider_id(providers) if not env_provider else provider

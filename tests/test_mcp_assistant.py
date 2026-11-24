@@ -34,6 +34,7 @@ from mylocalai.assistant.session_store import SessionStore  # noqa: E402
 from mylocalai.dossier.service import DossierService  # noqa: E402
 from mylocalai.dossier.store import DossierStore  # noqa: E402
 from mylocalai.assistant import mcp_server as mcp_mod  # noqa: E402
+from tests.test_assistant_loop import isolate_llm  # noqa: E402
 
 try:
     import mcp  # noqa: F401
@@ -101,7 +102,13 @@ def stub_narrate(text="证据支持以下判断。证据截至今天，仍缺官
 class MCPAssistantTestBase(unittest.TestCase):
     """公共夹具：临时同库（sessions+dossiers）、注入 stub 的 MCP 服务器、调用帮手。"""
 
+    #: LLM 隔离（2026-11-24 .env 根因修复后补）：本模块多组用例走 verify_claim
+    #: 全链（claim 编排真调主张提取）；提供方可达时走"无主张短出口"，标签与
+    #: 卡片断言随开发机配置时红时绿。共用工具见
+    #: tests.test_assistant_loop.isolate_llm。
+
     def setUp(self):
+        isolate_llm(self)
         self.tmp = TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         db = Path(self.tmp.name) / "app.db"
@@ -251,12 +258,21 @@ class TestGuardPaths(MCPAssistantTestBase):
         self.assertEqual(len(self.sessions.list_sessions()), before)   # 会话不新建
 
     def test_unroutable_message_takes_clarify_path(self):
-        """路由模型失败（None/坏 JSON）→ loop 的 clarify 降级路径，绝不猜。"""
+        """路由模型失败（None/坏 JSON）→ loop 的诚实降级路径：action=clarify、
+        新话术（WS1：模型不可用与"意图不清"分开说）、degraded=True，绝不猜。"""
+        from mylocalai.assistant.loop import (_ROUTE_UNAVAILABLE_FALLBACK,
+                                              _route_failure_guidance)
         self.services.update({"route_llm": RouteStub("verify_claim", fail=True),
                               "verify": stub_verify(), "narrate_llm": stub_narrate()})
         data = self.call_tool("assistant_chat", {"message": "那个东西帮我看看"})
         self.assertEqual(data["action"], "clarify")
-        self.assertEqual(data["reply"], self.prompts["clarify_reply"])
+        reason, fix = _route_failure_guidance("模型返回无法解析的JSON")
+        expected = (str(self.prompts["route_unavailable_reply"]).strip()
+                    or _ROUTE_UNAVAILABLE_FALLBACK)
+        expected = expected.replace("{reason}", reason).replace("{fix}", fix)
+        self.assertEqual(data["reply"], expected)
+        self.assertNotEqual(data["reply"], self.prompts["clarify_reply"])
+        self.assertIs(data["degraded"], True)
         self.assertIsNone(data["card"])
         self.assertIsNone(data["dossier_id"])
         self.assertNotIn("tool_start", data["events"])
