@@ -21,6 +21,10 @@
 内置提供方（longcat / deepseek / openai）来自同目录的 `providers.json`（运行期唯一事实来源，
 与 llm_client 共用），投影成本模块的注册表结构并标 `builtin=True`：可改可选，但不能删。
 
+提供方级 `retry` 策略（default / off / aggressive）是**可选字段**（规格 §8.1）：老文件没有
+这个键、或根本没有 models.json 时都按 default 处理，行为与加这个字段之前一致；
+`retry_max_retries()` 是 policy → 重试次数的**唯一**映射，供 llm_client 使用。
+
 进程内缓存：读入口带缓存，写入函数成功后自行刷新；**外部直接改文件后请调用
 `reset_cache()`**，否则读到的是旧快照。缓存按"路径"区分，测试换环境变量指向临时目录时
 无需先清缓存也不会串数据。
@@ -48,10 +52,13 @@ __all__ = [
     "INPUT_TYPES",
     "REASONING_TIERS",
     "DEFAULT_REASONING_PARAM",
+    "RETRY_POLICIES",
+    "RETRY_POLICY_LABELS",
     "LIMITS",
     "ModelRegistryError",
     "registry_path",
     "secrets_path",
+    "registry_paths",
     "reset_cache",
     "warnings",
     "view",
@@ -61,6 +68,7 @@ __all__ = [
     "delete_provider",
     "upsert_model",
     "delete_model",
+    "reorder_models",
     "restore_default_models",
     "set_secret",
     "key_status",
@@ -68,7 +76,9 @@ __all__ = [
     "active",
     "provider_secret",
     "runtime_resolution",
+    "retry_max_retries",
     "available_models",
+    "available_models_adhoc",
 ]
 
 # ---------------------------------------------------------------------------
@@ -81,6 +91,23 @@ RUNTIME_PROTOCOLS = ("openai",)
 INPUT_TYPES = ("text", "image")
 REASONING_TIERS = ("off", "low", "medium", "high")
 DEFAULT_REASONING_PARAM = "reasoning_effort"
+
+# 提供方级重试策略（规格 §8.1）：只影响"发几次"，不进入金样本缓存键。
+RETRY_POLICIES = ("default", "off", "aggressive")
+RETRY_POLICY_LABELS = {
+    "default": "默认（仅临时错误）",
+    "off": "不重试",
+    "aggressive": "更积极（最多 3 次）",
+}
+
+# policy → 客户端 max_retries 的**唯一**映射（None = 沿用 llm_client.get_max_retries()）。
+# 为什么集中在一处：llm_client 建客户端时要按它算重试次数，设置面板要按它显示档位文案，
+# 两处各写一份 switch 迟早会不一致（"面板写着不重试，实际还在重试两次"最难查）。
+_RETRY_POLICY_MAX_RETRIES: Dict[str, Optional[int]] = {
+    "default": None,   # 沿用 LLM_MAX_RETRIES（默认 1 → 最多 2 次尝试）
+    "off": 0,          # 一次都不重试
+    "aggressive": 3,   # 最多 3 次重试（共 4 次尝试）
+}
 
 # 上限：写在校验里，也通过 view()["limits"] 交给前端做即时提示，避免"填完才报错"
 MAX_PROVIDERS = 50
@@ -152,12 +179,14 @@ DEFAULT_PROVIDER = "longcat"
 
 # 写入白名单：多一个字段就多一个说不清的语义面，所以不是白名单里的必须点名拒绝
 _PROVIDER_PAYLOAD_KEYS = frozenset(
-    {"id", "display_name", "base_url", "protocol", "key_env", "enabled", "models", "api_key"})
+    {"id", "display_name", "base_url", "protocol", "key_env", "enabled", "models", "api_key",
+     "retry"})
 _MODEL_PAYLOAD_KEYS = frozenset(
     {"id", "display_name", "context_window", "max_output_tokens", "input_types", "enabled",
      "reasoning"})
 _REASONING_KEYS = frozenset({"enabled", "param", "active_tier", "tiers"})
 _REASONING_TIER_KEYS = frozenset({"tier", "api_value"})
+_RETRY_KEYS = frozenset({"policy"})
 # 这些是 GET 派生出来的只读字段；前端/调用方把整个 view 回传时必须点名拒绝，
 # 否则"保存一次就把只读字段写进文件"这种事故很难查。
 _PROVIDER_VIEW_ONLY_KEYS = frozenset(
@@ -187,6 +216,15 @@ def registry_path() -> Path:
 def secrets_path() -> Path:
     """密钥文件路径（`MYLOCALAI_MODEL_SECRETS_PATH` 可整套重定向，测试用）。"""
     return _env_path(_ENV_SECRETS_PATH) or (_REPO_ROOT / "data" / "model_secrets.json")
+
+
+def registry_paths() -> Dict[str, str]:
+    """两份配置文件的绝对路径（`view()["paths"]` 与「打开配置文件」按钮的数据源）。
+
+    纯字符串：**不读也不写**，文件不存在也照常返回路径——"文件在不在"由调用方自己
+    （`Path.exists()`）判断，设置面板要据此显示"保存一次后才会生成"。
+    """
+    return {"models": str(registry_path()), "secrets": str(secrets_path())}
 
 
 _LOCK = threading.RLock()
@@ -239,6 +277,11 @@ def _builtin_table() -> Dict[str, Dict[str, Any]]:
         return table
 
 
+def _default_retry() -> Dict[str, Any]:
+    """重试策略的缺省结构：default = 沿用 `get_max_retries()`（老文件/无文件行为不变）。"""
+    return {"policy": "default"}
+
+
 def _default_reasoning() -> Dict[str, Any]:
     """未启用推理档位时的默认结构：只留一个 off 档（api_value=None 表示不额外发参数）。"""
     return {
@@ -276,6 +319,7 @@ def _builtin_provider_entry(pid: str, spec: Dict[str, Any]) -> Dict[str, Any]:
         "key_env": str(spec.get("key_env") or ""),
         "enabled": True,
         "models": [_default_model_entry(str(spec.get("model") or ""))],
+        "retry": _default_retry(),
     }
 
 
@@ -288,6 +332,7 @@ def _empty_provider_entry(pid: str) -> Dict[str, Any]:
         "key_env": "",
         "enabled": True,
         "models": [],
+        "retry": _default_retry(),
     }
 
 
@@ -500,6 +545,46 @@ def _normalize_reasoning(value: Any, where: str = "") -> Dict[str, Any]:
     return {"enabled": enabled, "param": param, "active_tier": active_tier, "tiers": tiers}
 
 
+def _normalize_retry(value: Any, where: str = "") -> Dict[str, Any]:
+    """重试策略（提供方级）：{"policy": "default" | "off" | "aggressive"}。
+
+    `None`（字段不存在 / 老文件）→ default，所以"老文件没有 retry 键"与"根本没有
+    models.json"两种情况的重试行为都与加这个字段之前逐字节一致（规格 §8.0 / §8.1）。
+    未知 policy、多余键一律点名拒绝——悄悄按 default 处理会让用户以为改生效了。
+    """
+    prefix = _field(where, "retry")
+    if value is None:
+        return _default_retry()
+    if not isinstance(value, dict):
+        raise ModelRegistryError(
+            f"{prefix} 必须是对象（形如 {{\"policy\": \"default\"}}），实际是 "
+            f"{type(value).__name__}（收到 {value!r}）。")
+    unknown = sorted(set(value) - _RETRY_KEYS)
+    if unknown:
+        raise ModelRegistryError(
+            f"不接受的字段 {prefix}.{unknown[0]}：{prefix} 只允许 "
+            f"{'、'.join(sorted(_RETRY_KEYS))}。请检查字段名拼写。")
+    policy = value.get("policy")
+    if policy is None:
+        return _default_retry()
+    if not isinstance(policy, str) or policy.strip() not in RETRY_POLICIES:
+        raise ModelRegistryError(
+            f"{prefix}.policy 非法：{policy!r}。只能是 {'、'.join(RETRY_POLICIES)} 之一"
+            f"（default = 沿用 LLM_MAX_RETRIES，off = 不重试，aggressive = 最多 3 次）。")
+    return {"policy": policy.strip()}
+
+
+def retry_max_retries(policy: Any) -> Optional[int]:
+    """重试策略 → 该提供方的 max_retries；`None` 表示"沿用 llm_client.get_max_retries()"。
+
+    这是 policy → 次数的**唯一**映射（`_RETRY_POLICY_MAX_RETRIES` 是它唯一的数据源），
+    llm_client 建客户端时必须调它，不要在别处再写一遍 switch。
+    未知/缺省一律按 default 返回 None：配置文件里出现一个没见过的策略名不该让调用链炸。
+    """
+    name = policy.strip() if isinstance(policy, str) else ""
+    return _RETRY_POLICY_MAX_RETRIES.get(name, _RETRY_POLICY_MAX_RETRIES["default"])
+
+
 def _normalize_model(value: Any, where: str) -> Dict[str, Any]:
     """单个模型对象：id / 显示名 / 上下文窗口 / 最大输出 / 输入类型 / 启用 / 推理档位。"""
     if not isinstance(value, dict):
@@ -603,6 +688,7 @@ def _normalize_provider(pid: str, value: Any, where: str = "provider") -> Dict[s
         "key_env": _validate_key_env(value.get("key_env"), _field(where, "key_env")),
         "enabled": _coerce_bool(value.get("enabled"), _field(where, "enabled"), True),
         "models": _normalize_models(value.get("models")),
+        "retry": _normalize_retry(value.get("retry"), where),
     }
 
 
@@ -990,6 +1076,9 @@ def provider_view(pid: str) -> Optional[Dict[str, Any]]:
         "models": [_model_view(model, pid, active_info["model"] if active_info["provider"] == pid else None)
                    for model in entry["models"]],
         "default_models": default_model_views(pid),
+        # 提供方级重试策略（规格 §8.2）；entry 里一定有（_normalize_provider 补齐），
+        # 这里再兜一层是防手工构造的旧内存快照漏字段
+        "retry": copy.deepcopy(entry.get("retry") or _default_retry()),
     }
 
 
@@ -1022,7 +1111,10 @@ def view() -> Dict[str, Any]:
         "input_types": [{"id": name, "label": _INPUT_TYPE_LABELS.get(name, name)}
                         for name in INPUT_TYPES],
         "reasoning_tiers": [{"id": tier, "label": tier} for tier in REASONING_TIERS],
+        "retry_policies": [{"id": policy, "label": RETRY_POLICY_LABELS.get(policy, policy)}
+                           for policy in RETRY_POLICIES],
         "limits": dict(LIMITS),
+        "paths": registry_paths(),
         "providers": [view for view in (provider_view(pid) for pid in order) if view],
         "warnings": warnings(),
     }
@@ -1149,6 +1241,66 @@ def delete_model(pid: str, model_id: str) -> bool:
         _reconcile_active(state)
         _save_state(state)
     return True
+
+
+def reorder_models(pid: str, order: List[str]) -> Dict[str, Any]:
+    """按 order 重排该提供方的模型目录，返回更新后的 provider view（规格 §8.2）。
+
+    order 必须与现有 id 集合**完全相等**（不多不少、不重）：目录顺序有语义——
+    `_resolve_active_model` 取"目录里第一个启用的模型"当默认模型，所以"少传一个"
+    等于偷偷删模型、"多传一个"等于偷偷建模型，这两种都不该由排序接口代劳。
+    不等时点名差在哪（缺哪些 / 多哪些 / 哪个重复），让前端能直接把话显示给用户。
+    """
+    pid = _validate_provider_id(pid)
+    if not isinstance(order, list):
+        raise ModelRegistryError(
+            f"order 必须是数组（模型 ID 列表，例如 [\"gpt-4o\", \"gpt-4o-mini\"]），实际是 "
+            f"{type(order).__name__}（收到 {order!r}）。")
+    cleaned: List[str] = []
+    for index, item in enumerate(order):
+        if not isinstance(item, str):
+            raise ModelRegistryError(
+                f"order[{index}] 必须是字符串（模型 ID），实际是 {type(item).__name__}（收到 {item!r}）。")
+        name = item.strip()
+        if not name:
+            raise ModelRegistryError(f"order[{index}] 不能为空：请填该提供方下已有的模型 ID。")
+        cleaned.append(name)
+    with _LOCK:
+        state, _warns = _ensure_models()
+        entry = state["providers"].get(pid)
+        if entry is None:
+            raise ModelRegistryError(f"未知提供方 {pid!r}：请先创建提供方，再调整模型顺序。")
+        models = entry["models"]
+        existing = [model["id"] for model in models]
+        seen: List[str] = []
+        duplicates: List[str] = []
+        for name in cleaned:
+            if name in seen and name not in duplicates:
+                duplicates.append(name)
+            seen.append(name)
+        if duplicates:
+            raise ModelRegistryError(
+                f"order 里重复的模型 ID：{'、'.join(repr(name) for name in duplicates)}。"
+                f"每个模型只能出现一次（现有目录：{'、'.join(existing) or '空'}）。")
+        known = set(existing)
+        missing = [name for name in existing if name not in set(cleaned)]
+        extra = [name for name in cleaned if name not in known]
+        if missing or extra:
+            details: List[str] = []
+            if missing:
+                details.append(f"缺少 {len(missing)} 个（{'、'.join(missing)}）")
+            if extra:
+                details.append(f"多出 {len(extra)} 个目录里没有的（{'、'.join(extra)}）")
+            raise ModelRegistryError(
+                f"order 与提供方 {pid!r} 的模型目录不一致：{'；'.join(details)}。"
+                f"排序必须把现有目录里的模型 ID 原样全部列出（现有目录："
+                f"{'、'.join(existing) or '空'}）。")
+        by_id = {model["id"]: model for model in models}
+        entry["models"] = [by_id[name] for name in cleaned]
+        _reconcile_active(state)
+        _save_state(state)
+    view_result = provider_view(pid)
+    return view_result if view_result is not None else {}
 
 
 def restore_default_models(pid: str) -> List[Dict[str, Any]]:
@@ -1308,34 +1460,17 @@ def _models_endpoint(base_url: str) -> str:
     return str(base_url or "").rstrip("/") + "/models"
 
 
-def available_models(pid: str, timeout_s: float = 15.0) -> Dict[str, Any]:
-    """真发 `GET {base_url}/models`，返回 §3.3 的发现结果（**不写盘**，由用户勾选后再落盘）。
+def _fetch_model_catalog(base_url: str, api_key: str,
+                         timeout_s: float = _DEFAULT_DISCOVER_TIMEOUT) -> Dict[str, Any]:
+    """真发一次 `GET {base_url}/models` 并解析：{"models": [...], "count": int, "error": str}。
 
-    顺序很重要：先解析提供方 → **先过隐私外发授权**（未授权抛 PrivacyAuthorizationError，
-    一个字节都不外发）→ 再看有没有密钥 → 最后才发请求。
+    这是**唯一**的"发请求 + 解析 + 错误映射"实现：已保存提供方的 `available_models()` 与
+    未保存提供方的 `available_models_adhoc()` 共用它，避免两条路径的错误文案慢慢走样。
+    本函数故意**不做**授权与密钥判断——那两件事取决于调用方拿哪个提供方名去问隐私偏好
+    （已保存的用注册表里的 pid，未保存的用表单里的草稿名），放进来反而会把两套口径搅在一起。
     网络/上游失败一律 error 非空 + models 为空，不抛；上游诚实返回空目录时 error 为空、count=0。
     """
-    result: Dict[str, Any] = {"provider": pid if isinstance(pid, str) else str(pid),
-                              "base_url": "", "models": [], "count": 0, "error": ""}
-    state, _warns = _ensure_models()
-    entry = state["providers"].get(pid) if isinstance(pid, str) else None
-    if entry is None:
-        result["error"] = f"未知提供方 {pid!r}：请先在设置面板里创建提供方。"
-        return result
-    base_url = str(entry.get("base_url") or "")
-    result["base_url"] = base_url
-
-    # fail-closed：授权检查放在**任何**网络动作之前，且异常不吞（由 web 层转 403）
-    from mylocalai.core.privacy import load_preferences
-    load_preferences().require_provider(pid, base_url)
-
-    api_key, _source = _resolve_secret(pid)
-    if not api_key and not _host_is_loopback(base_url):
-        # 没有密钥还硬发一次请求只会拿到 401，还多一次外发；本地服务（ollama 之类）通常不要密钥
-        result["error"] = (f"提供方 {pid!r} 还没有配置 API 密钥：请先在设置面板里填写密钥"
-                           f"（或设置环境变量 {_key_env_name(pid, entry, _builtin_spec(pid))}）。")
-        return result
-
+    result: Dict[str, Any] = {"models": [], "count": 0, "error": ""}
     url = _models_endpoint(base_url)
     headers = {"Accept": "application/json", "User-Agent": "MyLocalAI-model-registry"}
     if api_key:
@@ -1380,4 +1515,84 @@ def available_models(pid: str, timeout_s: float = 15.0) -> Dict[str, Any]:
     # 诚实报空：上游就是没给模型时返回空目录，不拿内置目录假装"获取到了"
     result["models"] = models
     result["count"] = len(models)
+    return result
+
+
+def available_models(pid: str, timeout_s: float = 15.0) -> Dict[str, Any]:
+    """真发 `GET {base_url}/models`，返回 §3.3 的发现结果（**不写盘**，由用户勾选后再落盘）。
+
+    顺序很重要：先解析提供方 → **先过隐私外发授权**（未授权抛 PrivacyAuthorizationError，
+    一个字节都不外发）→ 再看有没有密钥 → 最后才发请求。
+    网络/上游失败一律 error 非空 + models 为空，不抛；上游诚实返回空目录时 error 为空、count=0。
+    """
+    result: Dict[str, Any] = {"provider": pid if isinstance(pid, str) else str(pid),
+                              "base_url": "", "models": [], "count": 0, "error": ""}
+    state, _warns = _ensure_models()
+    entry = state["providers"].get(pid) if isinstance(pid, str) else None
+    if entry is None:
+        result["error"] = f"未知提供方 {pid!r}：请先在设置面板里创建提供方。"
+        return result
+    base_url = str(entry.get("base_url") or "")
+    result["base_url"] = base_url
+
+    # fail-closed：授权检查放在**任何**网络动作之前，且异常不吞（由 web 层转 403）
+    from mylocalai.core.privacy import load_preferences
+    load_preferences().require_provider(pid, base_url)
+
+    api_key, _source = _resolve_secret(pid)
+    if not api_key and not _host_is_loopback(base_url):
+        # 没有密钥还硬发一次请求只会拿到 401，还多一次外发；本地服务（ollama 之类）通常不要密钥
+        result["error"] = (f"提供方 {pid!r} 还没有配置 API 密钥：请先在设置面板里填写密钥"
+                           f"（或设置环境变量 {_key_env_name(pid, entry, _builtin_spec(pid))}）。")
+        return result
+
+    fetched = _fetch_model_catalog(base_url, api_key, timeout_s)
+    result["models"] = fetched["models"]
+    result["count"] = fetched["count"]
+    result["error"] = fetched["error"]
+    return result
+
+
+def available_models_adhoc(provider: str, base_url: str, api_key: str = "",
+                           timeout_s: float = 15.0) -> Dict[str, Any]:
+    """未保存提供方的「获取可用模型」：用表单里填的地址/密钥真发一次 GET，**不写盘**（§8.2）。
+
+    为什么需要它：设置面板的"新建提供方"弹层里，用户还没点保存就想先取一次模型目录；
+    走已保存那条路会先撞上"未知提供方"，于是"先建再取"卡死在第一步。
+
+    顺序（与 available_models 同一套纪律，但授权键来自调用方）：
+        1. 校验 base_url（口径同 `_validate_base_url`：http/https + 必须有 host）——
+           非法地址连"要不要外发"都谈不上，直接抛 ModelRegistryError 点名；
+        2. `require_provider(provider, base_url)`：用**表单里的提供方名**当键，未授权 →
+           PrivacyAuthorizationError，一个字节都不外发；
+        3. 没有密钥且目标不是 loopback → error 返回（不外发：没有密钥硬发只会拿到 401）；
+        4. 发请求 + 解析 + 错误映射（与 available_models 共用 `_fetch_model_catalog`）。
+    api_key 留空是允许的（本地服务如 ollama 本就不需要密钥）。
+    """
+    name = provider if isinstance(provider, str) else str(provider)
+    result: Dict[str, Any] = {"provider": name, "base_url": "", "models": [], "count": 0, "error": ""}
+    validated = _validate_base_url(base_url, "base_url")
+    result["base_url"] = validated
+
+    # fail-closed：授权检查放在**任何**网络动作之前；键是调用方给的提供方名（草稿态还没有注册表条目）
+    from mylocalai.core.privacy import load_preferences
+    load_preferences().require_provider(name, validated)
+
+    if api_key is None:
+        key = ""
+    elif isinstance(api_key, str):
+        key = api_key.strip()
+    else:
+        raise ModelRegistryError(
+            f"api_key 必须是字符串（留空表示不需要密钥），实际是 {type(api_key).__name__}"
+            f"（收到 {api_key!r}）。")
+    if not key and not _host_is_loopback(validated):
+        result["error"] = (f"提供方 {name!r} 还没有填写 API 密钥：请先在表单里填写密钥再点"
+                           f"「获取可用模型」（本地服务如 ollama 可以留空）。")
+        return result
+
+    fetched = _fetch_model_catalog(validated, key, timeout_s)
+    result["models"] = fetched["models"]
+    result["count"] = fetched["count"]
+    result["error"] = fetched["error"]
     return result

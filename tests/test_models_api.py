@@ -11,6 +11,10 @@
      `mylocalai.llm.model_registry.available_models`；未授权那条路**不 patch 它**，
      而是让真的注册表逻辑去撞隐私授权，同时把 `urllib.request.urlopen` mock 成
      "调用即失败"，从而断言"403 且一个字节都没外发"（fail-closed 的直接证据）；
+     增补 §8.3 的 `/api/models/discover`（未保存提供方）沿用同一套手法；
+   - `/api/models/config/open` 绝不在测试里真的弹文件管理器：monkeypatch 掉
+     `models_api.os.startfile`（Windows 分支）与 `models_api.subprocess.run`（其他平台分支），
+     并断言传给它们的**只有**服务端用 `registry_paths()` 解析出来的路径；
    - 不起真 uvicorn：TestClient(app) 即可（import 方式同 tests/test_website_chat.py）。
 
 运行（项目根目录下）：
@@ -22,8 +26,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 import unittest
+import urllib.error
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -37,6 +43,7 @@ from mylocalai.core.privacy import (  # noqa: E402
     save_preferences,
 )
 from mylocalai.llm import model_registry as registry  # noqa: E402
+from mylocalai.web import models_api  # noqa: E402
 
 # 真实 .env 里的提供方相关变量：逐个摘掉，保证"来源 = env/stored/none"的断言只由本用例决定
 _ENV_KEYS = (
@@ -525,6 +532,334 @@ class DiscoverApiTest(ModelsApiTestBase):
             self.assertIn("timeout_s", resp.json()["detail"])
 
 
+class DiscoverAdhocApiTest(ModelsApiTestBase):
+    """POST /api/models/discover（增补 §8.3）：未保存提供方也能取一次模型目录，且不写盘。"""
+
+    def test_discover_adhoc_success_shape_and_no_write(self):
+        """成功：200 原样返回注册表结果；api_key 只进调用参数，响应里绝不出现明文。"""
+        payload = {"provider": "draft-gw", "base_url": "https://api.example.com/v1",
+                   "models": [{"id": "m-1", "owned_by": "acme"}], "count": 1, "error": ""}
+        with mock.patch.object(registry, "available_models_adhoc",
+                                return_value=payload) as patched:
+            resp = self.client.post("/api/models/discover", json={
+                "provider": "draft-gw",
+                "base_url": "https://api.example.com/v1",
+                "api_key": _SECRET,
+                "timeout_s": 5,
+            })
+        self.assertEqual(200, resp.status_code, resp.text)
+        self.assertEqual(payload, resp.json())
+        self.assertEqual(("draft-gw", "https://api.example.com/v1", _SECRET),
+                         patched.call_args.args)
+        self.assertEqual({"timeout_s": 5.0}, patched.call_args.kwargs)
+        self.assertNotIn(_SECRET, resp.text, "响应里出现了明文密钥")
+        # 「获取」与「保存」分开：这条路径不该写 models.json / model_secrets.json
+        self.assertFalse(self.models_path.exists(), "discover 不该写 models.json")
+        self.assertFalse(self.secrets_path.exists(), "discover 不该写密钥文件")
+
+    def test_discover_adhoc_provider_defaults_to_draft(self):
+        """provider 缺省/空串都按 \"draft\" 处理（只用于隐私授权键与响应回显）。"""
+        payload = {"provider": "draft", "base_url": "https://api.example.com/v1",
+                   "models": [], "count": 0, "error": ""}
+        for body in ({"base_url": "https://api.example.com/v1"},
+                     {"provider": "", "base_url": "https://api.example.com/v1"},
+                     {"provider": "   ", "base_url": "https://api.example.com/v1"}):
+            with mock.patch.object(registry, "available_models_adhoc",
+                                    return_value=payload) as patched:
+                resp = self.client.post("/api/models/discover", json=body)
+            self.assertEqual(200, resp.status_code, f"body={body!r} → {resp.text}")
+            self.assertEqual("draft", patched.call_args.args[0])
+
+    def test_discover_adhoc_requires_base_url(self):
+        """base_url 缺失/不是字符串 → 400 点名（不是 422，也不是静默用默认地址）。"""
+        for body in ({"provider": "draft-gw"},
+                     {"base_url": None},
+                     {"base_url": 123},
+                     {"base_url": ["https://api.example.com/v1"]}):
+            resp = self.client.post("/api/models/discover", json=body)
+            self.assertEqual(400, resp.status_code, f"body={body!r} 应被拒绝")
+            self.assertIn("base_url", resp.json()["detail"])
+
+    def test_discover_adhoc_bad_base_url_400_before_anything_sent(self):
+        """base_url 形状非法 → 注册表抛 ModelRegistryError → 400，且一个字节都没外发。"""
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=AssertionError("非法地址不该外发")) as urlopen:
+            resp = self.client.post("/api/models/discover",
+                                    json={"base_url": "ftp://api.example.com/v1"})
+        self.assertEqual(400, resp.status_code, resp.text)
+        self.assertIn("base_url", resp.json()["detail"])
+        urlopen.assert_not_called()
+
+    def test_discover_adhoc_unauthorized_403_and_nothing_sent(self):
+        """未授权 → 403，detail 给出「隐私与授权」的操作指引，且 urlopen 一次没被调用。
+
+        这里**不** patch available_models_adhoc：让真的注册表逻辑先撞隐私授权。
+        """
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=AssertionError("未授权不该外发")) as urlopen:
+            resp = self.client.post("/api/models/discover", json={
+                "provider": "draft-gw",
+                "base_url": "https://api.example.com/v1",
+                "api_key": _SECRET,
+            })
+        self.assertEqual(403, resp.status_code, resp.text)
+        urlopen.assert_not_called()
+        detail = resp.json()["detail"]
+        self.assertIn("隐私与授权", detail)
+        self.assertIn("勾选", detail)
+        self.assertIn("draft-gw", detail)
+        self.assertNotIn(_SECRET, resp.text, "403 文案里不该出现明文密钥")
+
+    def test_discover_adhoc_authorized_but_unreachable_502(self):
+        """已授权但上游不通 → 502（error 非空），detail 是后端原文。"""
+        self.authorize("draft-gw")
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=urllib.error.URLError("boom")) as urlopen:
+            resp = self.client.post("/api/models/discover", json={
+                "provider": "draft-gw",
+                "base_url": "https://api.example.com/v1",
+                "api_key": _SECRET,
+            })
+        self.assertEqual(502, resp.status_code, resp.text)
+        self.assertEqual(1, urlopen.call_count, "已授权应真的发一次请求")
+        self.assertIn("网络请求失败", resp.json()["detail"])
+
+    def test_discover_adhoc_loopback_without_key_passes_authorization(self):
+        """loopback 地址本就免授权：不配密钥也照常发请求（不是 403），失败如实报 502。"""
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=urllib.error.URLError("connection refused")) as urlopen:
+            resp = self.client.post("/api/models/discover",
+                                    json={"base_url": "http://127.0.0.1:11434/v1"})
+        self.assertEqual(502, resp.status_code, resp.text)
+        detail = resp.json()["detail"]
+        self.assertNotIn("未获授权", detail, "localhost/127.0.0.1 不该要求外发授权")
+        self.assertIn("网络请求失败", detail)
+        self.assertEqual(1, urlopen.call_count, "loopback 无密钥时应真的发一次请求")
+
+    def test_discover_adhoc_upstream_error_passthrough_502(self):
+        """注册表返回 error（上游 4xx/5xx 等）→ 502，detail 用后端原文。"""
+        failed = {"provider": "draft-gw", "base_url": "https://api.example.com/v1",
+                  "models": [], "count": 0,
+                  "error": "上游返回 HTTP 401：https://api.example.com/v1/models。"}
+        with mock.patch.object(registry, "available_models_adhoc", return_value=failed):
+            resp = self.client.post("/api/models/discover",
+                                    json={"base_url": "https://api.example.com/v1"})
+        self.assertEqual(502, resp.status_code)
+        self.assertEqual(failed["error"], resp.json()["detail"])
+
+    def test_discover_adhoc_api_key_type_rejected_without_echo(self):
+        """api_key 不是字符串 → 400 且**不回显收到的值**（那个值可能就是密钥）。"""
+        resp = self.client.post("/api/models/discover", json={
+            "base_url": "https://api.example.com/v1",
+            "api_key": 1234567890,
+        })
+        self.assertEqual(400, resp.status_code, resp.text)
+        self.assertIn("api_key", resp.json()["detail"])
+        self.assertNotIn("1234567890", resp.text, "错误信息里不该回显 api_key 的原始值")
+
+    def test_discover_adhoc_timeout_must_be_number(self):
+        """timeout_s 复用既有校验：不是数字 → 400 点名。"""
+        for bad in ("abc", True, [1], {"a": 1}):
+            resp = self.client.post("/api/models/discover", json={
+                "base_url": "https://api.example.com/v1",
+                "timeout_s": bad,
+            })
+            self.assertEqual(400, resp.status_code, f"timeout_s={bad!r} 应被拒绝")
+            self.assertIn("timeout_s", resp.json()["detail"])
+
+    def test_discover_adhoc_bad_provider_type_400(self):
+        """provider 不是字符串 → 400 点名（缺省才走 draft，类型错不静默兜底）。"""
+        resp = self.client.post("/api/models/discover",
+                                json={"provider": 7, "base_url": "https://api.example.com/v1"})
+        self.assertEqual(400, resp.status_code)
+        self.assertIn("provider", resp.json()["detail"])
+
+
+class ReorderModelsApiTest(ModelsApiTestBase):
+    """POST /api/models/providers/{pid}/models/reorder（增补 §8.3）：目录顺序有语义。"""
+
+    def _provider_with_models(self, pid: str = "acme", *model_ids: str) -> None:
+        self.create_provider(pid)
+        for model_id in model_ids:
+            resp = self.client.post(f"/api/models/providers/{pid}/models",
+                                    json=_model(model_id))
+            self.assertEqual(200, resp.status_code, resp.text)
+
+    def test_reorder_success_returns_provider_view_in_new_order(self):
+        """order 与目录一一对应 → 200，返回的 provider view 顺序即新顺序，且已落盘。"""
+        self._provider_with_models("acme", "m-1", "m-2", "m-3")
+        resp = self.client.post("/api/models/providers/acme/models/reorder",
+                                json={"order": ["m-3", "m-1", "m-2"]})
+        self.assertEqual(200, resp.status_code, resp.text)
+        view = resp.json()
+        self.assertEqual("acme", view["id"])
+        self.assertEqual(["m-3", "m-1", "m-2"], [item["id"] for item in view["models"]])
+        # 刷新过缓存：重新 GET 也是新顺序（不是只改了返回值）
+        acme = self.provider_of(self.client.get("/api/models").json(), "acme")
+        self.assertEqual(["m-3", "m-1", "m-2"], [item["id"] for item in acme["models"]])
+
+    def test_reorder_unknown_provider_404(self):
+        resp = self.client.post("/api/models/providers/ghost/models/reorder",
+                                json={"order": []})
+        self.assertEqual(404, resp.status_code)
+        self.assertIsInstance(resp.json()["detail"], str)
+
+    def test_reorder_mismatch_400_with_registry_detail(self):
+        """order 与目录不一致（少/多/重复）→ 400，detail 转述注册表原文。"""
+        self._provider_with_models("acme", "m-1", "m-2")
+        missing = self.client.post("/api/models/providers/acme/models/reorder",
+                                   json={"order": ["m-1"]})
+        self.assertEqual(400, missing.status_code)
+        detail = missing.json()["detail"]
+        self.assertIn("不一致", detail)
+        self.assertIn("缺少", detail)
+        self.assertIn("m-2", detail)
+
+        extra = self.client.post("/api/models/providers/acme/models/reorder",
+                                 json={"order": ["m-1", "m-2", "m-9"]})
+        self.assertEqual(400, extra.status_code)
+        self.assertIn("m-9", extra.json()["detail"])
+
+        repeated = self.client.post("/api/models/providers/acme/models/reorder",
+                                    json={"order": ["m-1", "m-1"]})
+        self.assertEqual(400, repeated.status_code)
+        self.assertIn("重复", repeated.json()["detail"])
+
+        # 失败的排序不能改坏原目录
+        acme = self.provider_of(self.client.get("/api/models").json(), "acme")
+        self.assertEqual(["m-1", "m-2"], [item["id"] for item in acme["models"]])
+
+    def test_reorder_order_shape_400(self):
+        """order 缺失/非数组/非字符串元素 → 400 且点名 order。"""
+        self._provider_with_models("acme", "m-1")
+        for body in ({}, {"order": "m-1"}, {"order": [1]}, {"order": {"m-1": 0}}):
+            resp = self.client.post("/api/models/providers/acme/models/reorder", json=body)
+            self.assertEqual(400, resp.status_code, f"body={body!r} 应被拒绝")
+            self.assertIn("order", resp.json()["detail"])
+
+
+class ConfigPathApiTest(ModelsApiTestBase):
+    """GET /api/models/config-path（增补 §8.3）：只回路径与是否存在，不读文件内容。"""
+
+    def test_config_path_matches_env_and_existence_flags(self):
+        resp = self.client.get("/api/models/config-path")
+        self.assertEqual(200, resp.status_code, resp.text)
+        body = resp.json()
+        self.assertEqual({"models", "secrets", "models_exists", "secrets_exists"}, set(body))
+        self.assertEqual(str(self.models_path), body["models"])
+        self.assertEqual(str(self.secrets_path), body["secrets"])
+        self.assertFalse(body["models_exists"], "还没保存过时不该报存在")
+        self.assertFalse(body["secrets_exists"])
+
+    def test_config_path_flips_after_first_save(self):
+        """保存一次提供方/密钥后两个 exists 各自变 True（与 GET /api/models 的 paths 一致）。"""
+        self.create_provider("acme", api_key=_SECRET)
+        body = self.client.get("/api/models/config-path").json()
+        self.assertTrue(body["models_exists"])
+        self.assertTrue(body["secrets_exists"])
+        full = self.client.get("/api/models").json()
+        self.assertEqual({"models": body["models"], "secrets": body["secrets"]},
+                         full["paths"], "config-path 与全量视图的 paths 必须同一口径")
+
+    def test_config_path_does_not_read_file_content(self):
+        """坏 JSON 也只是 exists=True：这条路由不读内容，不能被坏配置拖成 500。"""
+        self.models_path.write_text(_BAD_JSON, encoding="utf-8")
+        resp = self.client.get("/api/models/config-path")
+        self.assertEqual(200, resp.status_code, resp.text)
+        self.assertTrue(resp.json()["models_exists"])
+
+
+class ConfigOpenApiTest(ModelsApiTestBase):
+    """POST /api/models/config/open（增补 §8.3）：只接受枚举，路径由服务端解析。"""
+
+    def _patch_startfile(self):
+        """把"真的打开文件"打掉，换成只记录调用参数的替身（Windows 分支）。"""
+        patcher = mock.patch.object(models_api.os, "startfile", create=True)
+        startfile = patcher.start()
+        self.addCleanup(patcher.stop)
+        return startfile
+
+    def test_config_open_rejects_unknown_target(self):
+        """target 不在枚举里（含缺失/非字符串）→ 400 点名，且不需要任何文件存在。"""
+        for body in ({}, {"target": "passwd"}, {"target": 123},
+                     {"target": ["models"]}, {"target": None}):
+            resp = self.client.post("/api/models/config/open", json=body)
+            self.assertEqual(400, resp.status_code, f"body={body!r} 应被拒绝")
+            self.assertIn("target", resp.json()["detail"])
+
+    def test_config_open_missing_file_404(self):
+        """目标文件不存在 → 404，并说明"保存一次配置后才会生成"。"""
+        self._patch_startfile()          # 就算真去调也不该被调到
+        resp = self.client.post("/api/models/config/open", json={"target": "models"})
+        self.assertEqual(404, resp.status_code, resp.text)
+        detail = resp.json()["detail"]
+        self.assertIn("不存在", detail)
+        self.assertIn("保存一次配置后才会生成", detail)
+
+    def test_config_open_models_uses_server_resolved_path_only(self):
+        """打开 models.json：只把服务端解析的路径交给系统，客户端传的 path 被彻底忽略。"""
+        self.create_provider("acme")
+        startfile = self._patch_startfile()
+        resp = self.client.post("/api/models/config/open", json={
+            "target": "models",
+            "path": "C:\\Windows\\System32\\calc.exe",     # 恶意/误传的路径，必须不起作用
+        })
+        self.assertEqual(200, resp.status_code, resp.text)
+        self.assertEqual({"opened": True, "target": "models",
+                          "path": str(self.models_path)}, resp.json())
+        startfile.assert_called_once_with(str(self.models_path))
+        self.assertNotIn("calc.exe", json.dumps(resp.json(), ensure_ascii=False))
+
+    def test_config_open_secrets_uses_secrets_path(self):
+        """打开密钥文件：同样是服务端解析出来的 secrets 路径。"""
+        self.client.put("/api/models/providers/deepseek/secret",
+                        json={"api_key": _SECRET})
+        self.assertTrue(self.secrets_path.exists())
+        startfile = self._patch_startfile()
+        resp = self.client.post("/api/models/config/open", json={"target": "secrets"})
+        self.assertEqual(200, resp.status_code, resp.text)
+        self.assertEqual(str(self.secrets_path), resp.json()["path"])
+        startfile.assert_called_once_with(str(self.secrets_path))
+        self.assertNotIn(_SECRET, resp.text, "打开配置文件不该回显密钥")
+
+    def test_config_open_system_failure_500_with_reason(self):
+        """系统无法打开 → 500，中文 detail 带路径与失败原因。"""
+        self.create_provider("acme")
+        with mock.patch.object(models_api.os, "startfile", create=True,
+                               side_effect=OSError("没有关联的程序")) as startfile:
+            resp = self.client.post("/api/models/config/open", json={"target": "models"})
+        self.assertEqual(500, resp.status_code, resp.text)
+        startfile.assert_called_once_with(str(self.models_path))
+        detail = resp.json()["detail"]
+        self.assertIn(str(self.models_path), detail)
+        self.assertIn("没有关联的程序", detail)
+
+    def test_config_open_posix_falls_back_to_xdg_open_then_open(self):
+        """非 Windows：先 xdg-open，缺命令时退到 open；都失败 → 500。"""
+        self.create_provider("acme")
+        ok = subprocess.CompletedProcess(args=[], returncode=0)
+        with mock.patch.object(models_api, "_IS_WINDOWS", False), \
+                mock.patch.object(models_api.subprocess, "run", return_value=ok) as run:
+            resp = self.client.post("/api/models/config/open", json={"target": "models"})
+        self.assertEqual(200, resp.status_code, resp.text)
+        self.assertEqual(["xdg-open", str(self.models_path)], run.call_args.args[0])
+
+        with mock.patch.object(models_api, "_IS_WINDOWS", False), \
+                mock.patch.object(models_api.subprocess, "run",
+                                  side_effect=[FileNotFoundError("没有 xdg-open"), ok]) as run:
+            resp = self.client.post("/api/models/config/open", json={"target": "models"})
+        self.assertEqual(200, resp.status_code, resp.text)
+        self.assertEqual("open", run.call_args.args[0][0])
+
+        with mock.patch.object(models_api, "_IS_WINDOWS", False), \
+                mock.patch.object(models_api.subprocess, "run",
+                                  side_effect=[FileNotFoundError("没有 xdg-open"),
+                                               FileNotFoundError("没有 open")]):
+            resp = self.client.post("/api/models/config/open", json={"target": "models"})
+        self.assertEqual(500, resp.status_code, resp.text)
+        self.assertIn("xdg-open", resp.json()["detail"])
+
+
 class PayloadValidationApiTest(ModelsApiTestBase):
     """结构/取值非法 → 400，detail 是中文原文且点名字段。"""
 
@@ -564,7 +899,7 @@ class PayloadValidationApiTest(ModelsApiTestBase):
 
 
 class RouteRegistrationTest(ModelsApiTestBase):
-    """路由表自洽：规格 §3.2 的九个端点真的注册进了 app（含方法）。"""
+    """路由表自洽：规格 §3.2 + 增补 §8.3 的端点真的注册进了 app（含方法）。"""
 
     def test_model_routes_registered_in_app(self):
         registered = _app_route_table(self.webapp.app)
@@ -579,6 +914,11 @@ class RouteRegistrationTest(ModelsApiTestBase):
             ("POST", "/api/models/providers/{}/models"),
             ("DELETE", "/api/models/providers/{}/models/{}"),
             ("POST", "/api/models/providers/{}/models/restore"),
+            # 增补 §8.3：未保存提供方取模型 / 目录排序 / 配置文件定位与打开
+            ("POST", "/api/models/discover"),
+            ("POST", "/api/models/providers/{}/models/reorder"),
+            ("GET", "/api/models/config-path"),
+            ("POST", "/api/models/config/open"),
         }
         self.assertEqual(set(), expected - registered,
                          f"有端点没注册进 app：{sorted(expected - registered)}")

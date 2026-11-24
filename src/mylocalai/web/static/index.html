@@ -112,8 +112,13 @@
           <h2 id="settingsTitle">设置</h2>
           <p>模型与提供方配置写在 <code>data/models.json</code>，密钥单独存本机文件，接口不回明文。</p>
         </div>
-        <button id="settingsCloseBtn" class="btn-ghost settings-close-btn" type="button"
-          aria-label="关闭设置">关闭</button>
+        <div class="settings-head-actions">
+          <!-- 打开配置文件：路径由 settings.js 从 GET /api/models/config-path 取（不在前端拼路径） -->
+          <button id="settingsOpenConfigBtn" class="btn-ghost settings-config-btn" type="button"
+            aria-label="在系统中打开模型配置文件">打开配置文件</button>
+          <button id="settingsCloseBtn" class="btn-ghost settings-close-btn" type="button"
+            aria-label="关闭设置">关闭</button>
+        </div>
       </div>
       <div class="settings-body">
         <nav id="settingsNav" class="settings-nav" aria-label="设置分组">

@@ -1,14 +1,18 @@
 /* ============================================================
-   settings.js —— 设置弹层（本期只有「模型」面板 + 隐私说明页）
+   settings.js —— 设置弹层（「模型」面板 + 「隐私与授权」面板）
    与 shell.js / chat.js 同风格：普通 <script>、无框架、无构建步骤。
    职责：
      - 对外只暴露 window.SettingsPanel = { open, close, isOpen }，
        开合按钮 / 遮罩 / Esc 的接线在 shell.js（照 aboutDialog 的写法），
        本文件只负责弹层里"看到什么、改什么、怎么落盘"；
      - 提供方：列表 + 表单（Provider ID / 显示名称 / API 地址 / API 协议 /
-       API 密钥 / 启用）+ 保存 / 设为当前 / 删除；
+       API 密钥 / 重试策略 / 启用）+ 保存 / 设为当前 / 删除；
      - 模型目录：卡片式（上下文窗口 / 最大输出 token / 输入类型 /
-       推理等级档位）+ 添加模型 / 保存模型目录 / 获取可用模型 / 恢复默认模型；
+       推理等级档位 + 排序）+ 添加模型 / 保存模型目录 / 获取可用模型 / 恢复默认模型；
+       规格 §8.4：**新建提供方那一屏也要有模型目录**——表单 + 模型目录 + 发现结果
+       一起渲染，模型草稿先留在 state.models，保存提供方时才逐条落盘；
+     - 隐私与授权：读/写 /api/privacy/preferences 的「外部处理授权」两小块，
+       让「获取可用模型」的 403 能在本页面里自己解决（§8.4 第 8 条）；
      - 所有 HTTP 路径集中在 SETTINGS_API，与 web/models_api.py 逐条对应，
        tests/test_models_ui.py 会把它和后端路由表做自洽比对；
      - 写操作成功后一律重新 GET /api/models 全量刷新（以磁盘现状为准，
@@ -32,6 +36,10 @@
     providerModels: "/api/models/providers/{pid}/models",
     providerModel: "/api/models/providers/{pid}/models/{model_id}",
     providerModelsRestore: "/api/models/providers/{pid}/models/restore",
+    providerModelsReorder: "/api/models/providers/{pid}/models/reorder",
+    discover: "/api/models/discover",
+    configPath: "/api/models/config-path",
+    configOpen: "/api/models/config/open",
     privacyPreferences: "/api/privacy/preferences",
   };
 
@@ -153,6 +161,17 @@
     return wrap;
   }
 
+  /* 同上，但控件不是单个 <label> 能包住的东西（复选框组 / 输入框 + 按钮）：
+     这里用 <div> 装多件控件，避免嵌套 <label> 时点击文字误触第一个复选框。 */
+  function fieldBlock(labelText, controls, hint) {
+    const wrap = el("div", "settings-field");
+    wrap.appendChild(el("span", "settings-field-label", labelText));
+    const list = Array.isArray(controls) ? controls : [controls];
+    list.forEach((control) => { if (control) wrap.appendChild(control); });
+    if (hint) wrap.appendChild(el("span", "settings-field-hint", hint));
+    return wrap;
+  }
+
   function readonlyValue(value) {
     return el("span", "settings-readonly", value === null || value === undefined || value === "" ? "未知" : value);
   }
@@ -179,10 +198,38 @@
     selectedPid: null, // 选中的提供方 id
     creating: false,   // true = 正在填「新建提供方」表单（此时 selectedPid 为 null）
     models: [],        // 当前提供方的模型草稿（含新增未保存的卡）
-    discover: null,    // 最近一次 /discover 结果 { pid, baseUrl, count, error, models[] }
+    discover: null,    // 最近一次 discover 结果 { mode, pid, baseUrl, count, models[] }
     busy: false,       // 有请求在跑：挡住重复点击
     lastFocus: null,   // 打开弹层前的焦点，关闭时还回去
+    /* 新建提供方表单的当前输入（草稿态需要它来拼 draftProvider()：
+       渲染是"先拼 DOM 再挂进文档"，此刻 #settingsProviderId 还不在 document 里，
+       直接读 DOM 只会读到空串；同时它也保证重新渲染（例如取完模型）不会清空用户输入） */
+    form: null,
+    /* 上次从磁盘载入的模型目录签名：用来判断"有没有未保存的改动"（切换/删除/恢复默认前确认） */
+    baseSignature: "",
+    /* 最近一次 GET 到的模型顺序：保存目录时若顺序变了就调 reorder（§8.4 第 7 条） */
+    origOrder: [],
+    /* 隐私与授权面板：GET /api/privacy/preferences 的结果 + 两块可编辑草稿 */
+    privacy: null,
+    privacyLoading: false,
+    privacyError: "",
+    privacyEnabled: false,
+    privacyProviders: [],
   };
+
+  function blankProviderForm() {
+    return {
+      id: "",
+      displayName: "",
+      baseUrl: "",
+      protocol: "openai",
+      retryPolicy: "default",
+      apiKey: "",
+      enabled: true,
+    };
+  }
+
+  state.form = blankProviderForm();
 
   function dialogEl() {
     return $("#settingsDialog");
@@ -216,7 +263,13 @@
         ? rawDetail
         : (rawDetail ? JSON.stringify(rawDetail) : "");
       const lead = STATUS_LEAD[resp.status] || "请求失败";
-      throw new Error(lead + "（HTTP " + resp.status + "）" + (detail ? "：" + detail : "：后端未给出原因"));
+      /* status / detail 挂在 Error 上：调用方要按状态码分流（403 给授权指引、
+         502 保留上一次成功结果），但展示给用户的仍是同一句"哪一步失败了 + 后端原文" */
+      const failure = new Error(lead + "（HTTP " + resp.status + "）" + (detail ? "：" + detail : "：后端未给出原因"));
+      failure.status = resp.status;
+      failure.detail = detail;
+      failure.payload = payload;
+      throw failure;
     }
     return payload;
   }
@@ -349,7 +402,9 @@
       displayName: String(src.display_name || src.id || ""),
       contextWindowRaw: formatTokenCount(src.context_window),
       maxOutputRaw: formatTokenCount(src.max_output_tokens),
-      inputTypes: inputTypes.length ? inputTypes : ["text"],
+      /* 不在渲染期偷偷补 ["text"]：全不勾时保存会直接报错（后端要求至少一种），
+         这里补默认值等于把"目录里本来没有输入类型"悄悄改成"只有文本" */
+      inputTypes: inputTypes,
       enabled: src.enabled !== false,
       reasoning: {
         enabled: !!reasoning.enabled,
@@ -383,6 +438,84 @@
     const provider = currentProvider();
     const models = provider && Array.isArray(provider.models) ? provider.models : [];
     state.models = models.map((model) => cloneModel(model));
+    /* 记下磁盘现状的两份快照：顺序用于「保存目录时是否要 reorder」，
+       签名用于「有没有未保存改动」（切换/删除/恢复默认前确认） */
+    state.origOrder = state.models.map((draft) => String(draft.id));
+    state.baseSignature = catalogSignature();
+  }
+
+  /* ============================================================
+     七之二、草稿态：新建提供方那一屏需要的 provider 视图
+     ============================================================ */
+
+  /* 表单当前输入 → 一个"像 provider view"的草稿对象（不落盘）。
+     模型目录、发现结果区、导入按钮都只读这个对象的 id / base_url 等字段，
+     因此新建态与已保存态能复用同一套渲染函数（§8.4 第 1、2 条）。 */
+  function draftProvider() {
+    const form = state.form || blankProviderForm();
+    const id = String(form.id || "").trim();
+    const name = String(form.displayName || "").trim();
+    return {
+      draft: true,
+      id: id || "draft",
+      display_name: name || id || "未命名的提供方草稿",
+      base_url: String(form.baseUrl || "").trim(),
+      protocol: String(form.protocol || ""),
+      key_env: "",
+      enabled: !!form.enabled,
+      retry: { policy: String(form.retryPolicy || "default") },
+      api_key_set: false,
+      api_key_source: "",
+      api_key_masked: "",
+      builtin: false,
+      is_active: false,
+      models: [],
+      default_models: [],
+    };
+  }
+
+  /* 模型草稿的可比较签名：只含"用户能改的东西"，用来判断有没有未保存改动 */
+  function catalogSignature() {
+    return JSON.stringify(state.models.map((draft) => ({
+      isNew: !!draft.isNew,
+      origId: String(draft.origId || ""),
+      id: String(draft.id || ""),
+      displayName: String(draft.displayName || ""),
+      contextWindowRaw: String(draft.contextWindowRaw || ""),
+      maxOutputRaw: String(draft.maxOutputRaw || ""),
+      inputTypes: (draft.inputTypes || []).slice(),
+      enabled: !!draft.enabled,
+      reasoning: {
+        enabled: !!(draft.reasoning && draft.reasoning.enabled),
+        param: String((draft.reasoning && draft.reasoning.param) || ""),
+        activeTier: String((draft.reasoning && draft.reasoning.activeTier) || ""),
+        tiers: ((draft.reasoning && draft.reasoning.tiers) || []).map((row) => ({
+          tier: String(row.tier || ""),
+          api_value: row.api_value === null || row.api_value === undefined ? null : String(row.api_value),
+        })),
+      },
+    })));
+  }
+
+  function isCatalogDirty() {
+    return catalogSignature() !== state.baseSignature;
+  }
+
+  /* 有没有"还没保存就切走会丢"的东西：模型草稿改动 + 新建态表单里已填的内容 */
+  function hasUnsavedDraft() {
+    if (isCatalogDirty()) return true;
+    if (!state.creating) return false;
+    const form = state.form || blankProviderForm();
+    return !!(String(form.id || "").trim() || String(form.displayName || "").trim()
+      || String(form.baseUrl || "").trim() || String(form.apiKey || ""));
+  }
+
+  /* 丢弃前确认：确认框返回 false 就中止当前动作（不落盘、不切换） */
+  function confirmDiscardDraft(actionText) {
+    if (!hasUnsavedDraft()) return true;
+    return global.confirm(
+      "当前有未保存的改动，" + actionText + "会丢弃它们（未保存的模型参数与新增卡片无法恢复）。\n"
+      + "确定继续吗？");
   }
 
   /* ============================================================
@@ -436,16 +569,8 @@
     const col = el("div", "settings-provider-col");
     const head = el("div", "settings-col-head");
     head.appendChild(el("h3", null, "提供方"));
-    head.appendChild(button("＋ 新建提供方", "btn-ghost settings-mini-btn", () => {
-      state.creating = true;
-      state.selectedPid = null;
-      state.models = [];
-      state.discover = null;
-      showStatus("");
-      renderPane();
-      const idInput = $("#settingsProviderId");
-      if (idInput) idInput.focus();
-    }, "新建提供方"));
+    head.appendChild(button("＋ 新建提供方", "btn-ghost settings-mini-btn", () => startCreating(),
+      "新建提供方"));
     col.appendChild(head);
 
     const list = el("ul", "settings-provider-list");
@@ -478,6 +603,8 @@
 
   function selectProvider(pid) {
     if (!state.creating && String(state.selectedPid) === String(pid)) return;
+    /* 切走之前先确认：未保存的模型参数 / 新增卡片 / 新建表单内容都会丢 */
+    if (!confirmDiscardDraft("切换到提供方「" + pid + "」")) return;
     state.creating = false;
     state.selectedPid = String(pid);
     state.discover = null;
@@ -486,11 +613,36 @@
     renderPane();
   }
 
+  /* 进入「新建提供方」：清空表单与模型草稿（有未保存改动时先确认） */
+  function startCreating() {
+    if (!confirmDiscardDraft("新建提供方")) return;
+    state.creating = true;
+    state.selectedPid = null;
+    state.models = [];
+    state.discover = null;
+    state.form = blankProviderForm();
+    const protocols = protocolOptions();
+    if (protocols.length) state.form.protocol = String(protocols[0].value);
+    const policies = retryPolicyOptions();
+    if (policies.length) state.form.retryPolicy = String(policies[0].value);
+    showStatus("");
+    renderPane();
+    const idInput = $("#settingsProviderId");
+    if (idInput) idInput.focus();
+  }
+
   /* ---------- 右栏：提供方表单 + 模型目录 + 发现结果 ---------- */
   function buildDetailColumn() {
     const col = el("div", "settings-detail-col");
     if (state.creating) {
+      /* 新建态也要有完整的模型参数面板（§8.4 第 1 条）：先渲染表单，再从
+         state.form 拼出 draftProvider——渲染顺序很关键，模型目录要读表单当前输入 */
       col.appendChild(buildProviderForm(null));
+      const draft = draftProvider();
+      col.appendChild(buildModelCatalog(draft));
+      if (state.discover && state.discover.mode === "draft") {
+        col.appendChild(buildDiscoverSection(draft));
+      }
       return col;
     }
     const provider = currentProvider();
@@ -500,7 +652,8 @@
     }
     col.appendChild(buildProviderForm(provider));
     col.appendChild(buildModelCatalog(provider));
-    if (state.discover && String(state.discover.pid) === String(provider.id)) {
+    if (state.discover && state.discover.mode === "saved"
+      && String(state.discover.pid) === String(provider.id)) {
       col.appendChild(buildDiscoverSection(provider));
     }
     return col;
@@ -511,6 +664,15 @@
     return protocols.map((proto) => ({
       value: proto.id,
       label: String(proto.label || proto.id) + (proto.runtime_supported ? "" : "（本站运行期不支持）"),
+    }));
+  }
+
+  /* 重试策略选项来自后端 view().retry_policies（§8.2），前端不硬编码枚举 */
+  function retryPolicyOptions() {
+    const policies = state.data && Array.isArray(state.data.retry_policies) ? state.data.retry_policies : [];
+    return policies.map((item) => ({
+      value: String(item.id),
+      label: String(item.label || item.id),
     }));
   }
 
@@ -526,6 +688,8 @@
 
   function buildProviderForm(provider) {
     const isNew = !provider;
+    /* 新建态的值来自 state.form（不是 DOM）：重新渲染（例如取完可用模型）不能清空用户输入 */
+    const form = state.form || blankProviderForm();
     const section = el("section", "settings-section");
     const head = el("div", "settings-section-head");
     head.appendChild(el("h3", null, isNew ? "新建提供方" : "提供方设置"));
@@ -535,25 +699,39 @@
     const grid = el("div", "settings-form-grid");
 
     const idInput = textInput({
-      value: isNew ? "" : provider.id,
+      value: isNew ? form.id : provider.id,
       placeholder: "例如 deepseek",
       maxlength: 32,
       readonly: !isNew,
     });
     idInput.id = "settingsProviderId";
+    if (isNew) idInput.addEventListener("input", () => { state.form.id = idInput.value; });
     grid.appendChild(field("Provider ID", idInput,
       isNew ? "小写字母开头，可用小写字母、数字、_ 与 -，最多 32 位" : "已存在的 Provider ID 不可修改"));
 
-    const nameInput = textInput({ value: isNew ? "" : (provider.display_name || ""), placeholder: "例如 DeepSeek" });
+    const nameInput = textInput({
+      value: isNew ? form.displayName : (provider.display_name || ""),
+      placeholder: "例如 DeepSeek",
+    });
     nameInput.id = "settingsProviderName";
+    if (isNew) nameInput.addEventListener("input", () => { state.form.displayName = nameInput.value; });
     grid.appendChild(field("显示名称", nameInput));
 
-    const urlInput = textInput({ value: isNew ? "" : (provider.base_url || ""), placeholder: "https://api.example.com/v1", maxlength: 512 });
+    const urlInput = textInput({
+      value: isNew ? form.baseUrl : (provider.base_url || ""),
+      placeholder: "https://api.example.com/v1",
+      maxlength: 512,
+    });
     urlInput.id = "settingsProviderBaseUrl";
+    if (isNew) urlInput.addEventListener("input", () => { state.form.baseUrl = urlInput.value; });
     grid.appendChild(field("API 地址", urlInput, "必须以 http:// 或 https:// 开头"));
 
-    const protocolSelect = selectInput(protocolOptions(), isNew ? "openai" : provider.protocol, false);
+    const protocolSelect = selectInput(protocolOptions(),
+      isNew ? form.protocol : provider.protocol, false);
     protocolSelect.id = "settingsProviderProtocol";
+    if (isNew) {
+      protocolSelect.addEventListener("change", () => { state.form.protocol = protocolSelect.value; });
+    }
     if (!protocolSelect.options.length) {
       const unknown = el("option", null, "未知（后端未返回可选协议）");
       unknown.value = "";
@@ -563,11 +741,12 @@
 
     const keyInput = textInput({
       type: "password",
-      value: "",
+      value: isNew ? form.apiKey : "",
       placeholder: isNew ? "输入 API 密钥" : "留空表示不改",
       autocomplete: "new-password",
     });
     keyInput.id = "settingsProviderKey";
+    if (isNew) keyInput.addEventListener("input", () => { state.form.apiKey = keyInput.value; });
     let keyHint;
     if (isNew) {
       keyHint = "可留空；密钥只写入本机 data/model_secrets.json，任何接口都不回明文";
@@ -578,12 +757,25 @@
     }
     grid.appendChild(field("API 密钥", keyInput, keyHint));
 
+    /* 重试策略（§8.4 第 4 条）：选项来自后端 view().retry_policies，随提供方一起提交 */
+    const retryPolicy = isNew
+      ? String(form.retryPolicy || "default")
+      : String((provider.retry && provider.retry.policy) || "default");
+    const retrySelect = selectInput(retryPolicyOptions(), retryPolicy, false);
+    retrySelect.id = "settingsProviderRetry";
+    if (isNew) {
+      retrySelect.addEventListener("change", () => { state.form.retryPolicy = retrySelect.value; });
+    }
+    grid.appendChild(field("重试策略", retrySelect,
+      "只影响上游临时错误（超时 / 5xx）时的重试次数；默认 = 沿用 LLM_MAX_RETRIES"));
+
     if (!isNew && provider.key_env) {
       grid.appendChild(field("密钥环境变量", readonlyValue(provider.key_env), "环境变量优先于本页保存的密钥"));
     }
 
-    const enabledInput = checkboxInput(isNew ? true : provider.enabled !== false);
+    const enabledInput = checkboxInput(isNew ? !!form.enabled : provider.enabled !== false);
     enabledInput.id = "settingsProviderEnabled";
+    if (isNew) enabledInput.addEventListener("change", () => { state.form.enabled = enabledInput.checked; });
     grid.appendChild(field("启用", enabledInput, "关闭后该提供方不参与分析调用"));
     section.appendChild(grid);
 
@@ -615,6 +807,7 @@
 
   /* ---------- 模型目录 ---------- */
   function catalogStateText(provider) {
+    if (provider && provider.draft) return "未保存草稿（点「保存提供方」后落盘）";
     const defaults = Array.isArray(provider.default_models) ? provider.default_models : [];
     const current = Array.isArray(provider.models) ? provider.models : [];
     const defaultIds = defaults.map((item) => String(item.id));
@@ -626,6 +819,7 @@
   }
 
   function buildModelCatalog(provider) {
+    const isDraft = !!(provider && provider.draft);
     const section = el("section", "settings-section");
     const head = el("div", "settings-section-head");
     head.appendChild(el("h3", null, "模型目录"));
@@ -636,7 +830,10 @@
     const restoreBtn = button("恢复默认模型", "btn-ghost settings-mini-btn",
       () => restoreDefaultModels(provider), "恢复默认模型");
     const defaults = Array.isArray(provider.default_models) ? provider.default_models : [];
-    if (!defaults.length) {
+    if (isDraft) {
+      restoreBtn.disabled = true;
+      restoreBtn.title = "新建态还没有内置默认目录：先保存提供方，再回来恢复默认";
+    } else if (!defaults.length) {
       restoreBtn.disabled = true;
       restoreBtn.title = "该提供方没有内置默认模型目录（恢复默认只对内置提供方有效）";
     }
@@ -650,10 +847,14 @@
     function refreshList() {
       list.textContent = "";
       if (!state.models.length) {
-        list.appendChild(el("p", "settings-empty", "该提供方还没有模型：点「获取可用模型」或「＋ 添加模型」。"));
+        list.appendChild(el("p", "settings-empty",
+          isDraft
+            ? "还没有模型：点「获取可用模型」从上游取一次，或点「＋ 添加模型」手动加一张卡。"
+            : "该提供方还没有模型：点「获取可用模型」或「＋ 添加模型」。"));
         return;
       }
-      state.models.forEach((draft) => list.appendChild(buildModelCard(provider, draft, refreshList)));
+      state.models.forEach((draft, index) => list.appendChild(
+        buildModelCard(provider, draft, index, state.models.length, refreshList)));
     }
     refreshList();
 
@@ -666,17 +867,29 @@
       const focusInput = lastCard ? lastCard.querySelector(".settings-input") : null;
       if (focusInput) focusInput.focus();
     }, "添加模型"));
-    foot.appendChild(button("保存模型目录", "btn-primary settings-btn-sm",
-      () => saveCatalog(provider), "保存模型目录"));
+    if (isDraft) {
+      /* 新建态没有"单独保存目录"这回事：模型草稿随「保存提供方」一起落盘 */
+      foot.appendChild(el("span", "settings-field-hint",
+        "新建态：模型目录会随「保存提供方」一起写盘；保存前可以先在卡片里改参数。"));
+    } else {
+      foot.appendChild(button("保存模型目录", "btn-primary settings-btn-sm",
+        () => saveCatalog(provider), "保存模型目录"));
+    }
     section.appendChild(foot);
     return section;
   }
 
-  function buildModelCard(provider, draft, onListChange) {
+  function buildModelCard(provider, draft, index, total, onListChange) {
     const card = el("div", "settings-model-card");
 
-    /* 第一行：模型 ID / 显示名称 / 启用 / 删除 */
+    /* 第一行：排序把手 / 模型 ID / 显示名称 / 启用 / 上移下移 / 删除 */
     const row1 = el("div", "settings-model-row settings-model-row-main");
+    /* ≡ 把手只是排序语义的视觉提示：本轮真正可操作的是右侧「↑ / ↓」按钮（键盘可达） */
+    const handle = el("span", "settings-drag-handle", "≡");
+    handle.title = "拖动把手（排序请用右侧的「上移 / 下移」按钮）";
+    handle.setAttribute("aria-hidden", "true");
+    row1.appendChild(handle);
+
     const idInput = textInput({ value: draft.id, placeholder: "模型 ID，例如 deepseek-chat", maxlength: 200 });
     idInput.addEventListener("input", () => { draft.id = idInput.value; });
     row1.appendChild(field("模型 ID", idInput));
@@ -688,6 +901,19 @@
     const enabledInput = checkboxInput(draft.enabled);
     enabledInput.addEventListener("change", () => { draft.enabled = enabledInput.checked; });
     row1.appendChild(field("启用", enabledInput));
+
+    const orderBox = el("div", "settings-order-buttons");
+    const upBtn = button("↑", "btn-ghost settings-icon-btn settings-move-btn",
+      () => moveModelCard(index, -1, onListChange), "上移模型 " + (draft.id || "未命名"));
+    upBtn.disabled = index <= 0;
+    if (upBtn.disabled) upBtn.title = "已经是第一个模型";
+    const downBtn = button("↓", "btn-ghost settings-icon-btn settings-move-btn",
+      () => moveModelCard(index, 1, onListChange), "下移模型 " + (draft.id || "未命名"));
+    downBtn.disabled = index >= total - 1;
+    if (downBtn.disabled) downBtn.title = "已经是最后一个模型";
+    orderBox.appendChild(upBtn);
+    orderBox.appendChild(downBtn);
+    row1.appendChild(orderBox);
 
     row1.appendChild(button("🗑", "btn-ghost settings-icon-btn", () => removeModelCard(provider, draft, onListChange),
       "删除模型 " + (draft.id || "未命名")));
@@ -746,19 +972,52 @@
     return card;
   }
 
+  /* 上下移一张模型卡（§8.4 第 7 条）：目录顺序有语义——目录里第一个启用的模型就是
+     默认模型（model_registry._resolve_active_model）。这里只在草稿里挪，
+     落盘由 saveCatalog / flushDraftModels 按新顺序统一写。 */
+  function moveModelCard(index, delta, onListChange) {
+    const target = index + delta;
+    if (target < 0 || target >= state.models.length) return;
+    const moved = state.models[index];
+    state.models[index] = state.models[target];
+    state.models[target] = moved;
+    if (typeof onListChange === "function") onListChange();
+  }
+
+  /* 两份 ID 序列是否完全一致（长度 + 逐项） */
+  function sameOrder(left, right) {
+    if (left.length !== right.length) return false;
+    for (let i = 0; i < left.length; i += 1) {
+      if (String(left[i]) !== String(right[i])) return false;
+    }
+    return true;
+  }
+
+  /* 目录顺序落盘：走 POST .../models/reorder（后端要求 order 与现有 id 集合完全相等） */
+  async function syncModelOrder(provider, order) {
+    await request("POST", apiPath(SETTINGS_API.providerModelsReorder, { pid: provider.id }),
+      { order: order.slice() });
+  }
+
   function buildReasoningBlock(draft) {
     const box = el("div", "settings-model-reasoning");
     const head = el("div", "settings-model-row settings-model-row-tight");
 
-    const toggle = checkboxInput(draft.reasoning.enabled);
-    const toggleLabel = el("label", "settings-check settings-check-strong");
-    toggleLabel.appendChild(toggle);
-    toggleLabel.appendChild(el("span", null, "推理等级"));
-    head.appendChild(toggleLabel);
-
+    /* 开关放最右（§8.4 第 6 条）：.settings-model-row-tight 两端对齐，左侧是档位选择，
+       右侧是「推理等级」开关——与预览图二的观感一致。 */
     const activeSelect = el("select", "settings-input settings-input-sm");
     head.appendChild(field("当前档位", activeSelect));
     head.appendChild(el("span", "settings-field-hint", "参数名 " + (draft.reasoning.param || DEFAULT_REASONING_PARAM)));
+    /* 当前档位不在档位表里时只提示、不改草稿（渲染期不偷偷落盘） */
+    const tierWarning = el("span", "settings-field-hint settings-hint-warn", "");
+    tierWarning.classList.add("hidden");
+    head.appendChild(tierWarning);
+
+    const toggle = checkboxInput(draft.reasoning.enabled);
+    const toggleLabel = el("label", "settings-check settings-check-strong settings-switch");
+    toggleLabel.appendChild(toggle);
+    toggleLabel.appendChild(el("span", null, "推理等级"));
+    head.appendChild(toggleLabel);
     box.appendChild(head);
 
     const tierBox = el("div", "settings-tier-box");
@@ -766,6 +1025,8 @@
 
     function syncActiveOptions() {
       activeSelect.textContent = "";
+      tierWarning.textContent = "";
+      tierWarning.classList.add("hidden");
       const rows = draft.reasoning.tiers;
       if (!rows.length) {
         const option = el("option", null, "未知（尚未添加档位）");
@@ -784,19 +1045,25 @@
         activeSelect.appendChild(option);
       });
       if (!rows.some((row) => row.tier === draft.reasoning.activeTier)) {
-        draft.reasoning.activeTier = rows[0].tier;
-        activeSelect.value = rows[0].tier;
+        /* 只提示，不回写 draft.reasoning.activeTier：真正生效的回退逻辑在后端/保存请求体里，
+           渲染期改内存会让"用户没动过"的配置在下次保存时被静默改掉 */
+        tierWarning.textContent = "当前档位「" + draft.reasoning.activeTier
+          + "」不在档位表里：保存时会回退为「" + rows[0].tier + "」，请重新选择。";
+        tierWarning.classList.remove("hidden");
       }
     }
 
     function repaintTiers() {
       tierBox.textContent = "";
       const rows = draft.reasoning.tiers;
+      /* 关闭推理时不整表 .hidden：档位表仍然可见（灰掉 + 不可点），
+         让用户看到"关掉时这些档位不会生效"（§8.4 第 6 条） */
+      tierBox.classList.toggle("settings-tier-off", !draft.reasoning.enabled);
       if (!draft.reasoning.enabled) {
-        tierBox.classList.add("hidden");
-        return;
+        tierBox.title = "推理等级已关闭：下面的档位会保存在配置里，但调用时不会生效";
+      } else {
+        tierBox.removeAttribute("title");
       }
-      tierBox.classList.remove("hidden");
       if (!rows.length) {
         tierBox.appendChild(el("p", "settings-empty", "还没有档位：点「＋ 添加档位」加一行。"));
       }
@@ -890,15 +1157,15 @@
 
   /* ---------- 发现结果（勾选 → 导入） ---------- */
   function buildDiscoverSection(provider) {
+    const isDraft = !!(state.discover && state.discover.mode === "draft");
     const section = el("section", "settings-section settings-discover");
     const head = el("div", "settings-section-head");
     head.appendChild(el("h3", null, "获取可用模型结果"));
     if (state.discover.baseUrl) head.appendChild(el("span", "settings-catalog-state", state.discover.baseUrl));
     section.appendChild(head);
 
-    if (state.discover.error) {
-      section.appendChild(el("p", "settings-hint settings-hint-warn", "上游提示：" + state.discover.error));
-    }
+    /* 规格 §8.4 / §9：后端 error 非空时直接回 502，前端不再渲染"200 + error"这种分支；
+       502 的原文已经显示在状态区，这里只负责"成功拿到（可能为空）"的结果 */
     const models = state.discover.models || [];
     if (!models.length) {
       section.appendChild(el("p", "settings-empty", "上游没有返回任何模型（空目录也是合法结果）。"));
@@ -924,8 +1191,9 @@
       list.appendChild(row);
     });
     section.appendChild(list);
-    section.appendChild(el("p", "settings-hint",
-      "勾选后点「导入所选模型」才会写盘：导入的模型先用默认参数（未声明上下文窗口、纯文本输入、推理关闭），可在上方卡片里再改。"));
+    section.appendChild(el("p", "settings-hint", isDraft
+      ? "勾选后点「导入所选模型」只会加入本页草稿（不写盘）：导入的模型先用默认参数，可点「保存提供方」后一起落盘。"
+      : "勾选后点「导入所选模型」才会写盘：导入的模型先用默认参数（未声明上下文窗口、纯文本输入、推理关闭），可在上方卡片里再改。"));
 
     const actions = el("div", "settings-actions");
     actions.appendChild(button("导入所选模型", "btn-primary settings-btn-sm", () => importDiscovered(provider), "导入所选模型"));
@@ -973,6 +1241,8 @@
     const protocol = readValue("#settingsProviderProtocol");
     const apiKey = readValue("#settingsProviderKey");
     const enabled = readChecked("#settingsProviderEnabled");
+    /* 重试策略下拉（§8.4 第 4 条）：值就是后端 RETRY_POLICIES 里的 id */
+    const retryPolicy = readValue("#settingsProviderRetry") || "default";
 
     if (!id) {
       showStatus("error", "Provider ID 必填：小写字母开头，例如 my-provider。");
@@ -997,6 +1267,7 @@
           protocol: protocol,
           key_env: "",
           enabled: enabled,
+          retry: { policy: retryPolicy },
         };
         if (apiKey) body.api_key = apiKey;
         await request("POST", SETTINGS_API.providers, body);
@@ -1010,12 +1281,25 @@
           protocol: protocol,
           key_env: provider.key_env || "",
           enabled: enabled,
+          retry: { policy: retryPolicy },
         };
         await request("PUT", apiPath(SETTINGS_API.provider, { pid: provider.id }), body);
         if (apiKey) {
           await request("PUT", apiPath(SETTINGS_API.providerSecret, { pid: provider.id }), { api_key: apiKey });
         }
         showStatus("ok", "已保存提供方 " + provider.id + (apiKey ? "（含新密钥）" : "") + "。");
+      }
+      /* 新建态：把这一屏草稿里的模型逐条落盘（§8.4 第 3 条）。
+         失败不能一句话掩盖——提供方已经存进去了，用户要知道哪些模型没进去。 */
+      if (isNew && state.models.length) {
+        const failed = await flushDraftModels(id);
+        if (failed.length) {
+          showStatus("error", "提供方 " + id + " 已保存，但 " + failed.length + " 个模型没存进去："
+            + failed.join("；") + "。请修正后重新保存。");
+        } else {
+          showStatus("ok", "已保存提供方 " + id + "，并写入 " + state.models.length + " 个模型。"
+            + (apiKey ? "（含新密钥）" : ""));
+        }
       }
       syncModelsFromData();
       await loadAll();
@@ -1024,6 +1308,45 @@
     } finally {
       setBusy(false);
     }
+  }
+
+  /* 新建态保存后把 state.models 里的草稿逐条 POST .../models 落盘。
+     返回失败的说明（空数组 = 全成功）；调用方据此给"哪些没存进去"的中文结论。 */
+  async function flushDraftModels(providerId) {
+    const failed = [];
+    const drafts = state.models.slice();
+    for (let i = 0; i < drafts.length; i += 1) {
+      const draft = drafts[i];
+      const modelId = String(draft.id || "").trim();
+      if (!modelId) {
+        failed.push("第 " + (i + 1) + " 张卡缺少模型 ID");
+        continue;
+      }
+      const contextWindow = parseTokenCount(draft.contextWindowRaw);
+      const maxOutput = parseTokenCount(draft.maxOutputRaw);
+      if (Number.isNaN(contextWindow) || Number.isNaN(maxOutput)) {
+        failed.push(modelId + "（上下文窗口/最大输出 token 写法不合法）");
+        continue;
+      }
+      if (!draft.inputTypes.length) {
+        failed.push(modelId + "（至少要选一种输入类型）");
+        continue;
+      }
+      try {
+        await request("POST", apiPath(SETTINGS_API.providerModels, { pid: providerId }), {
+          id: modelId,
+          display_name: String(draft.displayName || "").trim() || modelId,
+          context_window: contextWindow,
+          max_output_tokens: maxOutput,
+          input_types: draft.inputTypes.slice(),
+          enabled: !!draft.enabled,
+          reasoning: buildReasoningPayload(draft),
+        });
+      } catch (err) {
+        failed.push(modelId + "：" + err.message);
+      }
+    }
+    return failed;
   }
 
   async function activateProvider(provider) {
@@ -1078,12 +1401,26 @@
 
   async function discoverModels(provider) {
     if (state.busy) return;
+    const isDraft = !!(provider && provider.draft);
     setBusy(true);
     showStatus("busy", "正在向 " + (provider.base_url || "提供方") + " 请求可用模型（会真的发一次 HTTP 请求）…");
+    /* 上一次成功的结果先留着：本次 502 / 403 时不清空，用户还能继续勾上一条 */
+    const previous = state.discover && state.discover.mode === (isDraft ? "draft" : "saved")
+      ? state.discover : null;
     try {
-      const result = await request("POST", apiPath(SETTINGS_API.providerDiscover, { pid: provider.id }), {});
+      let result;
+      if (isDraft) {
+        /* 未保存的提供方还没有 pid，/providers/{pid}/discover 必然 404（§8.4 第 2 条） */
+        result = await request("POST", SETTINGS_API.discover, {
+          provider: String(provider.id || "draft"),
+          base_url: String(provider.base_url || ""),
+          api_key: String((state.form && state.form.apiKey) || ""),
+        });
+      } else {
+        result = await request("POST", apiPath(SETTINGS_API.providerDiscover, { pid: provider.id }), {});
+      }
       const rawModels = result && Array.isArray(result.models) ? result.models : [];
-      const known = (Array.isArray(provider.models) ? provider.models : []).map((item) => String(item.id));
+      const known = state.models.map((draft) => String(draft.id || "").trim());
       const models = [];
       rawModels.forEach((item) => {
         const modelId = String(item && item.id !== undefined && item.id !== null ? item.id : "").trim();
@@ -1096,28 +1433,38 @@
         });
       });
       state.discover = {
-        pid: String(provider.id),
+        mode: isDraft ? "draft" : "saved",
+        pid: String(provider.id || "draft"),
         baseUrl: result && result.base_url ? String(result.base_url) : "",
         count: result && result.count !== undefined ? result.count : models.length,
-        error: result && result.error ? String(result.error) : "",
         models: models,
       };
       if (!models.length) {
         showStatus("warn", "上游没有返回任何模型：空目录也是合法结果，可以检查 API 地址与密钥。");
       } else {
-        showStatus("ok", "发现 " + models.length + " 个模型：勾选后点「导入所选模型」才会写盘。");
+        showStatus("ok", "发现 " + models.length + " 个模型：勾选后点「导入所选模型」"
+          + (isDraft ? "先加入草稿，再随「保存提供方」一起落盘。" : "才会写盘。"));
       }
       renderPane();
       const section = document.querySelector(".settings-discover");
       if (section && section.scrollIntoView) section.scrollIntoView({ block: "nearest" });
     } catch (err) {
-      showStatus("error", err.message);
+      /* 403 / 502 的分流：403 直接给"去隐私与授权勾选"的下一步；502 保留上一次成功结果 */
+      if (err.status === 403) {
+        showStatus("error", err.message
+          + " —— 打开左栏「隐私与授权」，把提供方「" + String(provider.id || "draft")
+          + "」加入外部处理授权后再试一次。");
+      } else {
+        showStatus("error", err.message + (previous && previous.models.length
+          ? "（上一次的结果仍保留在下方，勾选后仍可导入）" : ""));
+      }
     } finally {
       setBusy(false);
     }
   }
 
-  /* 导入一个发现结果：走 POST .../models，未勾选的一条都不发 */
+  /* 导入一个发现结果：未勾选的一条都不发。
+     新建态只往 state.models 草稿里加卡（随「保存提供方」一起落盘）；已保存态才真写盘。 */
   async function importDiscovered(provider) {
     if (state.busy) return;
     const discovered = state.discover ? state.discover.models || [] : [];
@@ -1126,10 +1473,32 @@
       showStatus("error", "请先勾选要导入的模型，再点「导入所选模型」。");
       return;
     }
+    if (provider && provider.draft) {
+      let added = 0;
+      let skipped = 0;
+      picked.forEach((item) => {
+        const exists = state.models.some((draft) => String(draft.id || "") === String(item.id));
+        if (exists) {
+          skipped += 1;                       // 草稿里已有同 ID 的卡：不重复加，避免保存时撞 ID
+          return;
+        }
+        const draft = blankModelDraft();
+        draft.id = String(item.id);
+        draft.displayName = String(item.id);
+        state.models.push(draft);
+        added += 1;
+      });
+      state.discover = null;
+      renderPane();
+      showStatus("ok", "已把 " + added + " 个模型加入草稿" + (skipped ? "（" + skipped + " 个已在草稿里，跳过）" : "")
+        + "：可以先在卡片里改参数，点「保存提供方」后一起落盘。");
+      return;
+    }
     setBusy(true);
     try {
       let imported = 0;
       const failures = [];
+      let renamed = 0;
       for (let i = 0; i < picked.length; i += 1) {
         try {
           await request("POST", apiPath(SETTINGS_API.providerModels, { pid: provider.id }),
@@ -1146,6 +1515,7 @@
       }
       if (!failures.length) state.discover = null;
       await loadAll();
+      return renamed;
     } finally {
       setBusy(false);
     }

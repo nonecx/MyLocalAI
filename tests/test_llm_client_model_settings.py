@@ -12,6 +12,9 @@
   - **不复刻金样本哈希**：缓存键的字节级稳定性由 tests/test_llm_gateway.py 的金样本
     负责，这里只断言"默认路径一个字节都不加、带了参数才加"这类不变量——两边都锁，
     才不会出现"新测试抄了旧哈希、旧测试改了没人知道"的分工漏洞。
+  - 提供方重试策略（retry.policy）只锁"policy → 最多重试几次"和"不进缓存键"两条：
+    off 是 0、aggressive 是 3、default 与 `get_max_retries()` 同源；注册表读不出来时
+    必须静默回退（读配置失败不该让一次对话调用直接失败）。
 
 运行（项目根目录下）：
     .venv/Scripts/python.exe -X utf8 -m unittest tests.test_llm_client_model_settings -v
@@ -22,6 +25,7 @@ from __future__ import annotations
 import copy
 import os
 import sys
+import types
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -134,6 +138,19 @@ class TestNoRegistryFile(LlmClientModelSettingsTestCase):
         """内置默认模型目录故意不声明上限与档位（注册表 _default_model_entry 的约定）。"""
         self.assertEqual(llm_client._model_params("longcat", "LongCat-2.5-Preview"),
                          {"max_output_tokens": None, "reasoning": None})
+
+    def test_builtin_provider_retry_is_the_shared_default(self):
+        """规格 §8.0.1 / §8.1：没有 models.json 时重试次数与改动前一致（环境变量同源，不是写死的数）。
+
+        这里不写死 1：真实 .env 可能设了 LLM_MAX_RETRIES，断言"等于 get_max_retries()"
+        才是"与改动前逐字节一致"的正确表述。
+        """
+        self.assertFalse(self.models_path.exists(), "夹具不应自带 models.json")
+        for pid in ("longcat", "deepseek", "openai"):
+            with self.subTest(pid=pid):
+                self.assertEqual(llm_client._provider_retry(pid), llm_client.get_max_retries())
+        self.assertEqual(llm_client._provider_retry("不存在的提供方"),
+                         llm_client.get_max_retries(), "未知提供方也不能炸，按默认重试")
 
 
 class TestRegistryActiveSelection(LlmClientModelSettingsTestCase):
@@ -277,6 +294,140 @@ class TestModelParams(LlmClientModelSettingsTestCase):
                          {"max_output_tokens": None, "reasoning": None})
         self.assertEqual(llm_client._model_params("not-a-provider", "whatever"),
                          {"max_output_tokens": None, "reasoning": None})
+
+
+class TestProviderRetryPolicy(LlmClientModelSettingsTestCase):
+    """规格 §8.1：提供方重试策略（retry.policy）决定"同一次调用最多重试几次"。
+
+    只测两件事：
+      1. policy → max_retries 的换算：default 沿用 LLM_MAX_RETRIES，off=0，aggressive=3；
+         缺失/非法/注册表坏掉一律回退 LLM_MAX_RETRIES，且**任何异常都不许冒泡**
+         （读配置失败不该让一次对话调用直接失败）。
+      2. "发几次"绝不进缓存键：换策略前后 `_cache_key` 必须逐字节相同。键的字节级稳定
+         由 tests/test_llm_gateway.py 的金样本兜底，这里只锁这条不变量，不抄哈希。
+
+    注册表是另一位 agent 的实现，这里按契约消费：
+    `provider_view(pid)["retry"]["policy"]` 与 `retry_max_retries(policy)`。
+    """
+
+    def _set_policy(self, policy: str, pid: str = "acme") -> None:
+        """改提供方的重试策略并让 llm_client 侧缓存失效（照设置面板写接口的真实顺序）。"""
+        registry.upsert_provider(pid, {"retry": {"policy": policy}})
+        llm_client.reset_cache()
+
+    def _patch_view(self, view):
+        """把 provider_view 换成返回固定条目的假函数。
+
+        为什么需要：注册表**写入层**会点名拒绝未知 policy（规格 §8.1），所以"读到非法/
+        非字符串策略"这种情况只可能来自"文件被手工改坏"或"版本比注册表旧"——而
+        llm_client 恰恰必须为这种文件自己兜底，所以用假视图构造它。
+        """
+        patcher = mock.patch.object(registry, "provider_view", return_value=view)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _fake_openai(self):
+        """把 openai.OpenAI 换成记录构造参数的假类：只验证"我们传了哪个 max_retries"。"""
+        calls = {}
+
+        class _FakeOpenAI:
+            def __init__(self, **kwargs):
+                calls.clear()
+                calls.update(kwargs)
+
+        module = types.ModuleType("openai")
+        module.OpenAI = _FakeOpenAI
+        patcher = mock.patch.dict(sys.modules, {"openai": module})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return calls
+
+    def test_default_policy_uses_shared_env_retries(self):
+        """缺省（= default）与改动前同源：读 LLM_MAX_RETRIES，而不是写死一个数。"""
+        self.activate_acme()
+        self.assertEqual(llm_client._provider_retry("acme"), llm_client.get_max_retries())
+        with mock.patch.dict(os.environ, {"LLM_MAX_RETRIES": "4"}):
+            llm_client.reset_cache()
+            self.assertEqual(llm_client._provider_retry("acme"), 4,
+                             "default 必须跟着 LLM_MAX_RETRIES 走")
+
+    def test_off_policy_disables_internal_retries(self):
+        self.activate_acme()
+        self._set_policy("off")
+        self.assertEqual(llm_client._provider_retry("acme"), 0)
+
+    def test_aggressive_policy_raises_retries_to_three(self):
+        self.activate_acme()
+        self._set_policy("aggressive")
+        self.assertEqual(llm_client._provider_retry("acme"), 3)
+
+    def test_missing_retry_block_falls_back_to_shared_default(self):
+        """注册表没有这个提供方 / 老版本视图里没有 retry 字段 → 回退默认重试。"""
+        for view in (None, {}, {"retry": None}, {"retry": {}},
+                     {"retry": {"policy": 1}}, {"retry": {"policy": "   "}},
+                     {"retry": "off"}):
+            with self.subTest(view=view):
+                llm_client.reset_cache()
+                self._patch_view(view)
+                self.assertEqual(llm_client._provider_retry("acme"),
+                                 llm_client.get_max_retries())
+
+    def test_invalid_policy_falls_back_to_shared_default(self):
+        """未知 policy：注册表换算要么抛 ModelRegistryError、要么给不出次数，都不能冒泡。"""
+        llm_client.reset_cache()
+        self._patch_view({"retry": {"policy": "turbo"}})
+        self.assertEqual(llm_client._provider_retry("acme"), llm_client.get_max_retries())
+
+    def test_policy_without_numeric_mapping_falls_back(self):
+        """default 的映射值就是 None（= 交给 llm_client 决定），必须回退而不是变成 0。"""
+        llm_client.reset_cache()
+        self._patch_view({"retry": {"policy": "default"}})
+        self.assertEqual(llm_client._provider_retry("acme"), llm_client.get_max_retries())
+
+    def test_registry_failure_never_bubbles(self):
+        llm_client.reset_cache()
+        with mock.patch.object(registry, "provider_view",
+                               side_effect=RuntimeError("注册表读不出来")):
+            self.assertEqual(llm_client._provider_retry("acme"), llm_client.get_max_retries(),
+                             "读配置失败只当没声明策略，不许让调用失败")
+        llm_client.reset_cache()
+        with mock.patch.object(registry, "provider_view",
+                               return_value={"retry": {"policy": "off"}}), \
+             mock.patch.object(registry, "retry_max_retries",
+                               side_effect=ValueError("映射函数坏了")):
+            self.assertEqual(llm_client._provider_retry("acme"), llm_client.get_max_retries())
+
+    def test_client_for_applies_policy_and_explicit_override_wins(self):
+        """真建客户端时策略要落到 max_retries；回落调用显式传的值仍然最高优先。"""
+        self.activate_acme()
+        self._set_policy("aggressive")
+        calls = self._fake_openai()
+        self.assertIsNotNone(llm_client._client_for("acme"))
+        self.assertEqual(calls["max_retries"], 3, "aggressive 要真的传给客户端")
+        self.assertEqual(calls["base_url"], "https://api.example.com/v1")
+        llm_client._client_for("acme", max_retries=0)
+        self.assertEqual(calls["max_retries"], 0,
+                         "回落调用显式传 0 时必须压过 aggressive，否则一次调用会被放大")
+
+    def test_reset_cache_picks_up_new_policy(self):
+        self.activate_acme()
+        self.assertEqual(llm_client._provider_retry("acme"), llm_client.get_max_retries())
+        registry.upsert_provider("acme", {"retry": {"policy": "aggressive"}})
+        self.assertEqual(llm_client._provider_retry("acme"), llm_client.get_max_retries(),
+                         "缓存没失效时应沿用旧值（说明真的记住了，而不是每次现算）")
+        llm_client.reset_cache()
+        self.assertEqual(llm_client._RETRY_CACHE, {}, "reset_cache 必须清掉重试次数缓存")
+        self.assertEqual(llm_client._provider_retry("acme"), 3, "reset 后要读到新策略")
+
+    def test_retry_policy_does_not_change_cache_key(self):
+        self.activate_acme()
+        key_default = llm_client._cache_key("系统提示", "用户文本", 0.0, 700, False)
+        self._set_policy("off")
+        self.assertEqual(llm_client._cache_key("系统提示", "用户文本", 0.0, 700, False),
+                         key_default, "改重试次数只是'发几次'，不许换掉缓存键")
+        self._set_policy("aggressive")
+        self.assertEqual(llm_client._cache_key("系统提示", "用户文本", 0.0, 700, False),
+                         key_default, "否则同一段提示词会被拆成两条缓存")
 
 
 class TestChatRawPlumbing(LlmClientModelSettingsTestCase):
