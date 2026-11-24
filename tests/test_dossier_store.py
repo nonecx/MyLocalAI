@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 import threading
 import unittest
@@ -309,6 +310,130 @@ class TestMarkersStore(unittest.TestCase):
             self.assertEqual(
                 conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0],
                 SCHEMA_VERSION)
+        finally:
+            conn.close()
+
+    def test_migrate_heals_unrecorded_applied_script(self):
+        """「DDL 已落库、版本未入账」自愈（2026-11-24 线上事故回归）。
+
+        事故形态：提取监测平台数据层时把分支线内的 v10 重编号为主线 v11
+        （DDL 逐字未动），分支线上迁过的老库 schema_migrations 只记到 10，
+        主线每次 migrate 都重跑 v11 → `duplicate column name: domain`，
+        PlatformStore/DossierStore 全构造失败，平台端点集体 500。
+        另一条同形态路径：执行中途进程被杀（executescript 的 DDL 每条自
+        提交，版本行还没写上）。
+
+        本用例模拟该态：全部脚本手工跑完、只登记 1..SCHEMA_VERSION-1，
+        migrate() 应逐列核对后补记最后一版，不抛、返回 1，库照常可用。
+        """
+        conn = connect(self.db)
+        try:
+            # schema_migrations 由 migrate() 引导创建，不在迁移脚本里——手工补上
+            conn.execute("""CREATE TABLE IF NOT EXISTS schema_migrations (
+                                version    INTEGER PRIMARY KEY,
+                                applied_at TEXT NOT NULL)""")
+            for i, script in enumerate(ds.MIGRATIONS, start=1):
+                conn.executescript(script)                 # DDL 全部落库……
+                if i < SCHEMA_VERSION:                     # ……但最后一版漏记账
+                    conn.execute("INSERT INTO schema_migrations (version, applied_at)"
+                                 " VALUES (?, '2026-11-24T00:00:00+08:00')", (i,))
+            conn.commit()
+            self.assertEqual(
+                conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0],
+                SCHEMA_VERSION - 1)
+            # 自愈：补记账而不重复 ALTER
+            self.assertEqual(migrate(conn), 1)
+            self.assertEqual(
+                conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0],
+                SCHEMA_VERSION)
+            self.assertEqual(migrate(conn), 0)             # 再跑仍幂等
+            # 库照常可用：能建能读（默认档案工作区由 _ensure_default_profile 兜底）
+            did = conn.execute(
+                "INSERT INTO dossiers (created_at, updated_at, title, input_text)"
+                " VALUES ('2026-11-24T08:00:00+08:00', '2026-11-24T08:00:00+08:00',"
+                " '自愈库', '正文')").lastrowid
+            row = conn.execute("SELECT title FROM dossiers WHERE id = ?", (did,)).fetchone()
+            self.assertEqual(row["title"], "自愈库")
+        finally:
+            conn.close()
+
+    def test_migrate_completes_half_applied_script(self):
+        """半成品脚本被补全（不再是抛错）：末版入账被删、且少了一列时，
+        migrate() 把缺的列补上、补记账，不抛——收敛到「全脚本效果俱在」。"""
+        conn = connect(self.db)
+        try:
+            conn.execute("""CREATE TABLE IF NOT EXISTS schema_migrations (
+                                version    INTEGER PRIMARY KEY,
+                                applied_at TEXT NOT NULL)""")
+            for i, script in enumerate(ds.MIGRATIONS, start=1):
+                conn.executescript(script)
+                conn.execute("INSERT INTO schema_migrations (version, applied_at)"
+                             " VALUES (?, '2026-11-24T00:00:00+08:00')", (i,))
+            conn.commit()
+            # 回滚最后一版的记账，并拆掉它加的一列，造出「半成品」
+            conn.execute("DELETE FROM schema_migrations WHERE version = ?", (SCHEMA_VERSION,))
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(watch_queries)")]
+            keep = [c for c in cols if c != "inferred_at"]
+            conn.execute("ALTER TABLE watch_queries RENAME TO watch_queries_old")
+            conn.execute("CREATE TABLE watch_queries (%s)" %
+                         ", ".join(f'"{c}" TEXT' for c in keep))
+            conn.execute("INSERT INTO watch_queries (%s) SELECT %s FROM watch_queries_old"
+                         % (", ".join(f'"{c}"' for c in keep),
+                            ", ".join(f'"{c}"' for c in keep)))
+            conn.execute("DROP TABLE watch_queries_old")
+            conn.commit()
+            # 补全：缺列补上、版本补记，不抛
+            self.assertEqual(migrate(conn), 1)
+            cols_now = [r[1] for r in conn.execute("PRAGMA table_info(watch_queries)")]
+            self.assertIn("inferred_at", cols_now)
+            self.assertEqual(
+                conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0],
+                SCHEMA_VERSION)
+            self.assertEqual(migrate(conn), 0)             # 再跑仍幂等
+        finally:
+            conn.close()
+
+    def test_migrate_repairs_recorded_but_unbuilt_script(self):
+        """重编号事故回归（2026-11-24 真实 data/dossier.db 形态）。
+
+        分支线内 v6=平台三表 / v7=领域列；主线把 profiles / batches 插成 v6 / v7
+        后，老库「版本账记着 1..11，但 v6/v7 两段的表根本没建」——只信账本的
+        migrate() 直接跳过，_ensure_default_profile 撞 no such table: profiles，
+        PlatformStore/DossierStore 全构造失败，平台端点集体 500。
+
+        本用例复刻该态：只应用 1-5 与 8-11 段、却把 1..11 全记上账。migrate()
+        应逐段核对实态，只补跑 v6/v7 缺失的 DDL（不碰已建好的段、不重放 v5 的
+        UPDATE 回填），返回 2，且库就此完整可用。
+        """
+        conn = connect(self.db)
+        try:
+            conn.execute("""CREATE TABLE IF NOT EXISTS schema_migrations (
+                                version    INTEGER PRIMARY KEY,
+                                applied_at TEXT NOT NULL)""")
+            applied_scripts = {1, 2, 3, 4, 5, 8, 9, 10, 11}   # v6/v7 两段跳过不建
+            for i, script in enumerate(ds.MIGRATIONS, start=1):
+                if i in applied_scripts:
+                    conn.executescript(script)
+                conn.execute("INSERT INTO schema_migrations (version, applied_at)"
+                             " VALUES (?, '2026-11-24T00:00:00+08:00')", (i,))
+            conn.commit()
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0],
+                SCHEMA_VERSION)                        # 账是全的，schema 是缺的
+            # 修复：只补 v6/v7 的缺失 DDL
+            self.assertEqual(migrate(conn), 2)
+            tables = {r["name"] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            for t in ("profiles", "app_state", "batches", "batch_items"):
+                self.assertIn(t, tables)
+            dossier_cols = {r[1] for r in conn.execute("PRAGMA table_info(dossiers)")}
+            self.assertIn("profile_id", dossier_cols)
+            # _ensure_default_profile 已能跑：默认档案在场且激活态有值
+            self.assertIsNotNone(conn.execute(
+                "SELECT id FROM profiles WHERE key='default'").fetchone())
+            self.assertIsNotNone(conn.execute(
+                "SELECT value FROM app_state WHERE key='active_profile_id'").fetchone())
+            self.assertEqual(migrate(conn), 0)         # 修好后重跑零迁移
         finally:
             conn.close()
 

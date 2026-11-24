@@ -104,8 +104,10 @@ class PlatformApiTestBase(unittest.TestCase):
         except Exception as exc:  # noqa: BLE001  fastapi 缺失时整组跳过
             raise unittest.SkipTest(f"无法导入 platform_api: {type(exc).__name__}: {exc}")
         cls.platform_api = platform_api
-        # 主线尚未把 platform_router 挂进 web/app.py（前端/路由接线留待后续分支），
-        # 这里自建最小 app 挂载被测 router——端点契约照常全覆盖。
+        # 主线已把 platform_router 挂进 web/app.py（2026-11-24 修「触发失败：
+        # HTTP 404」——漏挂时平台视图每个请求都是 404）。这里仍自建最小 app 挂
+        # 被测 router：端点契约用注入的临时 store 与桩调度器跑，与真 app 的
+        # 进程级惰性单例隔离；应用级「真挂上了」断言见 TestPlatformAppMounting。
         standalone = FastAPI()
         standalone.include_router(platform_api.router)
         cls.client = TestClient(standalone)
@@ -446,7 +448,9 @@ class TestPlatformFrontendConsistency(unittest.TestCase):
         cls.js = _read_static("platform.js")
         cls.css = _read_static("platform.css")
         cls.cards_js = _read_static("cards.js")
-        # 路由权威来源：自建最小 app 挂 platform_router（主线 app.py 未接线）。
+        cls.html = _read_static("index.html")
+        # 路由权威来源：自建最小 app 挂 platform_router（与真 app 同一条 router
+        # 对象；真 app 的应用级挂载断言在 TestPlatformAppMounting）。
         _standalone = FastAPI()
         _standalone.include_router(platform_api.router)
         cls._openapi_paths = set(_standalone.openapi().get("paths", {}))
@@ -465,7 +469,7 @@ class TestPlatformFrontendConsistency(unittest.TestCase):
 
     def test_dynamic_platform_classes_have_css(self):
         """动态拼出的平台 class 必须在 platform.css 有定义（platform.js ↔ css
-        两侧自洽；index.html 骨架接线留待后续分支，不在本条断言内）。"""
+        两侧自洽；index.html 骨架侧的结构契约在 test_platform_view_structure）。"""
         used = set(re.findall(r'platform-[a-z-]+', self.js))
         defined = set(re.findall(r'\.((?:chat-)?platform-[a-z-]+)', self.css))
         missing = sorted(c for c in used if c not in defined)
@@ -531,14 +535,88 @@ class TestPlatformFrontendConsistency(unittest.TestCase):
         self.assertEqual(js_labels, dict(LEVEL_LABELS),
                          f"platform.js RISK_LEVELS 展示名与 risk.LEVEL_LABELS 不一致：{js_labels}")
 
-    def test_platform_view_structure(self):
-        """（主线提取后已不适用，删除说明见提交信息）
+    def test_platform_static_assets_wired(self):
+        """index.html 必须真的引用 platform.css / platform.js（接线留痕）。"""
+        for ref in ('href="static/platform.css"', 'src="static/platform.js"'):
+            self.assertIn(ref, self.html, f"index.html 缺少静态文件引用 {ref}")
+        # 通栏主 Tab 的样式落在 platform.css（main-tab* 家族）
+        css_classes = set(re.findall(r"\.((?:chat-)?platform-[a-z-]+|main-tab[a-z-]*)",
+                                     self.css))
+        for cls in ("main-tabs", "main-tab"):
+            self.assertIn(cls, css_classes, f"platform.css 缺 .{cls} 定义")
 
-        原用例锁定 index.html 监测平台视图的结构契约（通栏 Tab / 筛选 chips /
-        管理抽屉 / 33 个核心 id / 旧版遗留零残留）；主线 index.html 尚未接线平台
-        视图（接线留待后续分支），无对象可测，故移除。恢复接线时随 index.html
-        一并恢复本契约（清单见分支版本文末注释与 docs/监测平台规格 §7）。
+    def test_platform_view_structure(self):
+        """方案 G 结构契约 + 通栏 Tab 切换接线（2026-11-24 随路由挂载一并恢复）。
+
+        结构：通栏 Tab（mainTabs：navChat/navPlatform）→ 平台视图主容器 →
+        状态摘要条 → 筛选 chips → 信息流 → 空态双引导 → 右侧管理抽屉
+        （信息源 / 监控词[领域下拉+编辑态] / 巡检记录 / 授权引导）。
+        旧版「面板栈 + 预警横幅」遗留标记一处不留；视图是显隐切换（都留在
+        DOM），不是销毁重建。清单与 docs/监测平台规格-2026-11-20.md §7、
+        README「监测平台」章节同口径；改 UI 骨架必须三处一起改。
         """
+        # ① 33 个点名核心 id 全部有落点（改 UI 骨架必须三处一起改）
+        missing = [i for i in PLATFORM_CORE_IDS if f'id="{i}"' not in self.html]
+        self.assertEqual(missing, [], f"index.html 缺核心元素 id: {missing}")
+        # ② 筛选 chips 的 data-risk 取值符合契约（"" / high,urgent / suspect / notice）
+        risks = re.findall(r'data-risk="([^"]*)"', self.html)
+        self.assertEqual(risks, list(PLATFORM_FILTER_RISKS),
+                         f"index.html 筛选 chips 不符合契约：{risks}")
+        # ③ 旧版遗留标记零残留
+        leftovers = [m for m in PLATFORM_LEGACY_MARKERS if m in self.html]
+        self.assertEqual(leftovers, [], f"index.html 残留旧版标记: {leftovers}")
+        # ④ 通栏 Tab 切换接线：恰两个视图按钮 + platform.js 接管显隐
+        self.assertIn('class="main-tabs"', self.html)
+        self.assertEqual(len(re.findall(r'class="main-tab[ "]', self.html)), 2,
+                         "通栏 Tab 应恰有两个视图按钮（对话 / 监测平台）")
+        self.assertIn('id="platformView"', self.html)
+        self.assertIn("platformView", self.js)
+        self.assertIn("navPlatform", self.js)
+        # 骨架不完整（导航缺失）时安静退出，不抛错
+        self.assertIn("return;", self.js)
+
+
+class TestPlatformAppMounting(unittest.TestCase):
+    """应用级挂载守护（2026-11-24「触发失败：HTTP 404」回归）。
+
+    platform_router 必须被 web/app.py include 进真 app——漏挂时前端
+    platform.js 的每个 /api/platform/* 请求都是 404（用户侧现象即
+    「触发失败：HTTP 404」），而单 router 自建 app 的端点测试照旧全绿，
+    抓不到这类"接了一半"的回归。照 tests/test_models_ui.py 的
+    test_app_includes_models_router 先例：源码级断言 + 真 app 路由核对。
+    """
+
+    APP_PY = ROOT / "src" / "mylocalai" / "web" / "app.py"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        try:
+            import app as webapp  # noqa: F401  只为拿到真 app 的路由表
+        except Exception as exc:  # noqa: BLE001  fastapi 缺失/导入失败时跳过
+            raise unittest.SkipTest(f"无法导入 web app: {type(exc).__name__}: {exc}")
+        cls.webapp = webapp
+
+    def test_app_source_includes_platform_router(self):
+        """源码级：app.py 引用 platform_api 且 include_router 挂进 FastAPI app。"""
+        source = self.APP_PY.read_text(encoding="utf-8")
+        self.assertIn("platform_api", source, "app.py 没有引用 web/platform_api.py")
+        self.assertRegex(source, r"include_router\([^)]*platform",
+                         "app.py 没有把 platform 路由 include 进 FastAPI app")
+
+    def test_platform_paths_registered_in_app(self):
+        """/api/platform/* 真的出现在真 app 的路由表里（应用级最终口径）。
+
+        走 openapi() 的 paths：include_router 后 included router 的端点在
+        app.routes 里的可见性随 FastAPI 版本而变，openapi 的 paths 是全量
+        权威来源。前端 PLATFORM_API 的 8 个路径一个不许少。
+        """
+        paths = set(self.webapp.app.openapi().get("paths", {}))
+        expected = {"/api/platform/status", "/api/platform/feed",
+                    "/api/platform/warnings", "/api/platform/watch",
+                    "/api/platform/scan", "/api/platform/scans",
+                    "/api/platform/domains", "/api/platform/sources"}
+        missing = sorted(p for p in expected if p not in paths)
+        self.assertEqual(missing, [], f"真 app 未注册平台接口: {missing}")
 
 
 if __name__ == "__main__":
