@@ -229,11 +229,38 @@ class TestStabilityGuards(unittest.TestCase):
 class TestLlmReplay(unittest.TestCase):
     """发现 4/10 的根治项：同样的请求在进程内只真正调用一次。"""
 
+    #: 本组要隔离的本地状态路径（用户在设置面板的改动态不应影响本组结论）
+    PATHS = ("MYLOCALAI_MODELS_PATH", "MYLOCALAI_MODEL_SECRETS_PATH",
+             "MYLOCALAI_PRIVACY_PREFERENCES_PATH")
+
     def setUp(self):
+        # 与真实 models.json / model_secrets.json / privacy_preferences.json 隔离：
+        # 临时空注册表回到"内置默认提供方"基线，临时偏好写"授权全开"（本组全部
+        # mock create_client，不真外发；授权闸只需放行即可）。
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        base = Path(self._tmp.name)
+        self._saved_paths = {k: os.environ.get(k) for k in self.PATHS}
+        os.environ["MYLOCALAI_MODELS_PATH"] = str(base / "models.json")
+        os.environ["MYLOCALAI_MODEL_SECRETS_PATH"] = str(base / "secrets.json")
+        os.environ["MYLOCALAI_PRIVACY_PREFERENCES_PATH"] = str(base / "privacy.json")
+        (base / "privacy.json").write_text(json.dumps({
+            "schema_version": 1,
+            "save_enabled": {"results": True, "raw_input": True, "external_cache": True},
+            "retention_days": {"results": 90, "raw_input": 30, "external_cache": 7},
+            "external_processing_enabled": True,
+            "external_processing_providers": ["longcat", "deepseek", "openai",
+                                              "public-search", "public-web"],
+        }, ensure_ascii=False), encoding="utf-8")
         llm_cache.clear()
         llm_client.reset_cache()
 
     def tearDown(self):
+        for k, v in self._saved_paths.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
         llm_cache.clear()
         llm_client.reset_cache()
         os.environ.pop("LLM_CACHE_MAX", None)
@@ -367,12 +394,23 @@ class TestProviderBinding(unittest.TestCase):
 
     KEYS = ("LONGCAT_API_KEY", "LONGCAT_BASE_URL", "LONGCAT_MODEL",
             "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL",
-            "LLM_PROVIDER", "LLM_FALLBACKS")
+            "LLM_PROVIDER", "LLM_FALLBACKS",
+            "MYLOCALAI_MODELS_PATH", "MYLOCALAI_MODEL_SECRETS_PATH",
+            "MYLOCALAI_PRIVACY_PREFERENCES_PATH")
 
     def setUp(self):
         self._saved = {k: os.environ.get(k) for k in self.KEYS}
         for k in self.KEYS:
             os.environ.pop(k, None)
+        # 注册表/密钥/隐私偏好指向临时空目录：本组测"env 密钥与提供方成组绑定"，
+        # 不能读用户在设置面板保存的 models.json——否则 active 提供方与 stored
+        # 密钥会让"错配必须报错"的断言失去前提（默认提供方被改成别的了）。
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        base = Path(self._tmp.name)
+        os.environ["MYLOCALAI_MODELS_PATH"] = str(base / "models.json")
+        os.environ["MYLOCALAI_MODEL_SECRETS_PATH"] = str(base / "secrets.json")
+        os.environ["MYLOCALAI_PRIVACY_PREFERENCES_PATH"] = str(base / "privacy.json")
         llm_client.reset_cache()
 
     def tearDown(self):
