@@ -45,7 +45,7 @@
 │   │   ├── attn_rules.json / deep_read_rules.json / society_issues.json / prompts.json
 │   │   └── README.md           关注度与深读的完整说明（公式、触发、护栏、隔离）
 │   ├── dossier/                档案库（SQLite 单文件 + WAL）
-│   │   ├── store.py            连接工厂、schema_version 顺序迁移（v4 指纹表+话术标记表、v6 Profile 工作区、v7 材料批次、v8 监测订阅、v9 编排 plan/三轴列）、档案域七表 + 会话域三表
+│   │   ├── store.py            连接工厂、schema_version 顺序迁移（v4 指纹表+话术标记表、v6 Profile 工作区、v7 材料批次、v8 监测订阅、v9 编排 plan/三轴列、v10 监测平台三表、v11 平台信息源与领域列）、档案域七表 + 会话域三表
 │   │   ├── profiles.py         Profile 工作区（多档案数据分家 + 角色，v6）
 │   │   ├── batches.py          材料批次存储（v7）
 │   │   ├── batch_summary.py    批次汇总纯函数（零 LLM，永不抛）
@@ -85,15 +85,26 @@
 │   │   ├── prompts.json        人设与固定话术（system 类提示词带 角色/目标/边界 三段结构，
 │   │   │                       支持 ASSISTANT_PROMPTS_PATH/_EXTRA_PATH 覆盖）——改这里而非改代码
 │   │   └── assistant_rules.json  路由模型/上限/预算/指纹阈值/信源画像阈值/拒绝词表——改这里而非改代码
+│   ├── platform/                监测平台（巡检发现 → 热度估计 → 传播风险分级 → 信息流，代码判定不打分）
+│   │   ├── store.py              平台域三表读写（watch_queries/feed_entries/scan_runs + patrol_sources）
+│   │   ├── runner.py             两阶段巡检编排（发现 → 初筛 → 深查 → 风险 → 落库）
+│   │   ├── sources.py            检索源与用户自建 RSS/页面源（候选归一化去重）
+│   │   ├── candidates.py         候选归一化/去重/热度输入（title_similarity 复用 dossier.store）
+│   │   ├── heat.py / risk.py     热度估计纯函数 / 传播风险分级纯函数（大模型不参与打分）
+│   │   ├── domains.py            监控词与信息流领域（JSON 可配，代码不写死领域名）
+│   │   ├── rules.py / scheduler.py / __main__.py  规则外置 / 巡检调度 / CLI 入口（python -m mylocalai.platform）
+│   │   └── platform_domains.json / platform_rules.json  领域表与预算开关——改这里而非改代码
 │   ├── web/                    FastAPI 网站 + static/（src/mylocalai/web/app.py）
 │   │   ├── app.py              REST API 全貌（分析/关注度/对话/会话/档案/画像/Profile/批次/监测）+ lifespan 调度
 │   │   ├── profiles_api.py     Profile 工作区 CRUD + 激活（v6）
 │   │   ├── batch_api.py        材料批次 API + SSE 进度（v7）
 │   │   ├── materials_api.py    上传文件内存解析（txt/md/csv/json，不落盘）
 │   │   ├── monitor_api.py      监测订阅 API + 调度线程（v8）
+│   │   ├── platform_api.py     监测平台 API（状态/信息流/预警/监控词 CRUD/巡检触发/信息源 CRUD 与试运行/领域；主线未挂载，随接线分支启用）
 │   │   └── static/             单一对话页的全部界面：index.html + shell.js（file:// 引导/服务状态）
 │   │                           + chat.js/cards.js（会话、档案库、事件流与全部卡片渲染）+ chat.css
 │   │                           + profiles.js（档案切换器）+ batch.js（材料批次面板）+ monitor.js（领域监测面板）
+│   │                           + platform.js/platform.css（监测平台视图，随接线分支启用）
 │   ├── util/                   text_safety（代理项规整）/ console_io（stdio 规整）
 │   └── cli.py                  命令行入口（python -m mylocalai.cli）
 ├── my_website/                 启动器（start.bat / start.sh）与说明，实际代码在 src/mylocalai/web/
@@ -103,7 +114,7 @@
 └── archive/                    遗留资产归档区（2026-10-30 清场建立，不入库）
 ```
 
-依赖方向只有一条：`core ← llm ← retrieval ← {classic, rumor, attention} ← {dossier, assistant} ← web/cli/mcp`；
+依赖方向只有一条：`core ← llm ← retrieval ← {classic, rumor, attention} ← {dossier, assistant} ← platform ← web/cli/mcp`；
 classic / rumor / attention 互不 import，dossier/assistant 不得被上游反向 import
 （`tests/test_import_rules.py` 用 AST 锁定）。
 
@@ -362,9 +373,9 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 2049 个用例（unittest discover 全量，2026-11-24 合入信息收集 v2 分支只读资产后实测；
-此前 2026-11-23 第五波三条专用技能落地后为 1985 例，2026-11-22 角色 Agent 工作流
-（编排引擎 + 角色工具白名单 + 全面去数值）落地时为 1764 例，
+离线套件共 2299 个用例（unittest discover 全量，2026-11-24 提取监测平台数据层与 API 层后实测；
+此前 2026-11-24 合入信息收集 v2 分支只读资产后为 2049 例，2026-11-23 第五波三条专用技能落地后为 1985 例，
+2026-11-22 角色 Agent 工作流（编排引擎 + 角色工具白名单 + 全面去数值）落地时为 1764 例，
 含编排层 `tests/test_workflow_engine.py` 20 例、`tests/test_workflow_claim.py` 13 例、
 角色白名单 `tests/test_role_allowlists.py` 38 例与跨层对拍
 `tests/test_workflow_integration.py` 5 例，以及隐私与授权可操作面板的
@@ -378,6 +389,9 @@ UI 契约与 PUT /api/privacy/preferences 接口用例；第五波新增 221 例
 另 2026-11-24 合入信息收集 v2 分支只读资产（未接线的技能页/复合卡测试未纳入）：
 受限 Agent 循环 `tests/test_agent_loop.py`、追问续接 `tests/test_continuation.py`、
 技能偏好 `tests/test_skills_preferences.py` 三模块共 64 例；
+再 2026-11-24 自 user-profiles-roles 分支提取监测平台数据层与 API 层（`platform/` 包 +
+`tools_platform` + `platform_api` + `tests/test_platform_*` 十一模块，前端/路由接线
+留待后续分支，相应接线断言用例未纳入）；
 **M4 起由 `tests.test_readme_counts` 自动校验此数字与 mock 闸门条数，改动后须同步回写**）：
 M1-M3 的全部回归（详见 git 历史），加上 M4 新增模块：
 **成本真实计数**（llm_client 进程级计数器：真实上游调用数 + usage tokens，缓存命中/

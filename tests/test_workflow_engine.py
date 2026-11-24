@@ -273,7 +273,7 @@ class MigrationV9Tests(unittest.TestCase):
     def test_v9_adds_orchestration_columns_and_is_idempotent(self):
         conn = connect(":memory:")
         try:
-            self.assertEqual(SCHEMA_VERSION, 9)
+            self.assertGreaterEqual(SCHEMA_VERSION, 9)   # v9 编排列；v10/v11 平台表追加后取下限不断言上限
             self.assertEqual(migrate(conn), SCHEMA_VERSION)
             self.assertEqual(migrate(conn), 0)   # 幂等：重跑零迁移
             got = {row["name"] for row in conn.execute("PRAGMA table_info(tool_runs)")}
