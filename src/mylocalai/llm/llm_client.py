@@ -261,6 +261,12 @@ _THINKING_SUPPORT: Dict[Tuple[str, str], bool] = {}
 # 写接口保存后必调 reset_cache()，这里跟着一起清（口径同 providers.json 底表）。
 _PARAMS_LOCK = threading.Lock()
 _PARAMS_CACHE: Dict[Tuple[str, str], Dict[str, Any]] = {}
+# 提供方重试策略算出的"最多重试几次"（规格 §8.1）：key=provider -> int。
+# 为什么不每次现算：_client_for() 在一条备用链里会对每家各算一次，而 provider_view()
+# 每次都深拷贝整份注册表；重试次数只随配置变、不随请求变，缓存起来最省。写接口保存后
+# 必调 reset_cache()，这里跟着一起清（与 _PARAMS_CACHE 同一套失效口径）。
+_RETRY_LOCK = threading.Lock()
+_RETRY_CACHE: Dict[str, int] = {}
 
 
 def reset_cache() -> None:
@@ -277,6 +283,8 @@ def reset_cache() -> None:
         _THINKING_SUPPORT.clear()
     with _PARAMS_LOCK:
         _PARAMS_CACHE.clear()
+    with _RETRY_LOCK:
+        _RETRY_CACHE.clear()
     with _PROVIDERS_LOCK:
         _PROVIDERS_CACHE = None
     model_registry.reset_cache()
@@ -428,11 +436,49 @@ def get_max_retries() -> int:
     return max(0, value)
 
 
+def _provider_retry(provider: str) -> int:
+    """该提供方本次调用允许的**内部重试次数**（提供方重试策略 retry.policy，规格 §8.1）。
+
+    取注册表里 provider_view(pid)["retry"]["policy"]，再换算成次数：
+      - `default`（或缺省、或注册表读不到）→ `get_max_retries()`，即 LLM_MAX_RETRIES（默认 1），
+        与加这个字段之前**逐字节一致**——没有 data/models.json 的部署行为不变（规格 §8.0.1）；
+      - `off` → 0（不再内部重试）；
+      - `aggressive` → 3（更积极）；
+      - 任何无法识别的取值 / 注册表换算不出次数（返回 None）→ 一律回退 `get_max_retries()`。
+    重试次数只决定"同一次调用最多发几个 HTTP"，**不进 `_cache_key`**：同一段提示词不会因为
+    改了几次重试就变成另一条缓存（金样本 tests/test_llm_gateway.py 锁着键的字节级稳定）。
+
+    结果按提供方记忆，`reset_cache()` 一并清（与 `_model_params` 同一套失效口径）。
+    **任何异常都不向外冒**：注册表坏掉只当"没有声明策略"，绝不能因为读配置失败让一次
+    对话调用直接失败（与 `_model_params` 的 fail-soft 口径相同）。
+    """
+    with _RETRY_LOCK:
+        cached = _RETRY_CACHE.get(provider)
+    if cached is not None:
+        return cached
+    retries = get_max_retries()
+    try:
+        entry = model_registry.provider_view(provider) or {}
+        retry = entry.get("retry") if isinstance(entry, dict) else None
+        policy = retry.get("policy") if isinstance(retry, dict) else None
+        if isinstance(policy, str) and policy.strip():
+            value = model_registry.retry_max_retries(policy.strip())
+            # bool 是 int 的子类，True/False 不算合法次数；负数同理
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                retries = value
+    except Exception:  # noqa: BLE001  注册表出问题只当"用默认重试"，照常调用
+        retries = get_max_retries()
+    with _RETRY_LOCK:
+        _RETRY_CACHE[provider] = retries
+    return retries
+
+
 def _client_for(provider: str, max_retries: Optional[int] = None):
     """按提供方建客户端；该提供方没有自己的密钥时返回 None。
 
     max_retries 供"去掉关闭思维链参数后的回落调用"使用（传 0，不再内部重试），
-    避免把一次逻辑调用放大成 (max_retries × 2) 个 HTTP。
+    避免把一次逻辑调用放大成 (max_retries × 2) 个 HTTP。显式传入的值**优先级最高**，
+    压过该提供方的重试策略（回落调用必须真的只发一次）。
     """
     spec = providers().get(provider)
     if spec is None:
@@ -448,7 +494,8 @@ def _client_for(provider: str, max_retries: Optional[int] = None):
     # 单次尝试的超时不超过"本次分析剩余预算"，避免上游挂掉时一轮轮等满 60s
     timeout = llm_cache.attempt_timeout(get_timeout())
     return OpenAI(api_key=api_key, base_url=base_url, timeout=timeout,
-                  max_retries=get_max_retries() if max_retries is None else max_retries)
+                  max_retries=(max_retries if max_retries is not None
+                               else _provider_retry(provider)))
 
 
 def create_client(provider: Optional[str] = None):

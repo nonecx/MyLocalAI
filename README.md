@@ -373,8 +373,9 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 2369 个用例（unittest discover 全量，2026-11-24 合入 user-profiles-roles
-分支后实测；此前 2026-11-24 提取监测平台数据层与 API 层后为 2299 例，
+离线套件共 2436 个用例（unittest discover 全量，2026-11-24 收拢 model-settings
+worktree 未提交工作（模型管理规格 §8 收尾）后实测；此前 2026-11-24 合入
+user-profiles-roles 分支后为 2369 例，提取监测平台数据层与 API 层后为 2299 例，
 合入信息收集 v2 分支只读资产后为 2049 例，2026-11-23 第五波三条专用技能落地后为 1985 例，
 2026-11-22 角色 Agent 工作流（编排引擎 + 角色工具白名单 + 全面去数值）落地时为 1764 例，
 含编排层 `tests/test_workflow_engine.py` 20 例、`tests/test_workflow_claim.py` 13 例、

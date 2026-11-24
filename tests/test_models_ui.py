@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """T3 前端设置面板（模型管理）测试：结构接线 + 前后端路径自洽 + 契约文案锁定。
 
-验收口径（中文 docstring 即契约）：
+验收口径（中文 docstring 即契约；本轮已升级到「增补 §8」）：
   - index.html：顶栏「设置」按钮在「关于」左边；#settingsDialog 骨架齐备
     （role="dialog" / aria-modal / aria-labelledby，左栏 #settingsNav 默认选中
-    data-settings-tab="models"，右栏 #settingsPane，右上 #settingsCloseBtn，
-    状态区 #settingsStatus），并引入 settings.css 与 settings.js；
+    data-settings-tab="models"，右栏 #settingsPane，右上 #settingsCloseBtn 与
+    #settingsOpenConfigBtn，状态区 #settingsStatus），并引入 settings.css 与 settings.js；
   - shell.js：照 aboutDialog 的写法绑定四条开合途径（按钮 / 关闭按钮 / 点遮罩 / Esc），
     且只调 window.SettingsPanel 的 open/close/isOpen——面板渲染与请求不外溢到外壳；
   - settings.js：暴露 window.SettingsPanel；顶部 SETTINGS_API 的每条路径模板都能在
@@ -15,9 +15,23 @@
     显示常量在位；用户要求的控件文案齐备；密钥体检卡 KEY_SOURCE_HINT 只认后端
     _resolve_secret() 的词面 env/stored（secrets 不是后端词面，绝不作为键出现），
     未配置分支降级文案在位，key-health-* 类在 chat.css 都有定义；
+    (HTTP 方法, 路径模板) 与规格 §3.2 + §8.3 表格逐条一致；全文件无 innerHTML 类
+    HTML 拼接（模型 ID / 显示名称 / base_url / 密钥都是用户输入）；1M / 128K / 65536
+    的解析与显示常量在位；用户要求的控件文案齐备；
+  - settings.js 的 §8.4 增量：新建提供方那一屏（state.creating）除了表单还要渲染模型目录，
+    且目录由表单当前输入拼出的 draftProvider() 驱动、其中的「获取可用模型」在
+    新建态走 POST /api/models/discover（已保存提供方仍走 /providers/{pid}/discover）；
+    提供方表单有「重试策略」下拉（选项来自后端 retry_policies、提交字段 retry）；
+    弹层右上「打开配置文件」按钮绑到 POST /api/models/config/open（路径来自
+    GET /api/models/config-path，不在前端拼路径）；「隐私与授权」面板可写
+    （GET + PUT /api/privacy/preferences，只改外部处理开关与提供方清单）；
+    模型卡排序（上移 / 下移）在顺序变化时走 POST .../models/reorder；
   - settings.css：只用 style.css 的 :root 令牌，不自己另起配色；settings.js 里出现的
     settings-* 类都有样式定义（否则面板裸奔）；
-  - 消费的响应字段 ⊆ 规格 §3 的字段表（防止前端偷偷依赖契约外字段）。
+  - 消费的响应字段 ⊆ 规格 §3 + §8.2/§8.3 的字段表（防止前端偷偷依赖契约外字段）。
+
+断言风格：对源码的断言一律只报"没找到什么"，不打印整份文件——否则一条失败会把
+几百行 JS 糊到日志里，反而看不见到底缺哪一条。
 
 后端 models_api.py 由 T2 并行实现：文件不存在时路径自洽用例 skip（不算失败），
 文件存在时逐条真断言。
@@ -60,6 +74,34 @@ def _shape(path: str) -> str:
     return re.sub(r"\{[^/}]+\}", "{}", path)
 
 
+def _has(text: str, needle: str) -> bool:
+    return needle in text
+
+
+def _matches(text: str, pattern: str) -> bool:
+    return re.search(pattern, text, re.S) is not None
+
+
+def _calls(body: str, name: str) -> bool:
+    """body 里是否调用了名为 name 的函数（允许把逻辑抽成小函数）。"""
+    return re.search(r"\b" + re.escape(name) + r"\s*\(", body) is not None
+
+
+def _reaches(body: str, all_bodies: dict, pattern: str) -> bool:
+    """body 自身匹配 pattern，或 body 直接调用的某个函数体匹配 pattern。
+
+    为什么允许一层间接：规格要求的是"这件事有没有做"，不是"代码写在哪一行"；
+    把"落盘草稿模型""按新顺序 reorder"抽成小函数是合理写法，不该被测试挡回去。
+    只向下看一层：再深就会变成"随便调用什么都能蒙混过关"的弱断言。
+    """
+    if _matches(body, pattern):
+        return True
+    for name, callee in all_bodies.items():
+        if _calls(body, name) and _matches(callee, pattern):
+            return True
+    return False
+
+
 def _parse_settings_api(source: str) -> dict:
     """从 settings.js 抽 SETTINGS_API 常量（名字 → 路径模板）。"""
     matched = re.search(r"const SETTINGS_API\s*=\s*\{(.*?)\n\s*\};", source, re.S)
@@ -79,6 +121,74 @@ def _parse_router_paths(source: str, fallback_prefix: str = "") -> set:
     paths = re.findall(
         r"@router\.(?:get|post|put|delete|patch)\(\s*[\"']([^\"']*)[\"']", source)
     return {prefix + path for path in paths}
+
+
+_FUNCTION_RE = re.compile(r"\bfunction\s+([A-Za-z_$][\w$]*)\s*\(")
+
+
+def _brace_block(source: str, open_index: int) -> str:
+    """从 source[open_index] == "{" 起做括号配平，返回花括号内部文本（跳过字符串与注释）。"""
+    depth = 0
+    index = open_index
+    quote = ""
+    while index < len(source):
+        char = source[index]
+        if quote:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in "\"'`":
+            quote = char
+        elif char == "/" and source[index + 1:index + 2] == "/":
+            newline = source.find("\n", index)
+            index = len(source) if newline < 0 else newline
+            continue
+        elif char == "/" and source[index + 1:index + 2] == "*":
+            end = source.find("*/", index + 2)
+            index = len(source) if end < 0 else end + 2
+            continue
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return source[open_index + 1:index]
+        index += 1
+    return ""
+
+
+def _function_body(source: str, name: str) -> str:
+    """取 settings.js 里某个具名函数的函数体（花括号内文本）；找不到返回 ""。
+
+    用括号配平而不是整行正则：函数体里还有箭头函数与嵌套闭包，按行切会切歪。
+    找不到返回 ""，调用点用 assertTrue 断言"函数存在且非空"，缺函数时用例会红。
+    """
+    for matched in _FUNCTION_RE.finditer(source):
+        if matched.group(1) != name:
+            continue
+        open_index = source.find("{", matched.end())
+        if open_index < 0:
+            return ""
+        return _brace_block(source, open_index)
+    return ""
+
+
+def _all_function_bodies(source: str) -> dict:
+    """函数名 → 函数体。用于"这段逻辑在哪个函数里"的定位，不依赖具体取名。"""
+    bodies = {}
+    for matched in _FUNCTION_RE.finditer(source):
+        name = matched.group(1)
+        if name in bodies:
+            continue
+        open_index = source.find("{", matched.end())
+        if open_index < 0:
+            continue
+        bodies[name] = _brace_block(source, open_index)
+    return bodies
 
 
 class SettingsUiStructureTest(unittest.TestCase):
@@ -109,7 +219,8 @@ class SettingsUiStructureTest(unittest.TestCase):
             self.assertIn(attr, dialog_tag, f"弹层缺少 {attr}")
         self.assertIn('id="settingsTitle"', html)
 
-        for node_id in ("settingsCloseBtn", "settingsNav", "settingsPane", "settingsStatus"):
+        for node_id in ("settingsCloseBtn", "settingsOpenConfigBtn", "settingsNav",
+                        "settingsPane", "settingsStatus"):
             self.assertIn(f'id="{node_id}"', html, f"弹层缺少 #{node_id}")
 
         nav = html.split('id="settingsNav"', 1)[1].split("</nav>", 1)[0]
@@ -134,30 +245,37 @@ class SettingsUiStructureTest(unittest.TestCase):
                          "脚本顺序应为 shell → settings → cards → chat → profiles → batch → monitor")
 
     def test_shell_only_binds_the_dialog(self):
-        """shell.js 只做绑定：按钮 / 关闭按钮 / 点遮罩 / Esc 都接到 SettingsPanel。"""
+        """shell.js 只做绑定：按钮 / 关闭按钮 / 点遮罩 / Esc 都接到 SettingsPanel。
+
+        「打开配置文件」属于弹层内交互，接线在 settings.js（另有用例断言），
+        不归 shell.js：外壳只管开合，不碰面板内容。
+        """
         js = self.shell
-        self.assertIn("function bindSettings()", js)
-        self.assertIn("bindSettings();", js, "DOMContentLoaded 里没有调用 bindSettings")
+        self.assertTrue(_has(js, "function bindSettings()"), "shell.js 里没有 bindSettings")
+        self.assertTrue(_has(js, "bindSettings();"), "DOMContentLoaded 里没有调用 bindSettings")
         for node in ("#settingsBtn", "#settingsDialog", "#settingsCloseBtn"):
-            self.assertIn(f'$("{node}")', js, f"shell.js 没有绑定 {node}")
+            self.assertTrue(_has(js, f'$("{node}")'), f"shell.js 没有绑定 {node}")
         for call in ("api.open()", "api.close()", "api.isOpen()"):
-            self.assertIn(call, js, f"shell.js 没有调用 SettingsPanel 的 {call}")
-        self.assertIn('e.key !== "Escape"', js, "缺少 Esc 关闭")
-        self.assertIn("e.target !== dialog", js, "缺少点遮罩关闭（点卡片本体不关）")
+            self.assertTrue(_has(js, call), f"shell.js 没有调用 SettingsPanel 的 {call}")
+        self.assertTrue(_has(js, 'e.key !== "Escape"'), "shell.js 缺少 Esc 关闭")
+        self.assertTrue(_has(js, "e.target !== dialog"), "shell.js 缺少点遮罩关闭（点卡片本体不关）")
         self.assertTrue("/api/models" not in js,
                         "外壳不该直接请求模型接口（面板逻辑应在 settings.js）")
         self.assertTrue('$("#settingsPane")' not in js,
                         "外壳不该渲染面板内容（只做开合绑定）")
+        self.assertTrue("#settingsOpenConfigBtn" not in js,
+                        "「打开配置文件」按钮接线属于 settings.js（§8.4 第 5 条），不该外溢到外壳")
 
     def test_settings_panel_api_exposed(self):
         """window.SettingsPanel = { open, close, isOpen }，且是普通 script（无 ES module）。"""
         js = self.js
-        self.assertRegex(js, r"SettingsPanel\s*=\s*\{")
-        self.assertRegex(js, r"open:\s*function")
-        self.assertRegex(js, r"close:\s*function")
-        self.assertRegex(js, r"isOpen:\s*isOpen")
-        self.assertIn('"use strict";', js)
-        self.assertNotRegex(js, r"^\s*(?:import|export)\s", "现有前端都是普通 script，不用 ES module")
+        self.assertTrue(_matches(js, r"SettingsPanel\s*=\s*\{"), "没有暴露 window.SettingsPanel")
+        self.assertTrue(_matches(js, r"open:\s*function"), "SettingsPanel 缺少 open")
+        self.assertTrue(_matches(js, r"close:\s*function"), "SettingsPanel 缺少 close")
+        self.assertTrue(_matches(js, r"isOpen:\s*isOpen"), "SettingsPanel 缺少 isOpen")
+        self.assertTrue(_has(js, '"use strict";'), "settings.js 没有开启严格模式")
+        self.assertFalse(_matches(js, r"(?m)^\s*(?:import|export)\s"),
+                         "现有前端都是普通 script，不用 ES module")
 
     def test_settings_js_never_builds_html_from_user_input(self):
         """禁止 innerHTML 类 HTML 拼接：模型 ID / 显示名称 / base_url / 密钥都是用户输入。"""
@@ -165,8 +283,8 @@ class SettingsUiStructureTest(unittest.TestCase):
         # 只认真正的 HTML 注入点（赋值/追加/文档写入），注释里提到这个词不算违规
         sinks = re.findall(r"\.(?:innerHTML|outerHTML)\b|insertAdjacentHTML\(|\bdocument\.write\(", js)
         self.assertEqual(sinks, [], f"settings.js 出现 HTML 注入点：{sinks}：用户输入必须走 textContent")
-        self.assertIn("document.createElement", js, "建 DOM 应走 createElement")
-        self.assertIn("textContent", js)
+        self.assertTrue(_has(js, "document.createElement"), "建 DOM 应走 createElement")
+        self.assertTrue(_has(js, "textContent"), "写文本应走 textContent")
 
     def test_settings_css_reuses_root_tokens(self):
         """settings.css 只用 style.css 已声明的 :root 令牌，不另起一套配色。"""
@@ -177,7 +295,8 @@ class SettingsUiStructureTest(unittest.TestCase):
         self.assertTrue(used, "settings.css 没用到任何 :root 令牌")
         self.assertEqual(sorted(used - declared), [], "settings.css 用了 style.css 未声明的变量")
         # 只禁止"重新定义 :root"，注释里提到这个词没问题
-        self.assertNotRegex(self.css, r"(?m)^\s*:root\s*\{", "settings.css 不该重新定义 :root 配色")
+        self.assertFalse(_matches(self.css, r"(?m)^\s*:root\s*\{"),
+                         "settings.css 不该重新定义 :root 配色")
 
     def test_settings_classes_have_styles(self):
         """settings.js 里出现的 settings-* 类在 settings.css 都有定义（否则面板裸奔）。"""
@@ -239,41 +358,293 @@ class SettingsUiStructureTest(unittest.TestCase):
         """用户点名要的控件与提示文案齐备（中文界面）。"""
         js = self.js
         required = (
-            "Provider ID", "显示名称", "API 地址", "API 协议", "API 密钥", "启用",
+            "Provider ID", "显示名称", "API 地址", "API 协议", "API 密钥", "重试策略", "启用",
             "上下文窗口", "最大输出 token 数", "输入类型", "推理等级", "API 参数值",
             "获取可用模型", "恢复默认模型", "＋ 添加模型", "保存模型目录", "＋ 添加档位",
             "导入所选模型", "设为当前", "删除提供方", "删除模型", "关闭思考",
             "留空表示不改", "本站运行期不支持", "内置提供方不可删除",
             "已配置(环境变量)", "已配置(本地)", "未配置", "内置默认模型目录", "已自定义模型目录",
         )
-        for text in required:
-            self.assertIn(text, js, f"settings.js 缺少文案：{text}")
+        missing = [text for text in required if not _has(js, text)]
+        self.assertEqual(missing, [], f"settings.js 缺少文案：{missing}")
         # 输入类型 / 档位清单来自后端响应，前端不硬编码枚举
-        self.assertIn("input_types", js)
-        self.assertIn("reasoning_tiers", js)
+        for field in ("input_types", "reasoning_tiers"):
+            self.assertTrue(_has(js, field), f"settings.js 没有读后端字段 {field}")
 
     def test_token_count_parse_and_format_rule(self):
         """1M / 128K / 65536 可解析为整数；显示时 1000000 → 1M、131072 → 128K。"""
         js = self.js
-        self.assertIn("function parseTokenCount", js)
-        self.assertIn("function formatTokenCount", js)
+        self.assertTrue(_has(js, "function parseTokenCount"), "缺少 parseTokenCount")
+        self.assertTrue(_has(js, "function formatTokenCount"), "缺少 formatTokenCount")
         # M = 1000000、K = 1024：两种写法都能原样往返
-        self.assertIn("1000000", js)
-        self.assertIn("1024", js)
-        self.assertRegex(js, r"%\s*1000000\s*===\s*0", "显示时应先判定 M（整除 1000000）")
-        self.assertRegex(js, r"%\s*1024\s*===\s*0", "其次判定 K（整除 1024）")
+        self.assertTrue(_has(js, "1000000"), "缺少 1000000（M 的换算基数）")
+        self.assertTrue(_has(js, "1024"), "缺少 1024（K 的换算基数）")
+        self.assertTrue(_matches(js, r"%\s*1000000\s*===\s*0"),
+                        "显示时应先判定 M（整除 1000000）")
+        self.assertTrue(_matches(js, r"%\s*1024\s*===\s*0"),
+                        "其次判定 K（整除 1024）")
         for sample in ("1M", "128K", "65536"):
-            self.assertIn(sample, js, f"输入提示里应点到 {sample} 这种写法")
+            self.assertTrue(_has(js, sample), f"输入提示里应点到 {sample} 这种写法")
 
     def test_write_actions_refresh_from_server(self):
         """写成功后重新 GET /api/models 全量刷新（前端不维护"我猜的服务端状态"）。"""
         js = self.js
-        self.assertIn('request("GET", SETTINGS_API.models)', js)
+        self.assertTrue(_has(js, 'request("GET", SETTINGS_API.models)'),
+                        "没有 GET /api/models 的全量刷新入口")
         self.assertGreaterEqual(js.count("await loadAll()"), 5,
                                 "保存提供方/密钥/设为当前/删除/模型目录/恢复默认/导入后都应全量刷新")
-        self.assertIn("state.data = data", js)
-        self.assertIn("showStatus(\"error\", err.message)", js)
-        self.assertIn("payload.detail", js, "错误必须把后端 detail 原文拿出来显示")
+        self.assertTrue(_has(js, "state.data = data"), "loadAll 没有把响应写回 state.data")
+        self.assertTrue(_has(js, 'showStatus("error", err.message)'),
+                        "失败时没有把错误显示到状态区")
+        self.assertTrue(_has(js, "payload.detail"),
+                        "错误必须把后端 detail 原文拿出来显示")
+
+
+class SettingsDraftModeUiTest(unittest.TestCase):
+    """§8.4 第 1–3 条：未保存提供方那一屏（state.creating）也要能取模型、改参数、落目录。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        if not SETTINGS_JS.is_file():
+            raise unittest.SkipTest(f"settings.js 缺失：{SETTINGS_JS}")
+        cls.js = _read(SETTINGS_JS)
+
+    def test_creating_state_renders_model_catalog(self):
+        """新建态右栏 = 表单 + 模型目录（§8.4 第 1 条），目录由表单输入拼的草稿驱动。"""
+        detail = _function_body(self.js, "buildDetailColumn")
+        self.assertTrue(detail, "settings.js 里没有 buildDetailColumn（右栏渲染入口）")
+        self.assertTrue(_has(detail, "if (state.creating) {"),
+                        "buildDetailColumn 里没有 state.creating 分支：新建态根本进不了"
+                        "「表单 + 模型目录」这条路")
+
+        creating_branch = detail.split("if (state.creating) {", 1)[1].split("return col;", 1)[0]
+        self.assertTrue(_has(creating_branch, "buildProviderForm(null)"),
+                        "新建态没有渲染提供方表单")
+        self.assertTrue(_has(creating_branch, "buildModelCatalog("),
+                        "新建态右栏没有渲染模型目录：模型参数面板只在「已保存」之后才出现，"
+                        "「先建提供方再取模型」依旧卡在第一步（§8.4 第 1 条）")
+
+        # 目录要喂给 draftProvider()：不能拿一个已保存提供方 / null 去渲染新建态目录
+        draft_call = re.search(r"buildModelCatalog\(\s*(\w+)\s*\)", creating_branch)
+        self.assertIsNotNone(draft_call, "解析不到新建态 buildModelCatalog 的实参")
+        self.assertEqual(draft_call.group(1), "draft",
+                         "新建态的模型目录应由 draftProvider() 的结果驱动，"
+                         f"实际用的是 {draft_call.group(1)!r}")
+        self.assertTrue(_has(creating_branch, "draftProvider()"),
+                        "新建态没有调用 draftProvider() 拼草稿提供方（§8.4 第 1 条）")
+
+        # 草稿提供方的字段必须来自表单当前输入（ID / 地址 / 协议 / 密钥），而不是落盘对象
+        draft_body = _function_body(self.js, "draftProvider")
+        self.assertTrue(draft_body, "settings.js 里没有 draftProvider()")
+        self.assertTrue(_has(draft_body, "state.form"),
+                        "draftProvider 没有读表单草稿 state.form：渲染时读 DOM 只会读到空串")
+        absent = [field for field in ("id", "baseUrl", "protocol", "retryPolicy")
+                  if not _has(draft_body, f"form.{field}")]
+        self.assertEqual(absent, [],
+                         f"draftProvider 没有把表单里的这些输入拼进草稿提供方：{absent}")
+        # 密钥：新建态的 discover 要靠它（非 loopback 的提供方没有密钥必然失败），
+        # 字段名两种写法都算（apiKey / api_key），只要草稿里带上了表单的密钥即可
+        self.assertTrue(_has(draft_body, "form.apiKey") or _has(draft_body, "api_key"),
+                        "draftProvider 没有带上表单里的 API 密钥：新建态「获取可用模型」"
+                        "将发不出带密钥的请求（非本地提供方会直接失败，§8.4 第 2 条）")
+        self.assertTrue(_has(draft_body, "draft: true"),
+                        "草稿提供方没有 draft: true 标记：后续无法区分「未保存」与「已保存」")
+
+        # 「获取可用模型」按钮在模型目录里，新建态因此也能看到
+        catalog = _function_body(self.js, "buildModelCatalog")
+        self.assertTrue(catalog, "settings.js 里没有 buildModelCatalog")
+        self.assertTrue(_has(catalog, "获取可用模型"), "模型目录里缺少「获取可用模型」按钮")
+        self.assertTrue(_has(catalog, "discoverModels("),
+                        "「获取可用模型」按钮没有接到 discoverModels")
+
+    def test_draft_discover_uses_adhoc_discover_endpoint(self):
+        """新建态「获取可用模型」走 POST /api/models/discover；已保存仍走 /providers/{pid}/discover。"""
+        all_bodies = _all_function_bodies(self.js)
+        draft_body = next((body for body in all_bodies.values()
+                           if "SETTINGS_API.discover" in body), "")
+        saved_body = next((body for body in all_bodies.values()
+                           if "SETTINGS_API.providerDiscover" in body), "")
+        self.assertTrue(draft_body,
+                        "没有任何代码调 SETTINGS_API.discover：新建态的「获取可用模型」没有走 "
+                        "POST /api/models/discover（§8.4 第 2 条）——未保存的提供方还没有 pid，"
+                        "走 /providers/{pid}/discover 必然 404")
+        self.assertTrue(_matches(draft_body, r'request\(\s*"POST"\s*,\s*SETTINGS_API\.discover'),
+                        "SETTINGS_API.discover 不是以 POST 发出的（§8.3 表格）")
+        self.assertTrue(saved_body,
+                        "已保存提供方那条 /providers/{pid}/discover 被删掉了："
+                        "已保存态应当继续走它")
+        self.assertTrue(_matches(saved_body, r'request\(\s*"POST"\s*,\s*apiPath\(\s*SETTINGS_API\.providerDiscover'),
+                        "已保存提供方仍应走 POST /api/models/providers/{pid}/discover")
+
+        # 草稿 discover 的请求体来自表单：地址必填、密钥可空且只进请求体
+        absent = [field for field in ("base_url", "api_key") if not _has(draft_body, field)]
+        self.assertEqual(absent, [], f"草稿 discover 的请求体缺少：{absent}")
+        # 结果要打上 mode 标记，否则结果区不知道该挂到「新建」还是「已保存」那一屏
+        self.assertTrue(_has(draft_body, '"draft"'),
+                        "草稿 discover 的结果没有 draft 模式标记："
+                        "buildDetailColumn 无法判断该不该渲染这块结果")
+        self.assertTrue(_has(saved_body, '"saved"'),
+                        "已保存态 discover 的结果没有 saved 模式标记")
+
+    def test_saving_new_provider_flushes_draft_models(self):
+        """新建态保存提供方时，草稿里的模型要逐条落盘（§8.4 第 3 条）。"""
+        all_bodies = _all_function_bodies(self.js)
+        body = _function_body(self.js, "saveProvider")
+        self.assertTrue(body, "settings.js 里没有 saveProvider")
+        branches = body.split("if (isNew) {", 1)
+        self.assertEqual(len(branches), 2, "saveProvider 里没有 isNew 分支")
+        new_branch = branches[1].split("} else {", 1)[0]
+        self.assertTrue(_has(new_branch, "SETTINGS_API.providers"),
+                        "新建态没有先 POST /api/models/providers 建提供方")
+        flush_pattern = re.escape("SETTINGS_API.providerModels")
+        self.assertTrue(_reaches(new_branch, all_bodies, flush_pattern),
+                        "新建态的草稿模型没有逐条 POST /providers/{pid}/models 落盘："
+                        "新建态下导入/添加的模型会随表单一起丢掉（§8.4 第 3 条）")
+        flush_body = next((callee for name, callee in all_bodies.items()
+                           if _calls(new_branch, name)
+                           and _matches(callee, flush_pattern)), "")
+        self.assertTrue(_has(new_branch, "state.models") or _has(flush_body, "state.models"),
+                        "落盘草稿模型时没有读 state.models：新建态导入的模型不在别处")
+        # 失败要说清"提供方已保存、哪些模型没存进去"
+        self.assertTrue(_has(body, "已保存"),
+                        "新建态保存失败时缺少「提供方已保存」这类中文说明")
+
+
+class SettingsProviderFormUiTest(unittest.TestCase):
+    """§8.4 第 4/5/7 条：重试策略下拉、打开配置文件按钮、模型排序。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        if not SETTINGS_JS.is_file():
+            raise unittest.SkipTest(f"settings.js 缺失：{SETTINGS_JS}")
+        cls.js = _read(SETTINGS_JS)
+        cls.index = _read(INDEX_HTML) if INDEX_HTML.is_file() else ""
+
+    def test_retry_policy_select_comes_from_backend_and_is_submitted(self):
+        """重试策略：选项来自 view().retry_policies，提交字段是 retry（§8.4 第 4 条）。"""
+        options_body = _function_body(self.js, "retryPolicyOptions")
+        self.assertTrue(options_body, "settings.js 里没有 retryPolicyOptions（选项来源）")
+        self.assertTrue(_has(options_body, "retry_policies"),
+                        "重试策略选项没有读后端 retry_policies（§8.2）："
+                        "前端硬编码枚举会与后端脱钩")
+
+        form_body = _function_body(self.js, "buildProviderForm")
+        self.assertTrue(form_body, "settings.js 里没有 buildProviderForm")
+        self.assertTrue(_has(form_body, "重试策略"), "提供方表单里没有「重试策略」这一项")
+        self.assertTrue(_has(form_body, "retryPolicyOptions()"),
+                        "「重试策略」下拉没有用后端清单渲染")
+        self.assertTrue(_has(form_body, "settingsProviderRetry"),
+                        "「重试策略」下拉没有稳定的 id（保存时读不到用户选择）")
+        self.assertTrue(_has(form_body, "provider.retry"),
+                        "已保存提供方的重试策略没有从 provider.retry.policy 回填")
+
+        save_body = _function_body(self.js, "saveProvider")
+        self.assertTrue(save_body, "settings.js 里没有 saveProvider")
+        self.assertTrue(_has(save_body, "settingsProviderRetry"),
+                        "保存提供方时没有读取「重试策略」下拉")
+        policy_expr = re.search(r"retry\s*:\s*\{[^}]*policy\s*:\s*([^,}\n]+)", save_body)
+        self.assertIsNotNone(policy_expr,
+                             "保存提供方的请求体里没有 retry: {policy: ...}"
+                             "（§8.1/§8.4 第 4 条）")
+        self.assertTrue(_matches(policy_expr.group(1), r"(?i)retry"),
+                        "retry.policy 不是从「重试策略」下拉读出来的："
+                        "写死字面量等于用户选了也不生效")
+
+    def test_open_config_button_uses_config_path_and_config_open(self):
+        """弹层右上按钮 → GET config-path + POST config/open（§8.4 第 5 条、§8.3）。"""
+        self.assertIn('id="settingsOpenConfigBtn"', self.index,
+                      "index.html 里缺少 #settingsOpenConfigBtn（弹层右上「打开配置文件」）")
+        self.assertTrue(_has(self.js, "#settingsOpenConfigBtn"),
+                        "settings.js 没有绑定 #settingsOpenConfigBtn 的点击")
+
+        open_body = next((text for text in _all_function_bodies(self.js).values()
+                          if "SETTINGS_API.configOpen" in text), "")
+        self.assertTrue(open_body,
+                        "settings.js 里没有处理「打开配置文件」的代码：按钮点了没有请求"
+                        "（§8.4 第 5 条）")
+        self.assertTrue(_matches(open_body, r'request\(\s*"POST"\s*,\s*SETTINGS_API\.configOpen'),
+                        "「打开配置文件」没有 POST /api/models/config/open")
+        self.assertTrue(_matches(open_body, r'target\s*:\s*"models"'),
+                        "「打开配置文件」没有按枚举传 target: \"models\""
+                        "（后端只接受枚举，绝不接受客户端传路径）")
+        self.assertTrue(_has(open_body, "err.message"),
+                        "「打开配置文件」失败时没有把后端 detail 显示到状态区")
+
+        # 路径由 GET /api/models/config-path 取：前端不拼路径、也拿得到 exists 提示
+        self.assertTrue(_matches(self.js, r'request\(\s*"GET"\s*,\s*SETTINGS_API\.configPath'),
+                        "settings.js 没有 GET /api/models/config-path：路径应由服务端解析"
+                        "（前端拼路径会与服务端的 data/ 位置脱钩，§8.3）")
+        paths_bodies = [text for text in _all_function_bodies(self.js).values()
+                        if "SETTINGS_API.configPath" in text]
+        self.assertTrue(any(_has(text, "models_exists") for text in paths_bodies),
+                        "config-path 的 models_exists 没有被消费：无法告诉用户"
+                        "「保存一次配置后才会生成」")
+
+    def test_model_cards_can_be_reordered_and_order_is_posted(self):
+        """模型卡有上移 / 下移，顺序变化时 POST .../models/reorder（§8.4 第 7 条）。"""
+        card_body = _function_body(self.js, "buildModelCard")
+        self.assertTrue(card_body, "settings.js 里没有 buildModelCard")
+        self.assertTrue(_has(card_body, "settings-drag-handle"),
+                        "模型卡第一行缺少拖动把手 ≡")
+        absent = [label for label in ("上移模型", "下移模型") if not _has(card_body, label)]
+        self.assertEqual(absent, [],
+                         f"模型卡缺少键盘可达的排序入口：{absent}（§8.4 第 7 条）")
+        # 按钮的 handlers 必须指向真实存在的函数（悬空引用会让整张卡渲染直接抛异常）
+        for arrow in ("↑", "↓"):
+            matched = re.search(r'button\(\s*"' + arrow + r'".*?=>\s*([A-Za-z_$][\w$]*)\(',
+                                card_body, re.S)
+            self.assertIsNotNone(matched, f"解析不到「{arrow}」按钮的处理函数")
+            handler = matched.group(1)
+            self.assertTrue(_function_body(self.js, handler),
+                            f"「{arrow}」按钮调用的 {handler}() 在 settings.js 里没有定义："
+                            f"渲染模型卡时会直接抛 ReferenceError")
+
+        save_body = _function_body(self.js, "saveCatalog")
+        self.assertTrue(save_body, "settings.js 里没有 saveCatalog")
+        reorder_pattern = r'request\(\s*"POST"\s*,\s*apiPath\(\s*SETTINGS_API\.providerModelsReorder'
+        self.assertTrue(_reaches(save_body, _all_function_bodies(self.js), reorder_pattern),
+                        "保存模型目录时没有调 POST .../models/reorder：顺序有语义"
+                        "（第一个启用的模型就是默认模型），改了顺序却没落盘等于没改")
+        self.assertTrue(_has(save_body, "origOrder"),
+                        "reorder 没有与「磁盘上的原顺序」比较：每次保存都重排会触发无谓写盘")
+
+
+class SettingsPrivacyPanelTest(unittest.TestCase):
+    """§8.4 第 8 条：隐私与授权面板可编辑（否则「获取可用模型」的 403 在页面里解不掉）。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        if not SETTINGS_JS.is_file():
+            raise unittest.SkipTest(f"settings.js 缺失：{SETTINGS_JS}")
+        cls.js = _read(SETTINGS_JS)
+        cls.css = _read(SETTINGS_CSS)
+        cls.privacy_bodies = [
+            body for name, body in _all_function_bodies(cls.js).items()
+            if "privacy" in name.lower() or "privacy" in body.lower()
+        ]
+
+    def test_privacy_panel_reads_and_writes_preferences(self):
+        """读 GET、写 PUT /api/privacy/preferences（§8.4 第 8 条）。"""
+        self.assertTrue(_matches(self.js, r'request\(\s*"GET"\s*,\s*SETTINGS_API\.privacyPreferences'),
+                        "隐私面板没有 GET /api/privacy/preferences")
+        self.assertTrue(_matches(self.js, r'request\(\s*"PUT"\s*,\s*SETTINGS_API\.privacyPreferences'),
+                        "隐私面板只读不可写：没有 PUT /api/privacy/preferences，"
+                        "未授权时用户只能跳出页面手改文件（§8.4 第 8 条）")
+
+    def test_privacy_panel_only_edits_external_processing_blocks(self):
+        """只改外部处理开关 + 提供方清单，save_enabled / retention_days 原样回传。"""
+        joined = "\n".join(self.privacy_bodies)
+        self.assertTrue(joined, "settings.js 里没有与隐私相关的函数")
+        for field in ("external_processing_enabled", "external_processing_providers"):
+            self.assertTrue(_has(joined, field),
+                            f"隐私面板没有给出 {field} 的编辑入口：403 文案让用户来这里勾选，"
+                            f"缺了就等于死路")
+        for field in ("save_enabled", "retention_days"):
+            self.assertTrue(_has(joined, field),
+                            f"隐私面板提交时没有原样回传 {field}：PUT 是整份覆盖，"
+                            f"漏字段会把用户的其它设置静默改掉")
+        self.assertTrue(_has(joined, "checkboxInput("),
+                        "隐私面板没有任何可勾选控件：说明仍然只是只读说明页")
 
     def test_privacy_pane_is_operable(self):
         """「隐私与授权」面板可操作：总开关 + 提供方勾选 + 保存（PUT 完整载荷）。
@@ -319,7 +690,7 @@ class SettingsUiStructureTest(unittest.TestCase):
 
 
 class SettingsApiContractTest(unittest.TestCase):
-    """前后端路径自洽 + 写操作动词与规格 §3.2 表格逐条一致。"""
+    """前后端路径自洽 + 写操作动词与规格 §3.2 + §8.3 表格逐条一致。"""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -336,10 +707,17 @@ class SettingsApiContractTest(unittest.TestCase):
         expected_keys = {
             "models", "providers", "provider", "providerSecret", "providerActivate",
             "providerDiscover", "providerModels", "providerModel",
-            "providerModelsRestore", "privacyPreferences",
+            "providerModelsRestore", "providerModelsReorder",
+            "discover", "configPath", "configOpen", "privacyPreferences",
         }
         self.assertEqual(set(self.api), expected_keys, f"SETTINGS_API 键集合不一致：{sorted(self.api)}")
+        # 键名以 settings.js 的实际命名为准：模型排序那条叫 providerModelsReorder
         self.assertEqual(self.api["models"], "/api/models")
+        self.assertEqual(self.api["providerModelsReorder"],
+                         "/api/models/providers/{pid}/models/reorder")
+        self.assertEqual(self.api["discover"], "/api/models/discover")
+        self.assertEqual(self.api["configPath"], "/api/models/config-path")
+        self.assertEqual(self.api["configOpen"], "/api/models/config/open")
 
     def test_every_path_exists_in_backend_routes(self):
         """settings.js 的每条路径模板都能在 models_api.py 路由表里找到（隐私那条在 privacy_api）。"""
@@ -356,8 +734,13 @@ class SettingsApiContractTest(unittest.TestCase):
         self.assertIn("privacyPreferences", self.api)
         if not PRIVACY_API.is_file():
             self.skipTest("privacy_api.py 不存在，跳过隐私路径断言")
-        shapes = {_shape(path) for path in _parse_router_paths(_read(PRIVACY_API), "/api/privacy")}
+        source = _read(PRIVACY_API)
+        shapes = {_shape(path) for path in _parse_router_paths(source, "/api/privacy")}
         self.assertIn(_shape(self.api["privacyPreferences"]), shapes)
+        for method in ("get", "put"):
+            self.assertTrue(_matches(source, rf"@router\.{method}\(\s*[\"']/preferences[\"']"),
+                            f"privacy_api.py 缺少 {method.upper()} /preferences："
+                            f"隐私面板的读写会 405/404")
 
     def test_http_methods_match_contract_table(self):
         """(HTTP 方法, 路径模板) 与规格 §3.2 表格逐条对应，多一条少一条都算不一致。
@@ -365,6 +748,7 @@ class SettingsApiContractTest(unittest.TestCase):
         隐私面板两条也纳入契约：GET /api/privacy/preferences 取偏好、
         PUT /api/privacy/preferences 保存（路由在 web/privacy_api.py）。
         """
+        """(HTTP 方法, 路径模板) 与规格 §3.2 + §8.3 表格逐条对应，多一条少一条都算不一致。"""
         expected = {
             ("GET", "models"),
             ("POST", "providers"),
@@ -376,6 +760,12 @@ class SettingsApiContractTest(unittest.TestCase):
             ("POST", "providerModels"),
             ("DELETE", "providerModel"),
             ("POST", "providerModelsRestore"),
+            # 增补 §8.3：模型排序 / 未保存提供方 discover / 配置文件定位与打开
+            ("POST", "providerModelsReorder"),
+            ("POST", "discover"),
+            ("GET", "configPath"),
+            ("POST", "configOpen"),
+            # 增补 §8.4 第 8 条：隐私面板可读写
             ("GET", "privacyPreferences"),
             ("PUT", "privacyPreferences"),
         }
@@ -383,14 +773,16 @@ class SettingsApiContractTest(unittest.TestCase):
             r'request\(\s*"(GET|POST|PUT|DELETE)"\s*,\s*apiPath\(\s*SETTINGS_API\.(\w+)', self.js))
         found |= set(re.findall(
             r'request\(\s*"(GET|POST|PUT|DELETE)"\s*,\s*SETTINGS_API\.(\w+)', self.js))
-        self.assertEqual(found, expected, "前端调用的接口动词/路径与规格 §3.2 不一致")
+        self.assertEqual(found, expected,
+                         "前端调用的接口动词/路径与规格 §3.2 + §8.3 不一致："
+                         f"少了 {sorted(expected - found)}，多了 {sorted(found - expected)}")
 
     def test_app_includes_models_router(self):
         """models_api 的 router 必须被 app.py include（否则前端拿到的全是 404）。"""
         app_source = _read(APP_PY)
-        self.assertIn("models_api", app_source, "app.py 没有引用 web/models_api.py")
-        self.assertRegex(app_source, r"include_router\([^)]*models",
-                         "app.py 没有把 models 路由 include 进 FastAPI app")
+        self.assertTrue(_has(app_source, "models_api"), "app.py 没有引用 web/models_api.py")
+        self.assertTrue(_matches(app_source, r"include_router\([^)]*models"),
+                        "app.py 没有把 models 路由 include 进 FastAPI app")
 
 
 class SettingsApiLiveRoutesTest(unittest.TestCase):
@@ -419,7 +811,7 @@ class SettingsApiLiveRoutesTest(unittest.TestCase):
             self.assertIn(_shape(template), registered, f"{name} → {template} 未注册进 app")
 
     def test_get_models_returns_contract_top_level_keys(self):
-        """GET /api/models 的顶层键与规格 §3.1 一致（密钥永不出现明文）。"""
+        """GET /api/models 的顶层键与规格 §3.1 + §8.2 一致（密钥永不出现明文）。"""
         from fastapi.testclient import TestClient
         client = TestClient(self.webapp.app)
         resp = client.get("/api/models")
@@ -428,30 +820,51 @@ class SettingsApiLiveRoutesTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 200, resp.text)
         payload = resp.json()
         for key in ("schema_version", "active", "protocols", "input_types",
-                    "reasoning_tiers", "providers", "warnings"):
+                    "reasoning_tiers", "retry_policies", "paths", "providers", "warnings"):
             self.assertIn(key, payload, f"GET /api/models 缺少顶层键 {key}")
+        # 重试策略清单是「选项来源」：id + 中文 label 都要有（前端直接拿来当 <option>）
+        policies = payload["retry_policies"]
+        self.assertEqual([item.get("id") for item in policies], ["default", "off", "aggressive"],
+                         "retry_policies 的 id 集合与 §8.1 的 RETRY_POLICIES 不一致")
+        for item in policies:
+            self.assertTrue(item.get("label"), f"retry_policies 项缺少中文 label：{item}")
+        # 提供方视图带 retry（§8.2），默认策略是 default
+        provider = payload["providers"][0]
+        self.assertIn("retry", provider, "provider view 缺少 retry 字段（§8.2）")
+        self.assertEqual(provider["retry"].get("policy"), "default",
+                         "缺省 retry.policy 必须是 default（缺省行为不变，§8.1）")
+        # 配置文件路径只回路径，不含密钥
+        self.assertEqual(set(payload["paths"]), {"models", "secrets"})
         # 密钥只以掩码/状态字段出现
         self.assertNotIn("sk-", resp.text, "响应里出现了疑似明文密钥")
         self.assertNotIn("api_key\"", resp.text)
 
 
 class SettingsConsumedFieldsTest(unittest.TestCase):
-    """settings.js 消费的 snake_case 字段 ⊆ 规格 §3 的字段表（契约冻结点）。"""
+    """settings.js 消费的 snake_case 字段 ⊆ 规格 §3 + §8.2/§8.3 的字段表（契约冻结点）。"""
 
     #: 规格 §3.1 / §3.3 出现的响应字段（含 limits、model view 内层字段、protocols 的
     #: runtime_supported 与 runtime 段的 key_source，词面 env|stored|none 见规格 §2.1），
     #: 外加 §3.2 请求体字段 api_key（写密钥时前端要发这个键）；隐私面板消费的 5 个字段
     #: 来自 web/privacy_api.py GET/PUT /api/privacy/preferences 的响应视图
     #: （PrivacyPreferences.as_dict() + warning）
+    #: 规格 §3.1 / §3.3 出现的响应字段（含 limits、model view 内层字段与 protocols 的
+    #: runtime_supported），外加 §3.2 请求体字段 api_key（写密钥时前端要发这个键）、
+    #: §8.2 的 retry_policies / paths，§8.3 的 models_exists / secrets_exists，
+    #: §8.4 第 8 条隐私面板原样回传的 save_enabled / retention_days。
     DOCUMENTED = {
         "schema_version", "providers", "warnings", "protocols", "input_types",
-        "reasoning_tiers", "limits", "max_providers", "max_models_per_provider",
+        "reasoning_tiers", "retry_policies", "limits", "paths",
+        "max_providers", "max_models_per_provider",
         "max_context_window", "max_output_tokens",
         "display_name", "base_url", "protocol_runtime_supported", "runtime_supported",
         "key_env", "key_source", "api_key", "api_key_set", "api_key_source", "api_key_masked", "is_active",
         "default_models", "context_window", "active_tier", "api_value", "owned_by",
         "save_enabled", "retention_days", "external_processing_enabled",
         "external_processing_providers", "warning",
+        "models_exists", "secrets_exists",
+        "external_processing_enabled", "external_processing_providers",
+        "save_enabled", "retention_days",
     }
 
     @classmethod
@@ -468,11 +881,13 @@ class SettingsConsumedFieldsTest(unittest.TestCase):
     def test_key_status_and_model_params_are_wired(self):
         """密钥状态、协议运行期支持、模型参数这几组关键字段真的被用上（不是文档里有前端没接）。"""
         consumed = set(re.findall(r"\.([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b", self.js))
-        for field in ("api_key_set", "api_key_source", "api_key_masked", "key_source",
-                      "protocol_runtime_supported", "is_active", "default_models",
-                      "input_types", "reasoning_tiers", "active_tier", "api_value",
-                      "display_name", "base_url"):
-            self.assertIn(field, consumed, f"前端没有消费契约字段 {field}")
+        absent = [field for field in
+                  ("api_key_set", "api_key_source", "api_key_masked", "key_source",
+                   "protocol_runtime_supported", "is_active", "default_models",
+                   "input_types", "reasoning_tiers", "active_tier", "api_value",
+                   "display_name", "base_url", "retry_policies")
+                  if field not in consumed]
+        self.assertEqual(absent, [], f"前端没有消费契约字段：{absent}")
 
 
 if __name__ == "__main__":

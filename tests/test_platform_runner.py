@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -18,6 +19,7 @@ sys.path.insert(0, str(ROOT))
 from mylocalai.core.privacy import PrivacyPreferences  # noqa: E402
 from mylocalai.dossier.service import DossierService  # noqa: E402
 from mylocalai.dossier.store import DossierStore  # noqa: E402
+from mylocalai.llm import llm_client, model_registry  # noqa: E402  测试隔离用（见 setUp）
 from mylocalai.platform.candidates import FeedCandidate  # noqa: E402
 from mylocalai.platform.runner import PlatformRunner  # noqa: E402
 from mylocalai.platform.sources import (PatrolSourceProvider,  # noqa: E402
@@ -113,6 +115,26 @@ class _RunnerTestBase(unittest.TestCase):
         self.tmp = TemporaryDirectory()
         self.db = Path(self.tmp.name) / "dossier.db"
         self.addCleanup(self.tmp.cleanup)
+        # 与真实模型注册表隔离：runner 的领域自动推断（domains.resolve_domain）在
+        # 注册表有可用密钥时会真实调用 LLM（2026-11-22 用户配置真实模型后本组用例
+        # 挂起 75s+ 的根因）。隔离后 llm 不可用 → 领域推断走 fail-soft 快速回落，
+        # 与"无 key 时代"的用例前提一致。
+        self._saved_ml = {k: os.environ.get(k) for k in
+                          ("MYLOCALAI_MODELS_PATH", "MYLOCALAI_MODEL_SECRETS_PATH")}
+        os.environ["MYLOCALAI_MODELS_PATH"] = "Z:/nonexistent/models.json"
+        os.environ["MYLOCALAI_MODEL_SECRETS_PATH"] = "Z:/nonexistent/secrets.json"
+        model_registry.reset_cache()
+        llm_client.reset_cache()
+        self.addCleanup(self._restore_ml)
+
+    def _restore_ml(self):
+        for k, v in self._saved_ml.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        model_registry.reset_cache()
+        llm_client.reset_cache()
 
     def _runner(self, rules=None, privacy=PREFS_ON, providers=None, agent=None):
         store = PlatformStore(self.db)

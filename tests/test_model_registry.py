@@ -209,7 +209,8 @@ class ViewContractTests(RegistryTestCase):
     def test_view_exposes_frozen_contract(self):
         view = registry.view()
         for key in ("schema_version", "active", "runtime", "protocols", "input_types",
-                    "reasoning_tiers", "limits", "providers", "warnings"):
+                    "reasoning_tiers", "retry_policies", "limits", "paths", "providers",
+                    "warnings"):
             self.assertIn(key, view)
         self.assertEqual(view["schema_version"], registry.SCHEMA_VERSION)
         self.assertEqual(view["limits"]["max_providers"], 50)
@@ -223,15 +224,32 @@ class ViewContractTests(RegistryTestCase):
         self.assertEqual([t["id"] for t in view["input_types"]], list(registry.INPUT_TYPES))
         self.assertNotIn("api_key", view["runtime"], "runtime 子集不得带明文密钥")
 
+    def test_view_retry_policies_and_paths_shape(self):
+        """规格 §8.2：重试档位清单与两份配置文件的绝对路径（纯字符串，不读不写）。"""
+        view = registry.view()
+        self.assertEqual(registry.RETRY_POLICIES, ("default", "off", "aggressive"))
+        self.assertEqual(view["retry_policies"], [
+            {"id": "default", "label": "默认（仅临时错误）"},
+            {"id": "off", "label": "不重试"},
+            {"id": "aggressive", "label": "更积极（最多 3 次）"},
+        ])
+        self.assertEqual(view["paths"], {"models": str(self.models_path),
+                                         "secrets": str(self.secrets_path)})
+        self.assertEqual(registry.registry_paths(), view["paths"])
+        self.assertEqual(sorted(view["paths"]), ["models", "secrets"])
+        self.assertFalse(self.models_path.exists(), "registry_paths() 只拼字符串，不该创建文件")
+        self.assertFalse(self.secrets_path.exists())
+
     def test_provider_view_fields_and_unknown_pid(self):
         self.create_provider()
         provider = registry.provider_view("acme")
         for key in ("id", "display_name", "base_url", "protocol", "protocol_runtime_supported",
                     "key_env", "api_key_set", "api_key_source", "api_key_masked", "enabled",
-                    "builtin", "is_active", "models", "default_models"):
+                    "builtin", "is_active", "models", "default_models", "retry"):
             self.assertIn(key, provider)
         self.assertFalse(provider["builtin"])
         self.assertTrue(provider["protocol_runtime_supported"])
+        self.assertEqual(provider["retry"], {"policy": "default"})
         self.assertIsNone(registry.provider_view("nope"))
 
     def test_model_view_marks_active_model(self):
@@ -372,6 +390,68 @@ class ProviderValidationTests(RegistryTestCase):
         message = self.assert_raises_field("上限", registry.upsert_provider, "overflow",
                                            {"base_url": "https://api.example.com/v1"})
         self.assertIn("50", message)
+
+
+class RetryPolicyTests(RegistryTestCase):
+    """提供方级 `retry` 字段（规格 §8.1）：缺省不变、往返、非法点名拒绝。"""
+
+    def test_missing_field_defaults_to_default_policy(self):
+        """新建的提供方（没传 retry）落在 default，等价于"沿用 LLM_MAX_RETRIES"。"""
+        provider = self.create_provider()
+        self.assertEqual(provider["retry"], {"policy": "default"})
+        state = json.loads(self.models_path.read_text(encoding="utf-8"))
+        self.assertEqual(state["schema_version"], 1, "新字段不许 bump schema_version")
+        self.assertEqual(state["providers"]["acme"]["retry"], {"policy": "default"})
+
+    def test_old_file_without_retry_key_falls_back_to_default(self):
+        """老文件（没有 retry 键）必须落到 default：否则升级后重试行为会变。"""
+        self.write_models({
+            "schema_version": 1,
+            "active": {"provider": "legacy", "model": "legacy-x"},
+            "providers": {"legacy": {
+                "display_name": "老配置", "base_url": "https://api.legacy.test/v1",
+                "protocol": "openai", "key_env": "", "enabled": True,
+                "models": [{"id": "legacy-x"}],
+            }},
+        })
+        view = registry.view()
+        legacy = [p for p in view["providers"] if p["id"] == "legacy"][0]
+        self.assertEqual(legacy["retry"], {"policy": "default"})
+        self.assertEqual(view["warnings"], [], "缺 retry 键不是问题，不该产生告警")
+        # 内置提供方（无文件时）同样落在 default
+        self.assertEqual(registry.provider_view("deepseek")["retry"], {"policy": "default"})
+
+    def test_retry_round_trip_through_file(self):
+        for policy in registry.RETRY_POLICIES:
+            provider = self.create_provider(retry={"policy": policy})
+            self.assertEqual(provider["retry"], {"policy": policy})
+            registry.reset_cache()
+            self.assertEqual(registry.provider_view("acme")["retry"], {"policy": policy})
+            state = json.loads(self.models_path.read_text(encoding="utf-8"))
+            self.assertEqual(state["providers"]["acme"]["retry"], {"policy": policy})
+
+    def test_retry_accepts_null_policy_as_default(self):
+        provider = self.create_provider(retry={"policy": None})
+        self.assertEqual(provider["retry"], {"policy": "default"})
+        self.assertEqual(provider["retry"], registry._normalize_retry(None))
+
+    def test_unknown_policy_and_extra_keys_are_rejected_by_name(self):
+        self.assert_raises_field("provider.retry.policy", registry.upsert_provider, "acme",
+                                 {"base_url": "https://api.example.com/v1",
+                                  "retry": {"policy": "turbo"}})
+        self.assert_raises_field("provider.retry.times", registry.upsert_provider, "acme",
+                                 {"base_url": "https://api.example.com/v1",
+                                  "retry": {"policy": "off", "times": 2}})
+        self.assert_raises_field("provider.retry", registry.upsert_provider, "acme",
+                                 {"base_url": "https://api.example.com/v1", "retry": "off"})
+
+    def test_retry_max_retries_is_the_single_mapping(self):
+        self.assertIsNone(registry.retry_max_retries("default"), "default 沿用 get_max_retries()")
+        self.assertEqual(registry.retry_max_retries("off"), 0)
+        self.assertEqual(registry.retry_max_retries("aggressive"), 3)
+        # 未知/缺省一律按 default（fail-soft：不认识的策略名不该让调用链炸）
+        for odd in (None, "", "turbo", 3, True):
+            self.assertIsNone(registry.retry_max_retries(odd), f"{odd!r} 应回落到 default")
 
 
 class ModelValidationTests(RegistryTestCase):
@@ -538,6 +618,62 @@ class MutationTests(RegistryTestCase):
 
     def test_delete_model_unknown_provider_returns_false(self):
         self.assertFalse(registry.delete_model("nope", "m"))
+
+
+class ReorderModelsTests(RegistryTestCase):
+    """`reorder_models()`：order 必须与现有目录完全相等（规格 §8.2）。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.create_provider()
+        for model_id in ("m-a", "m-b", "m-c"):
+            registry.upsert_model("acme", {"id": model_id})
+
+    def catalog(self) -> list:
+        return [m["id"] for m in registry.provider_view("acme")["models"]]
+
+    def test_reorder_round_trip_persists_order(self):
+        view = registry.reorder_models("acme", ["m-c", "m-a", "m-b"])
+        self.assertEqual([m["id"] for m in view["models"]], ["m-c", "m-a", "m-b"])
+        self.assertEqual(view["id"], "acme", "返回的是 provider view，不是裸目录")
+        self.assertIn("retry", view)
+        registry.reset_cache()          # 绕过缓存，确认真的写进了文件
+        self.assertEqual(self.catalog(), ["m-c", "m-a", "m-b"])
+
+    def test_missing_id_is_rejected_by_name(self):
+        message = self.assert_raises_field("m-b", registry.reorder_models, "acme",
+                                           ["m-a", "m-c"])
+        self.assertIn("缺少", message)
+        self.assertEqual(self.catalog(), ["m-a", "m-b", "m-c"], "拒绝时不得改动目录")
+
+    def test_unknown_id_is_rejected_by_name(self):
+        message = self.assert_raises_field("ghost", registry.reorder_models, "acme",
+                                           ["m-a", "m-b", "m-c", "ghost"])
+        self.assertIn("多出", message)
+        self.assertIn("不一致", message)
+        self.assertEqual(self.catalog(), ["m-a", "m-b", "m-c"])
+
+    def test_duplicate_id_is_rejected_by_name(self):
+        message = self.assert_raises_field("重复", registry.reorder_models, "acme",
+                                           ["m-a", "m-a", "m-b"])
+        self.assertIn("m-a", message)
+        self.assertEqual(self.catalog(), ["m-a", "m-b", "m-c"])
+
+    def test_order_shape_rules(self):
+        self.assert_raises_field("order", registry.reorder_models, "acme", "m-a")
+        self.assert_raises_field("order[1]", registry.reorder_models, "acme", ["m-a", 3])
+        self.assert_raises_field("order[0]", registry.reorder_models, "acme", ["", "m-a"])
+        self.assertEqual(self.catalog(), ["m-a", "m-b", "m-c"])
+
+    def test_unknown_provider_is_rejected_by_name(self):
+        self.assert_raises_field("未知提供方", registry.reorder_models, "nope", [])
+
+    def test_empty_catalog_accepts_empty_order(self):
+        registry.delete_model("acme", "m-a")
+        registry.delete_model("acme", "m-b")
+        registry.delete_model("acme", "m-c")
+        view = registry.reorder_models("acme", [])
+        self.assertEqual(view["models"], [])
 
 
 class ActiveAndRuntimeTests(RegistryTestCase):
@@ -717,6 +853,138 @@ class DiscoverTests(RegistryTestCase):
         urlopen.assert_not_called()
         self.assertIn("未知提供方", result["error"])
         self.assertEqual(result["count"], 0)
+
+
+class AdhocDiscoverTests(RegistryTestCase):
+    """`available_models_adhoc()`：未保存提供方也能取模型，但纪律与已保存那条完全一致。"""
+
+    def test_unauthorized_provider_raises_and_sends_nothing(self):
+        """隐私偏好默认关 → 403 的成因；断言一个字节都没发出去。"""
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            with self.assertRaises(PrivacyAuthorizationError):
+                registry.available_models_adhoc("draft", "https://api.example.com/v1",
+                                                api_key=_SECRET)
+        urlopen.assert_not_called()
+
+    def test_invalid_base_url_is_rejected_by_name_before_authorization(self):
+        for bad in ("ftp://api.example.com", "https://", "", "https://bad host/v1"):
+            with mock.patch("urllib.request.urlopen") as urlopen:
+                self.assert_raises_field("base_url", registry.available_models_adhoc,
+                                         "draft", bad, api_key=_SECRET)
+            urlopen.assert_not_called()
+        self.assert_raises_field("base_url", registry.available_models_adhoc,
+                                 "draft", "https://api.example.com/" + "a" * 600,
+                                 api_key=_SECRET)
+
+    def test_missing_key_reports_error_without_any_request(self):
+        self.authorize("draft")
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            result = registry.available_models_adhoc("draft", "https://api.example.com/v1")
+        urlopen.assert_not_called()
+        self.assertEqual(result["provider"], "draft")
+        self.assertEqual(result["base_url"], "https://api.example.com/v1")
+        self.assertEqual(result["models"], [])
+        self.assertEqual(result["count"], 0)
+        self.assertIn("密钥", result["error"])
+        self.assertIn("draft", result["error"])
+
+    def test_parses_catalog_and_never_writes(self):
+        self.authorize("draft")
+        captured: dict = {}
+
+        def fake_urlopen(request, timeout=None):
+            captured["url"] = request.full_url
+            captured["auth"] = request.get_header("Authorization")
+            captured["timeout"] = timeout
+            return _FakeResponse(json.dumps({
+                "object": "list",
+                "data": [{"id": "m-one", "owned_by": "acme"},
+                         {"id": "m-one", "owned_by": "acme"},   # 重复 ID 只留一条
+                         {"id": "m-two"}],
+            }).encode("utf-8"))
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            result = registry.available_models_adhoc("draft", "https://api.example.com/v1/",
+                                                     api_key=_SECRET, timeout_s=5)
+        self.assertEqual(captured["url"], "https://api.example.com/v1/models",
+                         "尾部斜杠要归一化，否则拼出 //models")
+        self.assertEqual(captured["auth"], f"Bearer {_SECRET}")
+        self.assertEqual(captured["timeout"], 5.0)
+        self.assertEqual(result["error"], "")
+        self.assertEqual(result["models"], [{"id": "m-one", "owned_by": "acme"},
+                                            {"id": "m-two", "owned_by": ""}])
+        self.assertEqual(result["count"], 2)
+        self.assertNotIn(_SECRET, json.dumps(result, ensure_ascii=False))
+        self.assertNotIn(_SECRET, json.dumps(registry.view(), ensure_ascii=False),
+                         "草稿密钥只进 Authorization 头，不落盘也不进视图")
+        self.assertFalse(self.models_path.exists(), "获取可用模型不写盘")
+        self.assertFalse(self.secrets_path.exists(), "草稿密钥不落盘")
+
+    def test_reports_upstream_failure_without_raising(self):
+        self.authorize("draft")
+        error = registry.urllib.error.HTTPError("https://api.example.com/v1/models", 401,
+                                                "Unauthorized", {}, None)
+        with mock.patch("urllib.request.urlopen", side_effect=error):
+            result = registry.available_models_adhoc("draft", "https://api.example.com/v1",
+                                                     api_key=_SECRET)
+        self.assertEqual(result["models"], [])
+        self.assertEqual(result["count"], 0)
+        self.assertIn("HTTP 401", result["error"])
+        self.assertIn("https://api.example.com/v1/models", result["error"])
+
+    def test_reports_network_failure_and_non_json_body(self):
+        self.authorize("draft")
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=registry.urllib.error.URLError("connection refused")):
+            result = registry.available_models_adhoc("draft", "https://api.example.com/v1",
+                                                     api_key=_SECRET)
+        self.assertIn("网络请求失败", result["error"])
+        self.assertEqual(result["count"], 0)
+        with mock.patch("urllib.request.urlopen",
+                        lambda request, timeout=None: _FakeResponse(b"<html>404</html>")):
+            result = registry.available_models_adhoc("draft", "https://api.example.com/v1",
+                                                     api_key=_SECRET)
+        self.assertIn("JSON", result["error"])
+
+    def test_empty_catalog_is_reported_honestly(self):
+        self.authorize("draft")
+        with mock.patch("urllib.request.urlopen",
+                        lambda request, timeout=None: _FakeResponse(b'{"data": []}')):
+            result = registry.available_models_adhoc("draft", "https://api.example.com/v1",
+                                                     api_key=_SECRET)
+        self.assertEqual(result["error"], "")
+        self.assertEqual(result["models"], [])
+        self.assertEqual(result["count"], 0)
+
+    def test_loopback_draft_needs_no_consent_and_no_key(self):
+        captured: dict = {}
+
+        def fake_urlopen(request, timeout=None):
+            captured["auth"] = request.get_header("Authorization")
+            return _FakeResponse(b'{"data": [{"id": "llama3"}]}')
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            result = registry.available_models_adhoc("draft", "http://127.0.0.1:11434/v1")
+        self.assertIsNone(captured["auth"])
+        self.assertEqual([m["id"] for m in result["models"]], ["llama3"])
+        self.assertEqual(result["error"], "")
+
+    def test_authorization_key_is_the_caller_supplied_provider_name(self):
+        """未授权的名字不许借"已保存的别的提供方"的授权过关。"""
+        self.create_provider()                      # acme 已保存
+        self.authorize("acme")
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            with self.assertRaises(PrivacyAuthorizationError):
+                registry.available_models_adhoc("another", "https://api.example.com/v1",
+                                                api_key=_SECRET)
+        urlopen.assert_not_called()
+
+    def test_non_string_api_key_is_rejected_by_name(self):
+        self.authorize("draft")
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            self.assert_raises_field("api_key", registry.available_models_adhoc,
+                                     "draft", "https://api.example.com/v1", api_key=123)
+        urlopen.assert_not_called()
 
 
 if __name__ == "__main__":
