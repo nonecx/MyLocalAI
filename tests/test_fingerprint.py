@@ -40,6 +40,7 @@ from mylocalai.assistant.session_store import SessionStore  # noqa: E402
 from mylocalai.dossier import store as ds  # noqa: E402
 from mylocalai.dossier.service import DossierService  # noqa: E402
 from mylocalai.dossier.store import DossierStore, SCHEMA_VERSION, connect  # noqa: E402
+from tests.test_assistant_loop import isolate_llm  # noqa: E402
 
 ASSISTANT_DIR = Path(assistant_pkg.__file__).resolve().parent
 
@@ -331,7 +332,12 @@ def stub_narrate(text="证据支持以下判断。证据截至今天，仍缺官
 
 
 class LoopTestBase(unittest.TestCase):
+    #: LLM 隔离（2026-11-24 .env 根因修复后补）：seed_hit 走 verify_claim 全链，
+    #: 其 claim 编排会真调主张提取；提供方可达时走"无主张短出口"，指纹沉淀的
+    #: 前提（stub verify 的结论落库）会变。共用工具见
+    #: tests.test_assistant_loop.isolate_llm。
     def setUp(self):
+        isolate_llm(self)
         self.tmp = TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         db = Path(self.tmp.name) / "app.db"

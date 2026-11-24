@@ -38,6 +38,7 @@ from mylocalai.attention import attention as A# noqa: E402
 from mylocalai.attention import deep_read as D# noqa: E402
 from mylocalai.attention import deep_read_guard as G# noqa: E402
 from mylocalai.llm import llm_client
+from tests.test_assistant_loop import isolate_llm  # noqa: E402
 
 
 def detail_of(x, y, z, params=None):
@@ -597,6 +598,17 @@ class TestEndToEnd(unittest.TestCase):
 
 class TestPhysicalIsolation(unittest.TestCase):
     """深读不得 import verdict；不得影响主结论；异常不外泄。"""
+
+    #: 模型注册表隔离（2026-11-24 .env 根因修复后补）：本组有端到端用例手工复算
+    #: 缓存键（_cache_key(..., namespace)），而**调用侧**的键在注册表声明了推理
+    #: 档位时会多带 extra_params 指纹（llm_client._cache_key 的 blob 追加段）——
+    #: 开发机上 models.json 的当前提供方若配了 reasoning（如 step-5-preview），
+    #: 复算键与真实写入键就对不上，用例红得莫名其妙。隔离到内置提供方表
+    #: （无 reasoning 声明 → extra_params 为空 → 键逐字节相同）。
+    #: 共用工具见 tests.test_assistant_loop.isolate_llm。
+
+    def setUp(self):
+        isolate_llm(self)
 
     def test_deep_read_does_not_import_verdict(self):
         """源码里不得 import verdict 相关模块（AST 检查，注释/文档串不算）。"""
