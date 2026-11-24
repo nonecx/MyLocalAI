@@ -362,8 +362,9 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 1985 个用例（unittest discover 全量，2026-11-23 第五波三条专用技能落地后实测；
-此前 2026-11-22 角色 Agent 工作流（编排引擎 + 角色工具白名单 + 全面去数值）落地时为 1764 例，
+离线套件共 2049 个用例（unittest discover 全量，2026-11-24 合入信息收集 v2 分支只读资产后实测；
+此前 2026-11-23 第五波三条专用技能落地后为 1985 例，2026-11-22 角色 Agent 工作流
+（编排引擎 + 角色工具白名单 + 全面去数值）落地时为 1764 例，
 含编排层 `tests/test_workflow_engine.py` 20 例、`tests/test_workflow_claim.py` 13 例、
 角色白名单 `tests/test_role_allowlists.py` 38 例与跨层对拍
 `tests/test_workflow_integration.py` 5 例，以及隐私与授权可操作面板的
@@ -374,6 +375,9 @@ UI 契约与 PUT /api/privacy/preferences 接口用例；第五波新增 221 例
 前端三卡 `tests/test_statistics_ui.py` / `tests/test_comparison_ui.py` /
 `tests/test_timeline_ui.py` 各 12 例，另有 `test_role_prompts` / `test_workflow_engine` /
 `test_role_allowlists` / `test_workflow_integration` 四个对拍模块扩到 13 能力 / 20 action；
+另 2026-11-24 合入信息收集 v2 分支只读资产（未接线的技能页/复合卡测试未纳入）：
+受限 Agent 循环 `tests/test_agent_loop.py`、追问续接 `tests/test_continuation.py`、
+技能偏好 `tests/test_skills_preferences.py` 三模块共 64 例；
 **M4 起由 `tests.test_readme_counts` 自动校验此数字与 mock 闸门条数，改动后须同步回写**）：
 M1-M3 的全部回归（详见 git 历史），加上 M4 新增模块：
 **成本真实计数**（llm_client 进程级计数器：真实上游调用数 + usage tokens，缓存命中/
