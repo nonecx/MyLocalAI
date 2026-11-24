@@ -7,6 +7,8 @@ SessionStore 只做忠实的表读写（裁剪/摘要在 context.py），这里�
   - tool_runs 的 args JSON 往返、degraded bool 化、start→finish 生命周期；
   - 归档会话默认不出现在 list_sessions（UI 默认视图不含历史归档）；
   - 并发 add_message 无丢失（RLock + 共享连接，WAL 单写者）。
+  - 标题派生 derive_session_title：截断 24 + 乱码防护（2026-11-19 数据事故，
+    web /api/chat 与 MCP assistant_chat 共用这一个口径）。
 全部离线临时库；时间敏感断言用可控 _now 桩，不靠 sleep（避免秒边界抖动）。
 """
 
@@ -172,6 +174,57 @@ class TestToolRuns(SessionStoreTestBase):
         self.assertEqual(len(self.store.runs_for_session(s2)), 1)
         self.assertEqual(self.store.runs_for_session(s2)[0]["tool"], "compute_heat")
         self.assertIs(self.store.runs_for_session(s1)[0]["degraded"], False)
+
+
+class TestDeriveSessionTitle(unittest.TestCase):
+    """会话标题派生（web /api/chat 与 MCP assistant_chat 的唯一口径）。
+
+    2026-11-19 数据事故：四条历史会话标题被 mangling 成字面 "?"（每非 ASCII
+    字符一个 "?"）。管道已不复现，但 create_session 的调用点必须都经这个纯函数，
+    否则乱码标题会再次写进列表。这里锁：正常截断、乱码判空、空输入、边界占比。
+    """
+
+    def test_chinese_message_truncated_to_24(self):
+        title = "自来水被人下毒了？官方为什么不敢通报，速转全家看看"
+        self.assertEqual(ss_mod.derive_session_title(title), title[:24])
+        self.assertEqual(len(ss_mod.derive_session_title(title)), 24)
+
+    def test_custom_limit_is_honored(self):
+        self.assertEqual(ss_mod.derive_session_title("一二三四五六", limit=3), "一二三")
+
+    def test_pure_question_marks_are_treated_as_mojibake(self):
+        """全是 '?' → 乱码产物 → 空串（前端显示「（未命名会话）」，用户可自助改名）。"""
+        self.assertEqual(ss_mod.derive_session_title("????????????????????????"), "")
+        self.assertEqual(ss_mod.derive_session_title("?"), "")
+
+    def test_half_question_marks_is_boundary_and_counts_as_mojibake(self):
+        """占比恰好一半即判乱码（>= 口径，不含"过半才算"的侥幸）。"""
+        self.assertEqual(ss_mod.derive_session_title("??"), "")
+        self.assertEqual(ss_mod.derive_session_title("a?"), "")     # 1/2：边界
+        self.assertEqual(ss_mod.derive_session_title("ab?"), "ab?")  # 1/3：正常保留
+
+    def test_empty_or_blank_input_is_empty_title(self):
+        self.assertEqual(ss_mod.derive_session_title(""), "")
+        self.assertEqual(ss_mod.derive_session_title(None), "")
+        self.assertEqual(ss_mod.derive_session_title("   \n\t "), "")
+
+    def test_mixed_chinese_english_is_kept(self):
+        """中英混合的正常消息一个字符都不丢（乱码防护只盯 '?' 占比）。"""
+        text = "AI 裁员传闻是真的吗？官方回应来了"
+        self.assertEqual(ss_mod.derive_session_title(text), text[:24])
+        self.assertNotIn("?", ss_mod.derive_session_title("API 用法求助：怎么查档案"))
+
+    def test_non_string_input_is_stringified(self):
+        """调用点可能传来非字符串（容错口径：str() 后再派生，不抛）。"""
+        self.assertEqual(ss_mod.derive_session_title(12345), "12345")
+        self.assertEqual(ss_mod.derive_session_title(None), "")
+
+    def test_whitespace_is_stripped_before_limit(self):
+        """先 strip 再截断：开头的空白不占 24 字额度。"""
+        self.assertEqual(ss_mod.derive_session_title("   abcd   "), "abcd")
+
+    def test_exported_in_all(self):
+        self.assertIn("derive_session_title", ss_mod.__all__)
 
 
 class TestConcurrency(SessionStoreTestBase):

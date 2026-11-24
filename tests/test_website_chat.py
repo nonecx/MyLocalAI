@@ -25,12 +25,15 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src" / "mylocalai" / "web"))   # 让 `import app` 能找到 web/app.py
 
 from mylocalai.assistant.events import EVENT_NAMES, EventStream, format_sse  # noqa: E402
+import mylocalai.assistant.session_store as ss_mod  # noqa: E402
 
 STATIC = ROOT / "src" / "mylocalai" / "web" / "static"
 INDEX_HTML = STATIC / "index.html"
 CHAT_JS = STATIC / "chat.js"
 CARDS_JS = STATIC / "cards.js"
 CHAT_CSS = STATIC / "chat.css"
+
+PAST = "2000-01-01T00:00:00+08:00"   # 可控历史时间：把"刷新过没有"变成确定性断言
 
 
 def _read(path: Path) -> str:
@@ -285,6 +288,121 @@ class TestSessionsApi(ChatApiTestBase):
         self.assertEqual(self.client.get("/api/sessions/abc/messages").status_code, 404)
         self.assertEqual(self.client.get("/api/sessions/-1/messages").status_code, 404)
 
+    def test_rename_title_full_path(self):
+        """PUT /api/sessions/{sid}/title：200 + {"session": 完整记录} + 列表同步换标题。"""
+        sid = self.client.post("/api/sessions", json={"title": "误建标题"}).json()["id"]
+        resp = self.client.put(f"/api/sessions/{sid}/title", json={"title": "  自来水核查  "})
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(set(body), {"session"})          # 响应形状（E2E 依赖它）
+        self.assertEqual(body["session"]["id"], sid)
+        self.assertEqual(body["session"]["title"], "自来水核查")   # strip 后落库
+        listed = {s["id"]: s for s in self.client.get("/api/sessions").json()["sessions"]}
+        self.assertEqual(listed[sid]["title"], "自来水核查")
+
+    def test_rename_empty_title_clears_to_unnamed(self):
+        """空串 / 全空白 / 整体省略 body 都是"清空为未命名"（200，不是 400）。"""
+        sid = self.client.post("/api/sessions", json={"title": "有标题"}).json()["id"]
+        for body in ({"title": ""}, {"title": "   "}, None):
+            resp = self.client.put(f"/api/sessions/{sid}/title",
+                                   **({} if body is None else {"json": body}))
+            self.assertEqual(resp.status_code, 200)
+            self.assertEqual(resp.json()["session"]["title"], "")
+        self.assertEqual(self.store.get_session(sid)["title"], "")
+
+    def test_rename_surrogate_title_is_400_and_title_untouched(self):
+        """孤立代理项标题 → 400（与 POST /api/sessions 同口径），原标题一个字符不动。"""
+        sid = self.client.post("/api/sessions", json={"title": "原标题"}).json()["id"]
+        resp = self.client.put(f"/api/sessions/{sid}/title",
+                               content=json.dumps({"title": "ok\ud800bad"}),
+                               headers={"Content-Type": "application/json"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(self.store.get_session(sid)["title"], "原标题")
+
+    def test_rename_refreshes_updated_at(self):
+        """rename 刷新 updated_at（列表换序）：可控时间桩把"刷新过没有"变成确定性断言。"""
+        sid = self.client.post("/api/sessions", json={"title": "旧标题"}).json()["id"]
+        before = self.store.get_session(sid)["updated_at"]
+        with mock.patch.object(ss_mod, "_now", return_value=PAST):
+            resp = self.client.put(f"/api/sessions/{sid}/title", json={"title": "新标题"})
+        self.assertEqual(resp.status_code, 200)
+        after = resp.json()["session"]["updated_at"]
+        self.assertEqual(after, PAST)
+        self.assertNotEqual(after, before)
+
+    def test_rename_invalid_sid_is_404(self):
+        """不存在 / 非整数 / 非正数 sid → 一律 404（与 messages 端点同口径，不是 422）。"""
+        sid = self.client.post("/api/sessions", json={"title": "在的"}).json()["id"]
+        for raw in ("999999", "abc", "-1", "0"):
+            resp = self.client.put(f"/api/sessions/{raw}/title", json={"title": "x"})
+            self.assertEqual(resp.status_code, 404, f"sid={raw} 应为 404")
+        # 那些 404 没有把任何在用的会话改坏
+        self.assertEqual(self.store.get_session(sid)["title"], "在的")
+
+
+# --------------------------------------------------------------- 2b. 会话改名 × 档案工作区
+class TestSessionRenameApi(unittest.TestCase):
+    """PUT /api/sessions/{sid}/title 的跨档案工作区口径（v6：不泄露存在性）。
+
+    夹具照 test_profiles.TestProfilesApi：三处工厂各在其定义模块里替换（web 端点用
+    app.*，Profile 路由用 profiles_api.*），同一个临时库里建两个档案工作区。
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        try:
+            from fastapi.testclient import TestClient
+            import app as webapp
+        except Exception as exc:  # noqa: BLE001  fastapi 缺失时整组跳过而非报错
+            raise unittest.SkipTest(f"无法导入 web app: {type(exc).__name__}: {exc}")
+        cls.webapp = webapp
+        cls.client = TestClient(webapp.app)
+
+    def setUp(self) -> None:
+        from mylocalai.assistant.session_store import SessionStore
+        from mylocalai.dossier.profiles import ProfileStore
+        from mylocalai.dossier.service import DossierService
+        from mylocalai.dossier.store import DossierStore
+        from mylocalai.web import profiles_api
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        db = Path(self.tmp.name) / "dossier.db"
+        self.store = DossierStore(db)
+        self.addCleanup(self.store.close)
+        self.service = DossierService(self.store)
+        self.sessions = SessionStore(db)
+        self.addCleanup(self.sessions.close)
+        self.profiles = ProfileStore(db)
+        self.addCleanup(self.profiles.close)
+        for module, attr, factory in (
+                (self.webapp, "get_dossier_service", lambda: self.service),
+                (self.webapp, "get_session_store", lambda: self.sessions),
+                (profiles_api, "get_profile_store", lambda: self.profiles)):
+            patcher = mock.patch.object(module, attr, factory)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_cross_profile_rename_is_404(self):
+        """会话属于别的档案工作区 → 404（与 messages 端点同口径，不泄露存在性）。"""
+        pid = self.client.post("/api/profiles", json={
+            "key": "second", "display_name": "二区", "role": "analyst"}).json()["profile"]["id"]
+        mine = self.sessions.create_session("本区会话", profile_id=1)
+        other = self.sessions.create_session("别区会话", profile_id=pid)
+        resp = self.client.put(f"/api/sessions/{other}/title", json={"title": "偷改"})
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(self.sessions.get_session(other)["title"], "别区会话")   # 没被改
+        # 本区的照样能改（同口径不放水）
+        ok = self.client.put(f"/api/sessions/{mine}/title", json={"title": "本区新标题"})
+        self.assertEqual(ok.status_code, 200)
+        self.assertEqual(ok.json()["session"]["title"], "本区新标题")
+        # 切到二区后反过来：本区会话变 404，别区可改
+        self.client.post(f"/api/profiles/{pid}/activate")
+        self.assertEqual(self.client.put(
+            f"/api/sessions/{mine}/title", json={"title": "又偷改"}).status_code, 404)
+        back = self.client.put(f"/api/sessions/{other}/title", json={"title": "二区新标题"})
+        self.assertEqual(back.status_code, 200)
+        self.assertEqual(back.json()["session"]["title"], "二区新标题")
+
 
 # --------------------------------------------------------------- 3. drain 单测
 class TestDrainEventStream(unittest.TestCase):
@@ -364,6 +482,40 @@ class TestChatFrontendConsistency(unittest.TestCase):
         for path in paths:
             self.assertIn(self._normalize(path), routes,
                           f"chat.js 引用了后端不存在的接口：{path}")
+
+    def test_session_rename_wired_in_chat_js(self):
+        """会话改名入口（PUT /api/sessions/{sid}/title）前后端都接上。
+
+        2026-11-19 数据事故的补口：乱码/误建标题要能由用户自己改。这里锁：后端路由
+        真存在、chat.js 有按钮 class / renameSession / CHAT_API 新路径 / li 点击委派
+        排除按钮（点"改名"不串选中会话）/ chat.css 有样式定义（否则按钮不可见）。
+        """
+        from app import app as fastapi_app
+        routes = {self._normalize(getattr(r, "path", "")) for r in fastapi_app.routes}
+        self.assertIn(self._normalize("/api/sessions/{sid}/title"), routes,
+                      "后端缺少会话改名路由")
+        # CHAT_API 新路径（沿用既有 {sid} 占位与 apiPath 替换风格）
+        self.assertIn('sessionTitle: "/api/sessions/{sid}/title"', self.chat_js)
+        self.assertIn("apiPath(CHAT_API.sessionTitle, sid)", self.chat_js)
+        # 按钮与处理函数
+        self.assertIn('class="chat-session-rename"', self.chat_js)
+        self.assertIn('data-rename-sid="${Number(s.id)}"', self.chat_js)
+        self.assertIn("async function renameSession(sid, currentTitle)", self.chat_js)
+        self.assertIn('method: "PUT"', self.chat_js)
+        self.assertIn("body: JSON.stringify({ title: next })", self.chat_js)
+        self.assertIn("window.prompt(", self.chat_js)
+        # 防串选中：按钮 click 会冒泡到 li，委派处必须挡在 selectSession 之前
+        self.assertIn('e.target.closest(".chat-session-rename")', self.chat_js)
+        guard = self.chat_js.split('e.target.closest(".chat-session-rename")', 1)[1]
+        self.assertIn("renameSession(", guard.split("selectSession(", 1)[0],
+                      "点到改名按钮时必须走 renameSession 并提前 return，不能落到切换会话")
+        # 样式必须存在（默认隐藏、悬停/激活显现、键盘焦点环）
+        css = _read(CHAT_CSS)
+        self.assertIn(".chat-session-rename", css)
+        for selector in ("li:hover .chat-session-rename",
+                         "li.active .chat-session-rename",
+                         ".chat-session-rename:focus-visible"):
+            self.assertIn(selector, css, f"chat.css 缺少 {selector}")
 
     def test_chatjs_events_subset_of_event_names(self):
         """chat.js 监听的事件名集合 = SSE_EVENTS 常量，且 ⊆ events.py EVENT_NAMES。"""

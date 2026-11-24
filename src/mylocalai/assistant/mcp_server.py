@@ -209,7 +209,11 @@ def create_server(session_store: Any = None, dossier_service: Any = None,
                     return _json({"error": f"会话不存在: {session_id}", "session_id": None})
                 sid = int(session_id)
             else:
-                sid = store.create_session(title=text[:24])   # 与 web 端同款会话标题
+                # 标题派生与 web /api/chat 同源：session_store.derive_session_title
+                # （含 2026-11-19 乱码防护，乱码消息不再造出乱码标题）。懒 import
+                # 跟随本文件 _Deps 的现状，import 期不碰会话域。
+                from mylocalai.assistant.session_store import derive_session_title
+                sid = store.create_session(title=derive_session_title(text))
 
             events = EventStream()
             out = deps.loop.handle(sid, text, events, None)

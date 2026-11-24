@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 from mylocalai.core.privacy import PrivacyPreferences, load_preferences
 from mylocalai.dossier.store import _expiry, connect, default_db_path
 
-__all__ = ["SessionStore"]
+__all__ = ["SessionStore", "derive_session_title"]
 
 VALID_ROLES = ("user", "assistant", "system_note")
 VALID_KINDS = ("text", "card", "tool_event", "refusal")
@@ -23,6 +23,28 @@ VALID_KINDS = ("text", "card", "tool_event", "refusal")
 def _now() -> str:
     from datetime import datetime
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def derive_session_title(text: Any, limit: int = 24) -> str:
+    """从首条用户消息推导会话标题（web /api/chat 与 MCP assistant_chat 同源）。
+
+    2026-11-19 数据事故：四条历史会话（id 4/5/9/10）的标题在用户消息落库前被
+    mangling 成字面 "?"（每个非 ASCII 字符一个 "?"），列表里躺着几串无法自愈的
+    乱码标题。今天的管道不再复现该事故，但两个调用点（web app.py 的
+    create_session 与 MCP mcp_server.py 的 create_session）曾各写一份
+    ``text[:24]``——口径不收口就会再次分叉，所以收口到这同一个纯函数。
+
+    乱码防护：标题里 '?' 占比达到一半即视为 mangling 产物，返回空串。
+    **空串 ≠ 无标题**：create_session("") 仍是"建一个没有标题的会话"（原语义
+    不变），前端把空标题显示成「（未命名会话）」，用户可经
+    PUT /api/sessions/{id}/title 自助改名——而不是把乱码标题写进列表。
+
+    另一种返回空串的情形：输入本身为空/全空白（没东西可当标题）。
+    """
+    title = str(text or "").strip()[:limit]
+    if title and title.count("?") * 2 >= len(title):
+        return ""
+    return title
 
 
 class SessionStore:
