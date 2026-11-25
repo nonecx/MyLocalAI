@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """角色提示词层与能力 Skill 文档测试（v6 角色扩展，2026-11-20）。
 
 覆盖：
@@ -6,7 +6,7 @@
   二、loop 集成：三角色会话的 router/narrate system 按角色不同，full 与基座逐位一致；
   三、导流口径：analyst/monitor 的路由附加段包含面板导流与"不拼工具"指令；
   四、SKILL.md 结构 lint（13 份能力文档的头字段与必备章节；通用/专用分类与
-      适用角色封闭枚举对拍；执行层 12 份 SKILL.md 的 分类/服务能力 映射对拍）；
+      适用角色封闭枚举对拍；执行层 14 份 SKILL.md 的 分类/服务能力 映射对拍）；
   五、对拍：prompts.json 的 roles 键 ↔ dossier/profiles.py 的 ROLES；
      SKILL.md 的能力 id ↔ capabilities 目录名。
 
@@ -83,14 +83,18 @@ CATEGORY_BY_CAP_ID = {
 #: 执行层 SKILL.md（skills/ 下，会注入模型）→ 服务的上层能力 id：
 #: 注释头带 `分类：<与服务能力同分类>` 与 `服务能力：<capability id>`，建立执行层→能力层映射。
 #: 第五波新增 statistics/comparison/timeline 三份（分类：专用，服务第五波三个专用能力）。
+#: research/agent 与 authority/agent 两份是 mode="agent" 受限循环的契约留存（尚未接线、
+#: 不注入模型），头字段与其余执行层同规，一并纳入对拍防漂移。
 EXPECTED_SKILL_SERVICE = {
     "domain": "evidence-research",
     "sources": "evidence-research",
     "evidence": "evidence-research",
     "research/scope": "information-collection",
     "research/digest": "information-collection",
+    "research/agent": "information-collection",
     "authority/authority": "authority-verification",
     "authority/adjudicate": "authority-verification",
+    "authority/agent": "authority-verification",
     "source": "source-credibility",
     "guide": "fact-check-guide",
     "statistics": "statistical-claim-checking",
@@ -339,10 +343,10 @@ class TestCapabilitySkillDocs(unittest.TestCase):
                               f"{dirname} 标专用但适用角色不是三角色之一")
 
     def test_execution_skill_docs_marked_with_service_capability(self):
-        """执行层 12 份 SKILL.md 注释头带 分类（与服务能力同分类：通用/专用）
+        """执行层 14 份 SKILL.md 注释头带 分类（与服务能力同分类：通用/专用）
         与 服务能力：<能力 id>（映射对拍）。"""
         skills_dir = ROOT / "src" / "mylocalai" / "assistant" / "skills"
-        self.assertEqual(len(EXPECTED_SKILL_SERVICE), 12)
+        self.assertEqual(len(EXPECTED_SKILL_SERVICE), 14)
         for rel, cap_id in EXPECTED_SKILL_SERVICE.items():
             path = skills_dir / rel / "SKILL.md"
             self.assertTrue(path.is_file(), f"缺少执行层 {path}")
