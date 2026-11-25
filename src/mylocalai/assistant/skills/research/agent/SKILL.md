@@ -4,6 +4,13 @@
 输入：主题、研究问题、子问题清单、当前候选池/已读页面/已摘录证据/剩余预算（全部由程序给出）。
 输出：每一步一个动作；动作由代码执行并校验，越界/未锚定的动作会被拒绝。
 边界：模型只能决定下一步做什么，不能改状态、不能改要点等级、不能给评分或结论。
+当前状态：**未接线**——mode="agent" 受限循环尚未实现，本文件不被任何代码注入模型。
+      ResearchSkills.run 不接受 mode 形参（只有 topic/cancel_check 等），
+      agent_loop.run_agent_loop 也没有调用方；skills/research/pipeline.py 只装配
+      scope/ 与 digest/ 两段。**改了本文件也不生效**，现行统一走固定阶段 pipeline
+      （口径见 research/scope/SKILL.md 与 research/digest/SKILL.md）。
+      详见 docs/能力使用率审计-2026-11-25.md（"只有文件没有代码"一类）。
+      此处留档只为将来接线时契约不改写。
 -->
 
 # 资料收集：受限循环

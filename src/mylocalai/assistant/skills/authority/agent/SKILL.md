@@ -4,6 +4,14 @@
 输入：系统提示（本文件）+ 目标（待核验主张）+ 每步程序状态（候选池/已读页/已摘证据/剩余预算）。
 输出（每步一个 JSON）：{"action": "search|read|extract|finish", "args": {...}, "reason": "一句话"}
 边界：模型只决定“下一步做什么”；balance/lean/conclusion/status 全部由代码在循环结束后确定。
+当前状态：**未接线**——mode="agent" 受限循环尚未实现，本文件不被任何代码注入模型。
+      AuthoritySkills.run 不接受 mode 形参（只有 text/cancel_check 等），
+      agent_loop.run_agent_loop 也没有调用方；skills/authority/pipeline.py 只装配
+      evidence/ 与 adjudicate/ 两段（authority/SKILL.md 是口径文档、不注入模型）。
+      **改了本文件也不生效**，现行统一走固定阶段 pipeline（口径见 authority/authority/
+      SKILL.md 与 authority/adjudicate/SKILL.md）。
+      详见 docs/能力使用率审计-2026-11-25.md（"只有文件没有代码"一类）。
+      此处留档只为将来接线时契约不改写。
 与代码校验的关系：read 的 url 必须在候选池；extract 的 quote 必须锚定已读正文；重复动作会被拒绝。
 -->
 
