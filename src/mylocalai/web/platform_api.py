@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""平台 REST 接口（web/platform_api.py）：状态 / 信息流 / 预警 / 监控词 / 信息源 / 巡检。
+"""平台 REST 接口（web/platform_api.py）：状态 / 信息流 / 预警 / 监控词 / 信息源 / 巡检 / 巡检报告。
 
 与 privacy_api/models_api 同一 router 模式（前缀 /api/platform，中文 400 detail）。
 调度器与本模块各持一个 PlatformStore（同库不同连接，WAL 单写者由 SQLite 串行化，
@@ -14,6 +14,11 @@
 领域契约（v7）：`GET /domains` 是前端领域下拉与徽章中文名的唯一数据源；
 `feed_entries.domain` 是 URL 主机域，领域列叫 `topic_domain`（信息流徽章
 读 `topic_domain` / `topic_domain_source`，不读 domain）。
+
+巡检报告契约（v12）：`GET /reports` 与 `GET /reports/{scan_id}` 只读
+scan_reports 表（store.list_reports / get_report）；报告 payload 由
+platform.report.PatrolReport 生成（代码汇总 + LLM 整理），本模块不重组、
+不改写——呈现口径（不判真假/降级如实标注）由报告技能自己把关。
 """
 
 from __future__ import annotations
@@ -367,3 +372,26 @@ def platform_scan_detail(scan_id: int) -> Dict[str, Any]:
     if run is None:
         raise HTTPException(status_code=404, detail=f"巡检记录不存在: {scan_id}")
     return {"scan": run}
+
+
+@router.get("/reports")
+def platform_reports(limit: int = 10) -> Dict[str, Any]:
+    """巡检报告列表（id 倒序；平台页报告卡只取最近一份，故 limit=1）。
+
+    形状同 store.list_reports 项：{id, scan_id, title, llm_status, status,
+    created_at, payload(解析后 dict)}。空库是合法输出（reports=[]），不是
+    错误——前端据此隐藏报告卡，不演成失败行。limit 夹取 1-50，不信任调用方
+    传来的任意大数（与 feed/scans 的 max(1, ...) 同口径，这里再兜上限）。
+    """
+    safe_limit = min(max(1, int(limit)), 50)
+    return {"reports": get_store().list_reports(limit=safe_limit),
+            "external_authorized": _external_authorized()}
+
+
+@router.get("/reports/{scan_id}")
+def platform_report_detail(scan_id: int) -> Dict[str, Any]:
+    """单轮巡检的报告（scan_reports 按 scan_id 唯一，故是单值不是列表）。"""
+    report = get_store().get_report(scan_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail=f"巡检报告不存在: {scan_id}")
+    return {"report": report, "external_authorized": _external_authorized()}

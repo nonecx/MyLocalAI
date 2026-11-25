@@ -115,6 +115,16 @@ class PlatformScheduler:
                              "candidates": q.get("candidates")}
                             for q in (last.get("queries") or [])[:5]],
             }
+            # 报告摘要（runner._build_report 挂的）：只带 title 与 llm_status
+            # 两个标量，payload 走 /api/platform/reports——与"状态响应不背
+            # 全量数据"同口径。无 report 键（早退路径/技能不可用）时不加该键，
+            # 前端据此区分"没有报告"与"有报告"。
+            report = last.get("report")
+            if isinstance(report, dict):
+                last_summary["report"] = {
+                    "title": str(report.get("title") or ""),
+                    "llm_status": str(report.get("llm_status") or ""),
+                }
         return {
             "enabled": bool(rules.get("enabled")),
             "interval_s": _interval_of(rules),

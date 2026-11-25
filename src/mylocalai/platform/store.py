@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
-"""平台域存储（platform/store.py）：watch_queries / feed_entries / scan_runs 三表读写。
+"""平台域存储（platform/store.py）：watch_queries / feed_entries / scan_runs /
+scan_reports 读写（后者 v12 追加，挂每轮巡检一份 LLM 组织的总结报告）。
 
 表由 dossier store 的顺序迁移建立（平台域三表在 v6，v7 追加用户自建信息源两表
-patrol_sources/patrol_query_sources 与领域列）；本模块经同一连接工厂
-（mylocalai.dossier.store.connect）打开**同一个库文件**，不另起数据库。
+patrol_sources/patrol_query_sources 与领域列，v12 追加巡检报告 scan_reports）；
+本模块经同一连接工厂（mylocalai.dossier.store.connect）打开**同一个库文件**，
+不另起数据库。
 
 口径与 DossierStore 一致：
   - 单文件 SQLite + WAL，单写者（本模块自带 RLock）；
@@ -48,6 +50,18 @@ SCAN_STATUSES = ("running", "completed", "partial", "failed", "skipped", "cancel
 #: 用户自建信息源类型封闭集合（与 v7 迁移里 patrol_sources.kind 的 CHECK 同口径；
 #: 越界值在 add_patrol_source 即 ValueError，不静默纠正）。
 PATROL_SOURCE_KINDS = ("rss", "page")
+
+#: 巡检报告的 LLM 组织状态封闭集（v12 scan_reports.llm_status；越界值写入即
+#: ValueError，绝不猜——"报告到底有没有被 LLM 正常组织出来"必须如实记账）。
+#:   ok                LLM 正常组织出报告（本轮有内容且调用成功）；
+#:   disabled          报告生成未启用（规则/配置关闭，未调 LLM）；
+#:   unavailable       LLM 服务不可用（无提供方/网络/密钥，零次有效调用）；
+#:   budget_exhausted  LLM 预算耗尽，报告没组织成（已完成部分照常呈现）；
+#:   cancelled         报告生成被取消（用户中断/deadline 到点）；
+#:   skipped_empty     本轮无内容可组织（空巡检：无启用监控词/零候选）；
+#:   error             其他错误兜底（异常路径，不静默吞成 ok）。
+REPORT_LLM_STATUSES = ("ok", "disabled", "unavailable", "budget_exhausted",
+                       "cancelled", "skipped_empty", "error")
 
 
 def _now() -> str:
@@ -488,3 +502,99 @@ class PlatformStore:
             row = self._conn.execute(
                 "SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1").fetchone()
         return dict(row) if row else None
+
+    def previous_scan_run(self, scan_id: int) -> Optional[Dict[str, Any]]:
+        """上一轮巡检（id 严格小于传入 scan_id 的最大一条 scan_runs 行）；无则 None。
+
+        给环比类呈现提供基准轮（如本轮报告要对比上一轮的热度/计数）。为什么
+        严格小于：传入的那条是"本轮"，自己不能当自己的基准；空库或首轮巡检
+        → None，调用方按"无基准"降级，而不是拿本轮数据假装有对比。
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM scan_runs WHERE id < ? ORDER BY id DESC LIMIT 1",
+                (int(scan_id),)).fetchone()
+        return dict(row) if row else None
+
+    # ---- 巡检报告（v12：scan_reports） ----
+
+    def _report_row(self, row: sqlite3.Row) -> Dict[str, Any]:
+        """报告行 → 对外形状：payload 由 JSON 文本还原成 dict（坏 JSON 兜底 {}）。"""
+        d = dict(row)
+        d["payload"] = _load(d["payload"], {})
+        return d
+
+    def save_report(self, scan_id: int, *, title: str, llm_status: str,
+                    status: str, payload: Optional[Dict[str, Any]] = None) -> Optional[int]:
+        """写入/覆盖一轮巡检的总结报告；返回该报告行 id。
+
+        形状：scan_reports 一行（id / scan_id / title / llm_status / status /
+        payload / created_at），由 get_report / latest_report / list_reports
+        按同一形状读回（payload 还原成 dict）。
+
+        upsert 语义：scan_id 唯一约束即"一轮一报"——同一 scan_id 二次保存走
+        ON CONFLICT(scan_id) DO UPDATE，覆盖 title/llm_status/status/payload
+        四列，行数与行 id 都不变（created_at 保留首建时刻：记"报告首次生成"
+        而非"最后一次改写"，与列名语义一致）。四列在同一事务里落，不会出现
+        "状态改了标题没改"的半截报告。
+
+        失败语义（不抛业务异常炸调用方，但也不静默纠正）：
+          - llm_status 越界/空串 → ValueError（调用方 bug；绝不猜一个看似
+            正常的值顶上——LLM 到底有没有成功组织报告必须如实）；
+          - scan_id 不存在（scan_runs 行已删）→ 外键冲突**原样抛
+            IntegrityError**，与 add_feed_entry 同口径：那不是"重复保存"，
+            是调用方状态问题，不许伪装成返回值让上层误判成成功；
+          - 其余异常照实抛（本方法只兜 llm_status 这一层入参校验）。
+
+        payload 契约是 dict：None 按 {} 落库（与列默认值同口径）；读回时
+        _load 兜底，坏 JSON 也返回 {}，不炸调用方。
+        """
+        if llm_status not in REPORT_LLM_STATUSES:
+            raise ValueError(f"报告 LLM 状态非法: {llm_status!r}")
+        if payload is None:
+            payload = {}
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO scan_reports (scan_id, title, llm_status, status,"
+                " payload, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(scan_id) DO UPDATE SET title = excluded.title,"
+                " llm_status = excluded.llm_status, status = excluded.status,"
+                " payload = excluded.payload",
+                (int(scan_id), str(title or ""), llm_status, str(status or ""),
+                 _dump(payload), _now()))
+            return int(cur.lastrowid)
+
+    def get_report(self, scan_id: int) -> Optional[Dict[str, Any]]:
+        """按 scan_id 取该轮巡检的报告；不存在返回 None。
+
+        形状：{"id","scan_id","title","llm_status","status","created_at",
+        "payload"(解析后 dict)}。同一 scan_id 至多一行（唯一约束），故这是
+        单值查询而不是列表。
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM scan_reports WHERE scan_id = ?", (int(scan_id),)).fetchone()
+        return self._report_row(row) if row else None
+
+    def latest_report(self) -> Optional[Dict[str, Any]]:
+        """最近一份报告（id 倒序第一条）；一份都没有 → None。
+
+        为什么按 id 而不是 created_at 倒序：created_at 在 upsert 覆盖时不改
+        （保留首建时刻），自增 id 才反映"最近一次落到库里的报告"，与
+        latest_scan_run 同口径。
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM scan_reports ORDER BY id DESC LIMIT 1").fetchone()
+        return self._report_row(row) if row else None
+
+    def list_reports(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """报告列表（id 倒序，同 get_report 项形状）；limit 夹取 ≥1。
+
+        与 list_scan_runs 同口径的倒序翻页：最近写入/覆盖的报告在前。
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM scan_reports ORDER BY id DESC LIMIT ?",
+                (max(1, int(limit)),)).fetchall()
+        return [self._report_row(r) for r in rows]

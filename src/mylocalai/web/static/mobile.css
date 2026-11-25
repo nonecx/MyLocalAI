@@ -1,0 +1,174 @@
+/* ============================================================
+   mobile.css —— 手机 / 平板小屏适配（最后一层，只做覆盖）
+   定位：style.css / chat.css / platform.css / settings.css / profiles.css
+   都已有 max-width:900px 的"能挤下"规则；本文件只补"用得下去"的那部分，
+   因此必须最后引入（index.html 里排在所有样式之后）。
+
+   纪律：
+     - 不改任何既有文件里的规则，只在本文件覆盖；删掉本文件 = 回到原样。
+     - 尽量用同选择器 + 后加载取胜，不堆 !important。
+     - 触控场景：可点目标不小于 38px，输入框字号不小于 16px
+       （iOS Safari 对 <16px 的输入框会在聚焦时自动放大，正是"点一下页面就
+       跳大"的元凶）。
+     - 独立窗口（添加到桌面后 display-mode: standalone）下补安全区，
+       否则底部按钮会被 iPhone 的小横条压住。
+   ============================================================ */
+
+html {
+  /* 横屏时 iOS 会自动放大文字，关掉以保持排版稳定 */
+  -webkit-text-size-adjust: 100%;
+}
+
+/* ---------- 平板及以下（≤900px）：顺序与尺寸 ---------- */
+@media (max-width: 900px) {
+  /* 单列后左栏（会话/档案库/画像）会排在消息流之前，
+     手机上打开页面第一屏看不到对话区。这里把对话区提到最前。 */
+  .chat-layout {
+    display: flex;
+    flex-direction: column;
+    padding: 12px;
+    gap: 12px;
+  }
+  .chat-main-panel { order: -1; }
+  .chat-side { gap: 12px; }
+  .chat-main-panel { padding: 12px; }
+}
+
+/* ---------- 手机竖屏（≤720px） ---------- */
+@media (max-width: 720px) {
+  /* 顶栏：品牌 + 一排按钮，允许换行、留出可点面积 */
+  .site-header {
+    padding: 10px 12px;
+    gap: 8px;
+  }
+  .brand { gap: 8px; min-width: 0; }
+  .brand-text { min-width: 0; }
+  .brand-text h1 { font-size: 15px; line-height: 1.35; }
+  .brand-text p {
+    font-size: 11.5px;
+    line-height: 1.5;
+    margin-top: 1px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+  .logo { width: 32px; height: 32px; }
+
+  .header-actions {
+    gap: 6px;
+    width: 100%;
+    justify-content: flex-start;
+  }
+  .status-chip { font-size: 11px; padding: 3px 8px; }
+  .header-actions .btn-ghost,
+  .header-actions .profile-btn {
+    font-size: 12.5px;
+    padding: 8px 11px;
+    min-height: 38px;
+  }
+
+  /* 通栏 Tab 在窄屏留白收紧 */
+  .main-tabs { padding: 0 12px; gap: 18px; }
+  .main-tab { font-size: 14px; padding: 10px 2px; min-height: 40px; }
+
+  /* 面板内边距收紧，给正文字数让路 */
+  .panel { padding: 12px 13px; border-radius: 10px; }
+  .panel-head { margin-bottom: 8px; }
+  .panel-head h2 { font-size: 15px; }
+
+  /* 消息流与输入区 */
+  .chat-messages { gap: 10px; padding: 4px 0 10px; }
+  .chat-welcome { padding: 14px 6px; }
+  .chat-welcome h2 { font-size: 17px; }
+  .chat-welcome p { font-size: 12.5px; line-height: 1.75; }
+  .chat-welcome-samples { gap: 6px; margin-top: 12px; }
+  .chat-welcome-sample { font-size: 12px; padding: 7px 11px; }
+
+  .chat-quick-row { padding: 6px 2px 0; gap: 5px; }
+  .chat-quick-chip { font-size: 12px; padding: 6px 10px; min-height: 34px; }
+  .chat-quick-panel { margin: 6px 0 0; padding: 9px 10px; }
+
+  .chat-composer { padding-top: 10px; }
+  /* 16px 起才是 iOS 的"不放大"门槛 */
+  .chat-composer textarea,
+  .chat-quick-panel input,
+  .attn-fields input,
+  .chat-monitor-create input,
+  .chat-monitor-create select,
+  .profile-dialog input,
+  .profile-dialog select,
+  .settings-dialog input,
+  .settings-dialog select,
+  .settings-dialog textarea {
+    font-size: 16px;
+  }
+  .chat-composer textarea { min-height: 64px; max-height: 140px; }
+  .chat-actions { flex-wrap: wrap; gap: 8px; }
+  .chat-actions .btn-primary,
+  .chat-actions .btn-ghost { min-height: 40px; }
+
+  /* 卡片：长串/表格不再把整页顶宽 */
+  .chat-card { padding: 10px 11px; }
+  .chat-card,
+  .chat-messages,
+  .platform-feed { overflow-wrap: anywhere; }
+  .chat-versions-table,
+  .chat-insight-table,
+  .chat-batch-items-table {
+    display: block;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+  .chat-card pre,
+  .report-box pre,
+  .attn-deep-text { white-space: pre-wrap; word-break: break-word; }
+
+  /* 弹层：占满可用高度，四边留一点缝 */
+  .about-dialog,
+  .settings-dialog,
+  .profile-dialog { padding: 8px; }
+  .about-dialog-card { max-height: 90vh; padding: 14px 15px; }
+  .settings-dialog-card { height: 92vh; }
+  .profile-dialog-card { max-height: 90vh; padding: 13px 14px; }
+  .about-close-btn,
+  .settings-close-btn { min-height: 38px; }
+
+  /* 监测平台 */
+  .platform-layout { padding: 12px 12px 28px; }
+  .platform-statusbar { flex-wrap: wrap; gap: 8px; }
+  .platform-filterrow { overflow-x: auto; padding-bottom: 2px; }
+  .platform-filter { min-height: 34px; white-space: nowrap; }
+  .platform-drawer { width: 100%; max-width: 100%; padding: 14px; }
+
+  .site-footer {
+    font-size: 11.5px;
+    padding: 12px 12px calc(12px + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+/* ---------- 小屏手机（≤420px） ---------- */
+@media (max-width: 420px) {
+  /* 顶栏副标题在 375px 宽下要占掉两行按钮的位置，藏掉只留主标题 */
+  .brand-text p { display: none; }
+  .brand-text h1 { font-size: 14px; }
+  .header-actions .btn-ghost,
+  .header-actions .profile-btn { padding: 7px 10px; }
+  .chat-main-panel { padding: 10px; }
+  .chat-card { padding: 9px 10px; }
+  .chat-card-label { font-size: 16px; }
+}
+
+/* ---------- 从桌面图标启动（standalone）：底部安全区 ---------- */
+@media (display-mode: standalone) {
+  body { min-height: 100vh; }
+  .chat-composer { padding-bottom: env(safe-area-inset-bottom, 0px); }
+}
+
+/* ---------- 横屏矮屏（手机横放）：消息流不要被压成一条 ---------- */
+@media (max-width: 900px) and (max-height: 520px) {
+  .chat-layout { height: auto; }
+  .chat-main-panel { min-height: 320px; }
+  .chat-messages { max-height: 52vh; }
+}

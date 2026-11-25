@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
-"""平台只读工具（P7）：platform_feed —— 在对话里看监测平台的预警/信息流/巡检记录。
+"""平台只读工具（P7）：platform_feed —— 在对话里看监测平台的预警/信息流/巡检记录/巡检报告。
 
 与 insights 同族（§5.2 L4 参谋的同一模式）：
   - 只读：permission="read"、cost="zero"、est_s=0.0，不建档（dossier_id 恒 None）；
-  - 零 LLM：全部读 platform.store 三表，本模块不碰任何模型调用；
-  - kind 封闭枚举（warnings/feed/scans），越界一律 ValidationError（绝不猜）；
+  - 零 LLM：全部读 platform.store 三表 + scan_reports，本模块不碰任何模型调用；
+  - kind 封闭枚举（warnings/feed/scans/report），越界一律 ValidationError（绝不猜）；
   - 空库是合法输出（"暂无预警"照常出卡），库不可用才 ok=False + degraded=True；
-  - 呈现口径：传播风险分级只描述传播风险、不判定真假；热度是代理/估计值。
+  - 呈现口径：传播风险分级只描述传播风险、不判定真假；热度是代理/估计值；
+    巡检报告是代码汇总 + LLM 语言整理（platform.report），同样不做真假判断。
 
 依赖方向：assistant → platform（test_import_rules 允许：助手消费平台数据）。
 """
@@ -20,8 +21,8 @@ from mylocalai.assistant.registry import ToolRegistry, ValidationError
 
 __all__ = ["KINDS", "kind_param", "register_all", "get_store", "set_store"]
 
-#: 封闭枚举：三种只读视图。
-KINDS = ("warnings", "feed", "scans")
+#: 封闭枚举：四种只读视图。
+KINDS = ("warnings", "feed", "scans", "report")
 
 #: 信息流/预警的展示条数上限（卡片不背全量数据）。
 _FEED_LIMIT = 20
@@ -29,6 +30,17 @@ _SCANS_LIMIT = 10
 
 #: 风险档位中文名（与 platform/risk.py 的 LEVEL_LABELS 同口径；展示层唯一来源）。
 _LEVEL_LABELS = {"notice": "关注", "suspect": "疑似", "high": "高危", "urgent": "紧急"}
+
+#: 报告 LLM 组织状态 → 中文口径（与 platform/store.py REPORT_LLM_STATUSES、
+#: web/static/platform.js LLM_STATUS_TEXT 同封闭集；越界值原样透传不猜）。
+_LLM_STATUS_TEXT = {
+    "ok": "已生成", "disabled": "已关闭", "unavailable": "模型不可用",
+    "budget_exhausted": "预算耗尽", "cancelled": "已取消",
+    "skipped_empty": "本轮无新发现", "error": "生成异常",
+}
+
+#: 报告卡的口径行（铁律：不判真假、E 是代理估计值、报告只做语言组织）。
+_REPORT_NOTE = ("传播风险分级不判定真假；E 为代理估计值；巡检报告不做真假判断")
 
 _store = None
 _lock = threading.Lock()
@@ -95,6 +107,39 @@ def _entry_view(entry: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _as_list(value: Any) -> List[Any]:
+    """数组字段兜底：非列表 → 空（坏形状不炸对话，按"没有"处理）。"""
+    return list(value) if isinstance(value, list) else []
+
+
+def _report_view(row: Dict[str, Any]) -> Dict[str, Any]:
+    """报告行（store.latest_report 项）→ 卡片视图。
+
+    payload 是 platform.report.PatrolReport 的产物（代码汇总 + LLM 语言整理）；
+    本工具只转述、不改写、不补造。缺键一律兜底（坏形状不炸对话），llm_status
+    越界原样透传（前端按封闭集映射，越界如实显示原值，不猜正常状态）。
+    as_of 用行的 created_at（报告落库/首建时刻），与其余视图同口径。
+    """
+    payload = row.get("payload")
+    if not isinstance(payload, dict):
+        payload = {}
+    counts = payload.get("counts")
+    return {
+        "scan_id": row.get("scan_id"),
+        "title": str(row.get("title") or ""),
+        "summary": str(payload.get("summary") or ""),
+        "llm_status": str(row.get("llm_status") or ""),
+        "status": str(row.get("status") or ""),
+        "as_of": str(row.get("created_at") or ""),
+        "counts": counts if isinstance(counts, dict) else {},
+        "topic_notes": _as_list(payload.get("topic_notes")),
+        "analysis": _as_list(payload.get("analysis")),
+        "risks": str(payload.get("risks") or ""),
+        "followups": _as_list(payload.get("followups")),
+        "gaps": _as_list(payload.get("gaps")),
+    }
+
+
 def _card(kind: str, as_of: str, data: Any) -> Dict[str, Any]:
     """卡片形状：{card_type:"platform", kind, as_of, warnings|feed|scans}。
 
@@ -113,7 +158,7 @@ def _degraded(reason: str) -> Dict[str, Any]:
 
 
 def _platform_feed(ctx: Any, kind: str) -> Dict[str, Any]:
-    """platform_feed：按 kind 产出预警/信息流/巡检记录（零 LLM、零落库、永不抛）。"""
+    """platform_feed：按 kind 产出预警/信息流/巡检记录/巡检报告（零 LLM、零落库、永不抛）。"""
     as_of = _now_iso()
     try:
         store = get_store()
@@ -128,6 +173,23 @@ def _platform_feed(ctx: Any, kind: str) -> Dict[str, Any]:
             data = [_entry_view(r) for r in rows]
             digest = (f"[监测平台·信息流] 最近 {len(data)} 条发现"
                       if data else "[监测平台·信息流] 暂无信息（还没有巡检记录）")
+        elif kind == "report":
+            row = store.latest_report()
+            if row is None:
+                # 空库是合法输出：空卡 + 如实摘要（不是降级——报告确实还没生成过）
+                data = []
+                digest = ("[监测平台·巡检报告] 暂无巡检报告"
+                          "（还没有生成过巡检简报数据）｜" + _REPORT_NOTE)
+            else:
+                view = _report_view(row)
+                data = view
+                llm_text = _LLM_STATUS_TEXT.get(view["llm_status"],
+                                                view["llm_status"] or "状态未知")
+                counts = view["counts"]
+                digest = (f"[监测平台·巡检报告] {view['title']}"
+                          f"（LLM 整理：{llm_text}；话题 {counts.get('queries', 0)}"
+                          f" · 候选 {counts.get('candidates', 0)}"
+                          f" · 深查 {counts.get('verified', 0)}）｜{_REPORT_NOTE}")
         else:   # kind_param 已限定封闭枚举，走到这里只可能是 scans
             rows = store.list_scan_runs(limit=_SCANS_LIMIT)
             data = [{"id": r.get("id"), "status": str(r.get("status") or ""),
@@ -154,7 +216,8 @@ def register_all(registry: ToolRegistry, services: Any = None) -> None:
     """
     registry.register("platform_feed", _platform_feed, params=["kind"],
                       permission="read", cost="zero", est_s=0.0,
-                      description="看监测平台的预警/信息流/巡检记录"
+                      description="看监测平台的预警/信息流/巡检记录/巡检报告"
                                   "（warnings=大规模传播风险预警 / feed=信息流 /"
-                                  " scans=巡检历史；零 LLM 只读）",
+                                  " scans=巡检历史 / report=最近一份巡检报告；"
+                                  "零 LLM 只读）",
                       validators={"kind": kind_param})

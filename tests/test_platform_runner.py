@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
-"""巡检编排测试（P4）：两阶段流程、预算封顶、去重、取消、降级、隐私 fail-closed。
+"""巡检编排测试（P4 + 报告阶段接线）：两阶段流程、预算封顶、去重、取消、降级、
+隐私 fail-closed、报告阶段（platform.report）挂载/落库/降级。
 
-全部离线：stub provider（不联网）+ stub agent（不调 LLM）+ 临时 SQLite 库。
+全部离线：stub provider（不联网）+ stub agent（不调 LLM）+ stub 报告技能
+（TestReportWiring 注入）+ 临时 SQLite 库。未注入报告技能的用例走真实
+PatrolReport，其缺省 llm_fn 在测试隔离环境（模型注册表指向不存在路径）下
+快速失败 → llm_status=unavailable，全程不联网。
 """
 
 from __future__ import annotations
@@ -136,14 +140,15 @@ class _RunnerTestBase(unittest.TestCase):
         model_registry.reset_cache()
         llm_client.reset_cache()
 
-    def _runner(self, rules=None, privacy=PREFS_ON, providers=None, agent=None):
+    def _runner(self, rules=None, privacy=PREFS_ON, providers=None, agent=None,
+                report=None):
         store = PlatformStore(self.db)
         dossiers = DossierService(store=DossierStore(self.db), privacy=privacy)
         self.addCleanup(store.close)
         self.addCleanup(dossiers.close)
         return PlatformRunner(store=store, rules=rules or TEST_RULES, privacy=privacy,
                               dossiers=dossiers, providers=providers or [StubProvider([])],
-                              agent=agent or StubAgent())
+                              agent=agent or StubAgent(), report=report)
 
 
 class TestPrivacyGates(_RunnerTestBase):
@@ -340,6 +345,8 @@ class StubDomainStore:
         self.feed_entries = []          # add_feed_entry 收到的字段
         self.entry_updates = []         # update_feed_entry 收到的字段
         self.inferred_writes = []       # set_inferred_domain 收到的参数
+        self.saved_reports = []         # save_report 收到的参数（v12 报告落库）
+        self.report_calls = []          # previous_scan_run 收到的参数
         self._next_id = 1
         self._urls = set()
 
@@ -385,6 +392,20 @@ class StubDomainStore:
 
     def latest_e_for_query(self, query_id):
         return None
+
+    # ---- 巡检报告（v12：记录型桩；真库语义由 tests/test_platform_store.py 覆盖）----
+
+    def previous_scan_run(self, scan_id):
+        """上一轮巡检基准：桩里恒 None（首轮/无基准，报告按无环比处理）。"""
+        self.report_calls.append(scan_id)
+        return None
+
+    def save_report(self, scan_id, *, title, llm_status, status, payload=None):
+        """记录落库参数并返回行 id（upsert 语义不模拟：一轮一报由真库管）。"""
+        self.saved_reports.append({"scan_id": scan_id, "title": title,
+                                   "llm_status": llm_status, "status": status,
+                                   "payload": payload})
+        return len(self.saved_reports)
 
     # ---- 信息流（签名与数据层 v7 一致：收 topic_domain/topic_domain_source）----
 
@@ -656,6 +677,173 @@ class TestPatrolProviderInRunner(_RunnerTestBase):
         self.assertEqual([p.name for p in runner.providers],
                          ["search", "rss", "patrol"])
         self.assertIsInstance(runner.providers[-1], PatrolSourceProvider)
+
+
+class StubReport:
+    """桩报告技能（platform.report.PatrolReport 的最小面）：记录 build 入参、
+    可定制返回 payload、可抛异常（测降级）。"""
+
+    def __init__(self, payload=None, raise_exc=False):
+        self.raise_exc = raise_exc
+        self.calls = []
+        self.payload = payload or {
+            "scan_id": 1, "as_of": "2026-11-24T22:00:00+08:00",
+            "scan_status": "completed", "llm_status": "ok",
+            "title": "桩报告标题", "summary": "桩报告摘要",
+            "counts": {"queries": 1, "candidates": 2, "verified": 1,
+                       "deduped": 0, "degraded": 0,
+                       "risk": {"notice": 1, "suspect": 0, "high": 1, "urgent": 0},
+                       "verdicts": {}, "domains": {}},
+            "topic_stats": [], "highlights": [], "changes": {},
+            "topic_notes": [], "analysis": [], "risks": "", "followups": [],
+            "gaps": [], "errors": [],
+        }
+
+    def build(self, *, scan_id, scan_status, entries, queries, counters,
+              warnings=None, prev_scan=None, cancel_check=None):
+        self.calls.append({"scan_id": scan_id, "scan_status": scan_status,
+                           "entries": entries, "queries": queries,
+                           "counters": counters, "warnings": warnings,
+                           "prev_scan": prev_scan, "cancel_check": cancel_check})
+        if self.raise_exc:
+            raise RuntimeError("报告技能炸了")
+        out = dict(self.payload)
+        out["scan_id"] = scan_id
+        out["scan_status"] = scan_status
+        return out
+
+
+class TestReportWiring(_RunnerTestBase):
+    """报告阶段接线（platform.report）：summary 挂载、落库/不落库、入参透传、
+    异常降级、取消、早退路径、queries 的 growth 口径。"""
+
+    def _provider(self):
+        return StubProvider([_cand("某市自来水检测异常", "https://news.example.com/1")])
+
+    def test_report_attached_and_persisted(self):
+        """PREFS_ON：summary 挂 report（title/llm_status/counts），且落库与
+        summary 同一份 payload（save_report → get_report 往返一致）。"""
+        runner = self._runner(providers=[self._provider()])
+        summary = runner.scan(queries=["自来水"])
+        self.assertEqual(summary["status"], "completed")
+        report = summary.get("report")
+        self.assertIsInstance(report, dict)
+        self.assertTrue(report.get("title"))          # 代码兜底标题也必须有
+        self.assertIn("llm_status", report)
+        self.assertIn("counts", report)
+        self.assertEqual(report["counts"]["candidates"], 1)
+        row = runner.store.get_report(summary["scan_id"])
+        self.assertIsNotNone(row)
+        self.assertEqual(row["title"], report["title"])
+        self.assertEqual(row["llm_status"], report["llm_status"])
+        self.assertEqual(row["status"], summary["status"])
+        self.assertEqual(row["payload"], report)      # 落库即 summary 那份
+
+    def test_report_not_persisted_when_saving_off(self):
+        """PREFS_NO_SAVE：报告照常进当次返回，但不落库（隐私 fail-closed）。"""
+        runner = self._runner(privacy=PREFS_NO_SAVE, providers=[self._provider()])
+        summary = runner.scan(queries=["自来水"])
+        self.assertIn("report", summary)
+        self.assertEqual(runner.store.list_reports(), [])
+
+    def test_stub_report_receives_scan_inputs(self):
+        """注入桩报告：build 收到定稿的 scan_status / entries / counters /
+        prev_scan（首轮无基准 → None）；返回值原样进 summary。"""
+        stub = StubReport()
+        runner = self._runner(providers=[self._provider()], report=stub)
+        summary = runner.scan(queries=["自来水"])
+        self.assertEqual(len(stub.calls), 1)
+        call = stub.calls[0]
+        self.assertEqual(call["scan_status"], summary["status"])
+        self.assertEqual(call["entries"], summary["entries"])
+        self.assertEqual(call["counters"], summary["counters"])
+        self.assertIsNone(call["prev_scan"])
+        self.assertEqual(summary["report"]["title"], "桩报告标题")
+        self.assertEqual(summary["report"]["scan_status"], summary["status"])
+
+    def test_report_exception_is_warning_only(self):
+        """桩 build 抛异常：scan 状态不受影响，warning 如实记「生成失败」。"""
+        runner = self._runner(providers=[self._provider()],
+                              report=StubReport(raise_exc=True))
+        summary = runner.scan(queries=["自来水"])
+        self.assertEqual(summary["status"], "completed")
+        self.assertNotIn("report", summary)
+        self.assertTrue(any("巡检报告生成失败" in w for w in summary["warnings"]))
+
+    def test_report_persist_failure_is_warning_only(self):
+        """save_report 抛错：报告已进 summary 照常呈现，只留落库 warning。"""
+        runner = self._runner(providers=[self._provider()])
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("db gone")
+
+        runner.store.save_report = boom
+        summary = runner.scan(queries=["自来水"])
+        self.assertEqual(summary["status"], "completed")
+        self.assertIn("report", summary)
+        self.assertTrue(any("巡检报告落库失败" in w for w in summary["warnings"]))
+
+    def test_cancelled_scan_marks_report_cancelled(self):
+        """取消场景：报告仍生成（代码汇总可用），llm_status=cancelled
+        （不白烧一次 LLM——取消探测在调用前）。"""
+        state = {"n": 0}
+
+        def cancel_check():
+            state["n"] += 1
+            return state["n"] > 3
+
+        cands = [_cand(f"热门 {i}", f"https://news.example.com/{i}") for i in range(3)]
+        runner = self._runner(providers=[StubProvider(cands)])
+        summary = runner.scan(queries=["热门"], cancel_check=cancel_check)
+        self.assertEqual(summary["status"], "cancelled")
+        self.assertEqual(summary["report"]["llm_status"], "cancelled")
+
+    def test_skipped_scan_has_no_report(self):
+        """skipped（未授权外部检索）早退：没有可汇总的一轮，不产报告。"""
+        runner = self._runner(privacy=PREFS_NO_EXTERNAL, providers=[StubProvider([])])
+        summary = runner.scan(queries=["话题"])
+        self.assertEqual(summary["status"], "skipped")
+        self.assertNotIn("report", summary)
+
+    def test_no_watch_query_scan_has_no_report(self):
+        """无启用监控词早退：同样不产报告（空巡检无可汇总内容）。"""
+        runner = self._runner()
+        summary = runner.scan()
+        self.assertEqual(summary["status"], "completed")
+        self.assertNotIn("report", summary)
+
+    def test_queries_carry_growth(self):
+        """queries 带 growth（百分比口径）：首轮无基准为 0，次轮热度变化 > 0。"""
+        provider = StubProvider([_cand("话题甲", "https://news.example.com/1")])
+        runner = self._runner(providers=[provider])
+        summary1 = runner.scan(queries=["话题"])
+        self.assertEqual(summary1["queries"][0]["growth"], 0.0)
+        # 同一监控词、热度抬高（摘要带公开阅读量）：e_prev 有基准 → 环比 > 0
+        provider.candidates = [_cand("话题甲", "https://news.example.com/2",
+                                     snippet="阅读量 1200万")]
+        summary2 = runner.scan(queries=["话题"])
+        growth = summary2["queries"][0]["growth"]
+        self.assertGreater(growth, 0.0)
+        self.assertLessEqual(growth, 100.0)       # relative_change∈[0,1] × 100
+
+    def test_stub_domain_store_records_report_calls(self):
+        """桩 store（领域用例同款）也走报告接线：previous_scan_run 被调用、
+        save_report 记录参数（既有 domain 用例不挂）。"""
+        store = StubDomainStore([{"id": 1, "query": "话题", "domain": ""}])
+        dossiers = DossierService(store=DossierStore(self.db), privacy=PREFS_ON)
+        self.addCleanup(dossiers.close)
+        runner = PlatformRunner(store=store, rules=TEST_RULES, privacy=PREFS_ON,
+                                dossiers=dossiers,
+                                providers=[StubProvider(
+                                    [_cand("某市自来水检测异常",
+                                           "https://news.example.com/1")])],
+                                agent=StubAgent(),
+                                report=StubReport())
+        summary = runner.scan(queries=["话题"])
+        self.assertIn("report", summary)
+        self.assertEqual(store.report_calls, [1])          # 取了上一轮基准
+        self.assertEqual(len(store.saved_reports), 1)      # 落库一次
+        self.assertEqual(store.saved_reports[0]["scan_id"], 1)
 
 
 if __name__ == "__main__":
