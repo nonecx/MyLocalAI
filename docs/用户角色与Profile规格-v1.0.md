@@ -1,4 +1,4 @@
-﻿# 用户角色与档案工作区规格 v1.0
+# 用户角色与档案工作区规格 v1.0
 
 > 状态：阶段 1 已实现（Profile 骨架 + 普通用户呈现）；阶段 2（材料批量分析）、
 > 阶段 3（领域监测订阅）按本文档的接口契约分阶段落地。
@@ -63,6 +63,29 @@ dossiers.profile_id INTEGER         -- v6 新增列 + 索引
 - 助手工具层：`list_dossiers` 按会话工作区过滤；`get_dossier`/`export_card`/
   `recheck_dossier`/`read_opinions`/`deep_read` 经 `tools_guard.dossier_visible`
   做同一防护；指纹召回（`find_fingerprints`）按工作区过滤。
+
+### 3.1 角色枚举的说明字段与切换入口（2026-11-24 v8 增补）
+
+`GET /api/profiles` 的 `roles[]` 每项除 `role`/`label` 外增补 `description`
+（取自 `dossier/profiles.py` 的 `ROLE_DESCRIPTIONS`）。这是**角色能力说明的唯一
+事实源**：前端「切换角色」菜单直接渲染该字段，不再自留一份文案，避免界面与
+文档出现两套说法；`ROLE_LABELS`、`ROLE_DESCRIPTIONS`、前端 `ROLE_META` 三处的
+对齐由 `tests.test_profiles`（roles 段逐条对拍）与
+`tests.test_website_chat.TestProfilesFrontendConsistency` 锁定。
+
+角色切换入口（三个，全部本地、无鉴权）：
+
+| 入口 | 位置 | 行为 |
+| --- | --- | --- |
+| 顶栏切换器 | `#profileBtn`（常驻「档案名 · 角色短名」） | 打开菜单，顶部「切换角色（当前档案）」四个角色一键换，当前项打勾 |
+| 左栏按钮 | `#chatRoleSwitchBtn`（「当前档案」行右侧） | 打开同一个菜单，焦点直接落在当前角色项 |
+| 管理弹层 | 档案行「改角色」 | 改**任意档案**的角色（含非激活档案） |
+
+- 换当前档案角色走 `PUT /api/profiles/{id}` 的 `role` 字段，成功后菜单保持打开、
+  就地打勾并显示一行结果（失败显示后端 detail，选中态不动）；
+- 成功后派发 `mylocalai:profile-changed`，左栏「当前档案」行、材料批次/领域监测
+  面板按新角色重判显隐——**已经切走的角色面板立刻收起，不留在界面上骗人**；
+- 角色说明为空（roles 段缺失/后端老版本）时菜单只显示角色名，不编造说明。
 
 ## 4. 呈现契约（layperson）
 

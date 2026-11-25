@@ -379,7 +379,10 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 2611 个用例（unittest discover 全量，2026-11-25 合并实测：路由诚实降级
+离线套件共 2613 个用例（unittest discover 全量，2026-11-25 角色切换入口 v8 落地
+（顶栏角色标签 / 菜单一键换角色 / 左栏入口 + cards.js 收口 apiPath 补实现）后实测，
+本次新增 2 例：角色切换入口前后端自洽、cards.js 的 apiPath 导出守护；
+2026-11-25 合并实测：路由诚实降级
 与标题治理（fix/route-degradation-and-titles）新增 60 例；2026-11-24 巡检报告阶段
 （platform/report + schema v12 scan_reports + 两端点 + 平台页报告卡 + CLI 报告段 +
 platform_feed kind="report"）落地新增 94 例——`tests/test_platform_report.py`
@@ -796,11 +799,22 @@ DOSSIER_DB_PATH 可覆盖）。测试：`tests.test_mcp_assistant`（同核对�
   role=full，旧档案可读、行为不变）。
 - **接口**：`GET/POST /api/profiles`、`PUT/DELETE /api/profiles/{id}`、
   `POST /api/profiles/{id}/activate`；列表/详情/画像端点一律按激活档案过滤。
+- **换角色怎么走（2026-11-24 v8，解决"不知道角色在哪切"）**：顶栏按钮常驻
+  「档案名 · 角色短名」，点开菜单**顶部就是「切换角色（当前档案）」**——四个角色
+  一键换、当前项打勾、每项带一句能力说明；左栏「当前档案」行右侧另有常驻
+  「切换角色」按钮，打开同一个菜单并把焦点送到当前角色项。换角色走
+  `PUT /api/profiles/{id}` 的 `role` 字段（与弹层「改角色」同一端点），成功后
+  菜单就地打勾并给出结果行，同时派发 `mylocalai:profile-changed` 让左栏、
+  材料批次/领域监测面板按新角色重判显隐。角色说明的唯一来源是
+  `GET /api/profiles` 的 `roles[].description`（后端
+  `dossier/profiles.py` 的 `ROLE_DESCRIPTIONS`），前端不自留一份文案。
 - **删除保护**：最后一个档案、当前激活档案、仍有会话/档案数据的档案一律拒删（409）。
-- **口径**：角色只改**呈现与数据范围**，不改判定语义；`verdict.assess` 打分、
-  隐私 fail-closed 授权、路由四层防护链均不随角色放宽。
+- **口径**：角色只改**呈现、数据范围与可用工具**，不改判定语义；`verdict.assess`
+  打分、隐私 fail-closed 授权、路由四层防护链均不随角色放宽。
 - 测试：`tests.test_profiles`（迁移回填 / CRUD / 分家 / 跨区防护 / layperson 卡片 /
-  Web API 全链）。
+  Web API 全链 + `roles[].description` 对拍）、
+  `tests.test_website_chat`（`TestProfilesFrontendConsistency` 锁角色切换入口：
+  顶栏角色标签、左栏按钮、菜单角色区、PUT role 调用与说明来源）。
 - 四个角色各自的工作流程示意图、通用/专用 skill 的功能与定位、能力 × 角色裁剪矩阵：
   `docs/角色工作流与Skill定位总览-2026-11-23.md`。
 

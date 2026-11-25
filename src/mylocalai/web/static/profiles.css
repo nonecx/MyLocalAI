@@ -30,6 +30,22 @@
   line-height: 1;
 }
 
+/* 顶栏常驻角色短名（v8）：让"我现在是什么角色"一直可见；
+   浅底小胶囊，与 .profile-btn 的 ghost 底区分开，不抢档案名的主次 */
+.profile-role-chip {
+  max-width: 92px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--primary-soft);
+  border: 1px solid var(--primary-border);
+  color: var(--primary-dark);
+  font-size: 11px;
+  line-height: 18px;
+}
+
 .profile-caret {
   font-size: 10px;
   color: var(--muted);
@@ -102,9 +118,111 @@
   color: var(--muted);
 }
 
-/* ---------- 键盘可达：菜单项 / 弹层内统一焦点环（与 settings.css 同款，
-   键盘导航配套；:focus-visible 保证鼠标点击不画环） ---------- */
+/* ---------- 菜单顶部「切换角色」区（v8） ----------
+   当前档案的四个角色一键换：图标 + 角色名 + 一句能力说明（说明来自后端
+   roles[].description），右侧 ✓ 标当前项；换角色后就地出结果/失败行。 */
+.profile-menu-title {
+  margin: 4px 0 2px;
+  padding: 0 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+
+.profile-role-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 6px;
+}
+
+.profile-role-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.profile-role-item:hover {
+  background: var(--primary-soft);
+}
+
+.profile-role-item.active {
+  background: var(--primary-soft);
+  box-shadow: inset 0 0 0 1px var(--primary-border);
+}
+
+.profile-role-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.profile-role-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-role-item.active .profile-role-name {
+  color: var(--primary-dark);
+  font-weight: 600;
+}
+
+.profile-role-desc {
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: normal;
+}
+
+.profile-role-check {
+  margin-left: auto;
+  padding-left: 6px;
+  color: var(--primary);
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+/* 换角色结果 / 失败提示：与弹层 .profile-status 同一视觉语言 */
+.profile-role-note {
+  margin: 2px 10px 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--primary-border);
+  border-radius: 6px;
+  background: var(--primary-soft);
+  color: var(--primary-dark);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.profile-role-note.error {
+  border-color: var(--danger);
+  background: #fef3f2;
+  color: var(--danger);
+}
+
+/* 角色区与档案列表之间的分隔 */
+.profile-menu-sep {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--border);
+}
+
+/* ---------- 键盘可达：菜单项 / 角色项 / 弹层内统一焦点环（与 settings.css 同款，
+   键盘导航配套；:focus-visible 保证鼠标点击不画环）。角色项是 v8 新增的按钮，
+   漏掉它就会退到浏览器默认的黑色焦点框（实测很扎眼）。 ---------- */
 .profile-menu-item:focus-visible,
+.profile-role-item:focus-visible,
 .profile-dialog :focus-visible {
   outline: 2px solid var(--primary);
   outline-offset: 2px;
@@ -293,8 +411,12 @@
 /* ---------- 窄屏 900px（对齐 chat.css / settings.css 的既有断点）：
    顶栏切换器收窄不挤占品牌区，菜单不横向溢出，弹层贴边占满、字段单列 ---------- */
 @media (max-width: 900px) {
-  .profile-btn { max-width: 150px; }
-  .profile-btn #profileName { max-width: 84px; }
+  /* 顶栏会换行成"品牌 + 操作区"上下两段，按钮可占更宽：档案名与角色胶囊都留得下 */
+  .profile-btn { max-width: min(78vw, 260px); }
+  .profile-btn #profileName { max-width: 120px; }
+
+  /* 角色胶囊在窄屏收窄（角色名靠 title/菜单仍可读全） */
+  .profile-role-chip { max-width: 96px; }
 
   .profile-menu {
     min-width: 0;

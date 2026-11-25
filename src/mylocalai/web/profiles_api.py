@@ -23,8 +23,8 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from mylocalai.dossier.profiles import ROLES, ROLE_LABELS, DEFAULT_ROLE, ProfileError, \
-    ProfileStore
+from mylocalai.dossier.profiles import ROLES, ROLE_DESCRIPTIONS, ROLE_LABELS, \
+    DEFAULT_ROLE, ProfileError, ProfileStore
 
 router = APIRouter()
 
@@ -61,12 +61,18 @@ def _profile_or_404(profile_id: int) -> Dict[str, Any]:
 
 @router.get("/api/profiles")
 def profiles_list() -> Dict[str, Any]:
-    """全部档案工作区（id 升序）+ 当前激活档案。"""
+    """全部档案工作区（id 升序）+ 当前激活档案 + 角色枚举（含一句能力说明）。
+
+    roles 段的 description 取自 dossier/profiles.py 的 ROLE_DESCRIPTIONS，
+    是前端「切换角色」菜单的唯一说明来源——前端不再自留一份文案，
+    避免"界面说一套、文档说一套"。
+    """
     store = get_profile_store()
     profiles = store.list_profiles()
     active = next((p for p in profiles if p.get("is_active")), store.active())
     return {"profiles": profiles, "active": active,
-            "roles": [{"role": r, "label": ROLE_LABELS.get(r, r)} for r in ROLES]}
+            "roles": [{"role": r, "label": ROLE_LABELS.get(r, r),
+                       "description": ROLE_DESCRIPTIONS.get(r, "")} for r in ROLES]}
 
 
 @router.post("/api/profiles")

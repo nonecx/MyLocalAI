@@ -448,8 +448,11 @@ class TestBatchPanelRoleGate(PanelGateTestBase):
         self.activate("ws-a", "材料分析区", "analyst")
         resp = self.client.post("/api/batch", json={"items": ["材料甲"]})
         self.assertEqual(resp.status_code, 202, resp.text)
-        self.assertEqual(self.store.get_batch(resp.json()["batch"]["id"])["status"],
-                         "running")
+        # 202 的语义是"已受理并开跑"：后台线程跑得快（单条 stub 材料）时
+        # 断言前就已 done，这里两种都接受——本条测的是角色闸放行，不是调度时序
+        # （全量套件并发跑时曾因这条竞态偶发失败）。
+        self.assertIn(self.store.get_batch(resp.json()["batch"]["id"])["status"],
+                      ("running", "done"))
 
     def test_full_can_create_batch(self):
         """full：建批次 202（恒全量）。"""

@@ -484,6 +484,14 @@ class TestProfilesApi(unittest.TestCase):
         self.assertEqual(listed["active"]["key"], "default")
         self.assertEqual({r["role"] for r in listed["roles"]},
                          {"layperson", "analyst", "monitor", "full"})
+        # roles 段带中文名 + 一句能力说明：前端「切换角色」菜单只认这一份
+        # （profiles.js 的 roleDescription 读 description，不再自留一套文案）
+        from mylocalai.dossier.profiles import ROLE_DESCRIPTIONS, ROLE_LABELS
+        self.assertEqual({r["role"]: r["label"] for r in listed["roles"]}, ROLE_LABELS)
+        self.assertEqual({r["role"]: r["description"] for r in listed["roles"]},
+                         ROLE_DESCRIPTIONS)
+        for entry in listed["roles"]:
+            self.assertTrue(entry["description"], f"角色缺能力说明：{entry}")
 
         created = self.client.post("/api/profiles", json={
             "key": "health", "display_name": "健康领域", "role": "monitor"}).json()
