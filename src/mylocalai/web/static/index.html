@@ -30,16 +30,21 @@
     </div>
     <div class="header-actions">
       <span id="apiStatus" class="status-chip checking">服务检查中…</span>
-      <!-- 档案工作区切换器（多 Profile 分家）：按钮显示当前档案与角色，下拉切换；
-           管理弹层开合由 profiles.js 绑定（与 settings 弹层同模式：按钮/关闭/遮罩/Esc）。 -->
+      <!-- 档案工作区切换器（多 Profile 分家）：按钮显示「当前档案 · 当前角色」，下拉菜单
+           顶部就是「切换角色」区（四个角色一键换），下面是档案工作区列表；
+           管理弹层开合由 profiles.js 绑定（与 settings 弹层同模式：按钮/关闭/遮罩/Esc）。
+           角色标签常驻可见，避免"角色在哪切"只能靠翻管理弹层。 -->
       <div class="profile-switcher" id="profileSwitcher">
         <button id="profileBtn" class="btn-ghost profile-btn" type="button"
-          aria-haspopup="menu" aria-controls="profileMenu" aria-expanded="false">
+          aria-haspopup="menu" aria-controls="profileMenu" aria-expanded="false"
+          aria-label="切换档案工作区或角色" title="切换档案工作区或角色">
           <span class="profile-role-icon" id="profileRoleIcon" aria-hidden="true">🧭</span>
           <span id="profileName">默认档案</span>
+          <span class="profile-role-chip" id="profileRoleLabel">全部能力</span>
           <span class="profile-caret" aria-hidden="true">▾</span>
         </button>
-        <div id="profileMenu" class="profile-menu hidden" role="menu" aria-label="切换档案工作区"></div>
+        <div id="profileMenu" class="profile-menu hidden" role="menu"
+          aria-label="切换档案工作区或角色"></div>
       </div>
       <!-- 设置入口：放在「关于」左边（规格 §4.1）；弹层开合由 shell.js 绑定到 SettingsPanel -->
       <button id="settingsBtn" class="btn-ghost settings-open-btn" type="button"
@@ -66,7 +71,7 @@
         <h2 id="profileDialogTitle">档案工作区</h2>
         <button id="profileDialogClose" class="btn-ghost profile-close-btn" type="button">关闭</button>
       </div>
-      <p class="profile-dialog-hint muted">每个档案工作区有独立的会话、档案与画像数据；角色决定入口与呈现，能力不裁剪。切换后左栏与会话视图随之换边。</p>
+      <p class="profile-dialog-hint muted">每个档案工作区有独立的会话、档案与画像数据；角色决定入口、呈现与可用工具（判定语义不随角色放宽）。<b>换角色不必进这个弹层</b>：点顶栏「档案名 · 角色」或左栏「切换角色」，菜单顶部一键换；这里的「改角色」用于改别的档案。</p>
       <div id="profileStatus" class="profile-status hidden" role="status" aria-live="polite"></div>
       <div id="profileList" class="profile-list"></div>
       <!-- 内联编辑表单骨架（初始 hidden，供 U3 接 JS：点档案行的「改名 / 改角色」时
@@ -74,7 +79,8 @@
            四个角色 option 的文案与 profiles.js 的 ROLE_META 逐字对齐
            （layperson=普通用户 / analyst=专业用户 · 材料分析 /
             monitor=专业用户 · 领域监测 / full=全部能力），默认选中 full。
-           注意：profiles.css 尚无 .profile-inline-form，U3 接线时补样式。 -->
+           当前档案换角色走顶栏菜单（GET /api/profiles 的 roles 段带 description），
+           本表单用于管理弹层里改"其它档案"的角色。 -->
       <form id="profileRenameForm" class="profile-inline-form hidden" novalidate>
         <input id="profileRenameInput" type="text" maxlength="40" autocomplete="off"
           placeholder="新的显示名称" aria-label="新的显示名称" />
@@ -178,8 +184,14 @@
           <h2>会话</h2>
           <button id="chatNewSession" class="btn-ghost chat-new-btn" type="button">＋ 新建会话</button>
         </div>
-        <!-- 当前档案工作区（多 Profile 分家）：由 chat.js 在 profiles 事件后刷新 -->
-        <p class="chat-profile-line" id="chatProfileLine"></p>
+        <!-- 当前档案工作区（多 Profile 分家）：由 chat.js 在 profiles 事件后刷新；
+             右侧常驻「切换角色」按钮，和顶栏切换器打开同一个菜单（profiles.js 接线），
+             用户在工作区里就能直接换角色，不必先去顶栏找。 -->
+        <div class="chat-profile-row">
+          <p class="chat-profile-line" id="chatProfileLine"></p>
+          <button id="chatRoleSwitchBtn" class="btn-ghost chat-role-switch" type="button"
+            aria-haspopup="menu" aria-controls="profileMenu" aria-expanded="false">切换角色</button>
+        </div>
         <ul id="chatSessionList" class="chat-session-list">
           <li class="empty">暂无会话，发消息即可自动创建</li>
         </ul>

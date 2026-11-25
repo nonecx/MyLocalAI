@@ -37,6 +37,29 @@
     return n.toLocaleString("zh-CN", { maximumFractionDigits: 2 });
   }
 
+  /* URL 占位符拼装（U0 收口：batch.js / monitor.js / profiles.js 三处共用这一份，
+     各自不再留本地副本）。两种用法：
+       - 单值模式 apiPath("/api/x/{id}", 3) —— 模板里的每个 {...} 都替换成同一个值
+         （兼容 {id}/{batch_id}/{sub_id} 这些历史命名）；
+       - 对象模式 apiPath("/api/x/{pid}/models/{mid}", {pid, mid}) —— 按占位符名取值，
+         缺值的占位符原样保留（调用方拼错时一眼看得见，不静默拼出半截 URL）。
+     值一律 encodeURIComponent：id 里混进斜杠/空格也不会把路径拼坏。
+     历史教训：本函数曾被三处引用却没人实现，一跑就抛 `apiPath is not a function`，
+     切换档案/角色、批次流与监测详情全哑火——所以它是导出项，且有测试守着。 */
+  function apiPath(template, values) {
+    const tpl = String(template === undefined || template === null ? "" : template);
+    if (values && typeof values === "object") {
+      return tpl.replace(/\{([^{}]+)\}/g, (whole, key) => {
+        const v = values[key];
+        if (v === undefined || v === null) return whole;
+        return encodeURIComponent(String(v));
+      });
+    }
+    if (values === undefined || values === null) return tpl;
+    const one = encodeURIComponent(String(values));
+    return tpl.replace(/\{[^{}]*\}/g, one);
+  }
+
   /* classic 四档展示配置（与引擎 verdict 标签同一份口径，复制而来；
      改档位文案要同步后端，展示层只读不写） */
   const SPEECH_META = {
@@ -1752,5 +1775,6 @@
     renderStatistics, renderComparison, renderTimeline,
     renderBatchSummary, renderMonitorChange,
     mountCard, escapeHtml,
+    apiPath,
   };
 })();

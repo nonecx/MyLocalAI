@@ -406,6 +406,22 @@ class TestChatFrontendConsistency(unittest.TestCase):
         self.assertIn("renderResearch,", tail)
         self.assertIn("renderAuthority,", tail)
 
+    def test_cards_exports_shared_api_path(self):
+        """cards.js 收口的 apiPath 必须真的实现并导出（batch/monitor/profiles 共用）。
+
+        历史教训：它曾被三处引用却没人实现，一跑就抛 `apiPath is not a function`，
+        切换档案/角色、批次进度流、监测详情全部哑火。这里锁三件事：函数在、
+        在导出名单里、三处调用方仍在复用它。
+        """
+        self.assertIn("function apiPath(template, values)", self.cards_js)
+        tail = self.cards_js.split("window.ChatCards")[-1]
+        self.assertIn("apiPath,", tail)
+        for name in ("batch.js", "monitor.js", "profiles.js"):
+            js = _read(STATIC / name)
+            self.assertIn("apiPath", js, f"{name} 应复用 cards.js 的 apiPath")
+        # 单值模式要替换"全部"占位符（正则带 g），不能只换第一个
+        self.assertIn(r"/\{[^{}]*\}/g", self.cards_js)
+
     def test_claim_answer_renderer_contract(self):
         """新答案先于 legacy score card；未验证时不展示旧风险数值。"""
         self.assertIn("function renderClaimAnswer", self.cards_js)
@@ -558,6 +574,41 @@ class TestProfilesFrontendConsistency(unittest.TestCase):
                       "chat.js 与 profiles.js 的切换事件名不一致")
         self.assertIn(f'new CustomEvent(CHANGED_EVENT', self.profiles_js)
         self.assertIn(f'addEventListener(PROFILE_CHANGED_EVENT', chat_js)
+
+    def test_role_switcher_affordances(self):
+        """v8 角色可见化：顶栏常驻角色标签 + 左栏「切换角色」入口 + 菜单角色区。
+
+        角色不再只能藏在管理弹层里换：顶栏按钮显示「档案名 · 角色短名」，
+        菜单顶部四个角色一键换（PUT /api/profiles/{id} 的 role 字段），
+        左栏按钮打开同一个菜单并把焦点送到当前角色项。
+        """
+        for marker in ('id="profileRoleLabel"', 'id="chatRoleSwitchBtn"',
+                       'class="profile-role-chip"', 'aria-controls="profileMenu"'):
+            self.assertIn(marker, self.html, f"index.html 缺角色切换入口：{marker}")
+        # ROLE_META 四角色齐全，各带 icon/label/short（与后端 ROLES 同序）
+        for role in ("layperson", "analyst", "monitor", "full"):
+            self.assertRegex(
+                self.profiles_js,
+                rf'{role}: \{{ icon: "[^"]+", label: "[^"]+", short: "[^"]+" \}}',
+                f"profiles.js 的 ROLE_META 缺角色或缺 short：{role}")
+        # 菜单角色区、当前项勾选、结果行、按 role 找回焦点
+        for marker in ("切换角色（当前档案）", "profile-role-item", "profile-role-check",
+                       "profile-role-note", "button[data-role]", "focusRoleItem",
+                       'body: JSON.stringify({ role: target })'):
+            self.assertIn(marker, self.profiles_js, f"profiles.js 缺角色区实现：{marker}")
+        # 角色说明只认后端 roles[].description（不在前端写死能力文案）
+        self.assertIn('description: (r && r.description) || ""', self.profiles_js)
+        self.assertIn("roleDescription", self.profiles_js)
+        # 左栏入口确实接线到 profiles.js（不是只在 HTML 里摆个按钮）
+        self.assertIn('$("#chatRoleSwitchBtn")', self.profiles_js)
+        self.assertIn("openRoleSection", self.profiles_js)
+        # 首载回填事件：profiles.js 的 fetch 晚于 chat.js 首屏渲染，名字必须两侧一致，
+        # 否则左栏"当前档案"行在首屏永远是空的（新按钮旁边一片空白）
+        ready = re.search(r'const READY_EVENT = "([^"]+)"', self.profiles_js)
+        self.assertIsNotNone(ready, "profiles.js 缺少 READY_EVENT")
+        chat_js = _read(CHAT_JS)
+        self.assertIn(f'const PROFILES_READY_EVENT = "{ready.group(1)}"', chat_js)
+        self.assertIn("addEventListener(PROFILES_READY_EVENT", chat_js)
 
     def test_profiles_css_reuses_root_tokens(self):
         """profiles.css 只用 style.css 已声明的 :root 令牌，不另起一套配色。"""

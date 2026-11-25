@@ -47,6 +47,10 @@
      所以如实换边：清空消息流、丢掉 currentSessionId、重载两个列表。
      事件名与 profiles.js 的 window.ProfilesPanel.CHANGED_EVENT 一致。 */
   const PROFILE_CHANGED_EVENT = "mylocalai:profile-changed";
+  /* 档案列表首载完成（轻量）：profiles.js 的 fetch 晚于本文件的首屏渲染，
+     "当前档案"行在 DOMContentLoaded 时必然拿不到数据（会空着）。收到这条只重画
+     那一行，不碰会话视图。事件名与 profiles.js 的 READY_EVENT 一致。 */
+  const PROFILES_READY_EVENT = "mylocalai:profiles-ready";
 
   let currentSessionId = null;   // 当前会话；null = 下一条消息自动新建
   let activeController = null;   // 本轮请求的取消句柄
@@ -832,6 +836,8 @@
     });
     /* 档案工作区切换（profiles.js 派发）：左栏换边 + 清空当前会话视图 */
     document.addEventListener(PROFILE_CHANGED_EVENT, onProfileChanged);
+    /* 首载/换边后的轻量通知：只回填"当前档案"行（首屏那次 fetch 还没回来） */
+    document.addEventListener(PROFILES_READY_EVENT, renderProfileLine);
     /* 材料批次面板（专业用户·材料分析）：显隐由 batch.js 按档案角色自管 */
     window.BatchPanel?.init();
     /* 领域监测面板（专业用户·领域监测）：显隐由 monitor.js 按档案角色自管 */
