@@ -25,6 +25,7 @@ const SHELL_ASSETS = [
   "/static/platform.css",
   "/static/settings.css",
   "/static/profiles.css",
+  "/static/ui-polish.css",
   "/static/mobile.css",
   "/static/shell.js",
   "/static/install.js",
@@ -36,7 +37,8 @@ const SHELL_ASSETS = [
   "/static/monitor.js",
   "/static/platform.js",
   "/static/icons/icon-192.png",
-  "/static/icons/icon-512.png"
+  "/static/icons/icon-512.png",
+  "/static/icons/apple-touch-icon.png"
 ];
 
 /* 预缓存用 allSettled：任何一个资源缺失都不该让整个安装失败

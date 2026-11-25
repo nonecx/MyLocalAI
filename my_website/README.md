@@ -16,7 +16,8 @@ my_website/
 
 > 真实代码不在本目录：后端是 `src/mylocalai/web/app.py`，前端静态资源在
 > `src/mylocalai/web/static/`（`index.html` + `shell.js` + `cards.js` + `chat.js` +
-> `style.css` + `chat.css`）。单页化后 `app.js` 与 `insights.js` 已删除，
+> `style.css` + `chat.css` + `platform.css` + `settings.css` + `profiles.css` + `ui-polish.css` + `mobile.css` + `sw.js`）。
+> 单页对话采用暖白底与深青绿操作色的证据工作台主题；PWA 离线壳预缓存主题样式和 iOS 图标。单页化后 `app.js` 与 `insights.js` 已删除，
 > 页面不再有「工具模式」「参谋」两个 Tab——所有能力合并进对话页。
 
 ## 快速开始

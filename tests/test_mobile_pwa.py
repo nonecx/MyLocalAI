@@ -127,24 +127,27 @@ class TestPwaRoutes(unittest.TestCase):
 
     def test_shell_assets_reachable(self):
         """页面真正引用的新资源都能取到（漏了任何一个，手机上就是白屏/无样式）。"""
-        for path in ("/static/mobile.css", "/static/install.js", "/sw.js",
-                     "/manifest.webmanifest", "/static/icons/icon-192.png"):
+        for path in ("/static/mobile.css", "/static/ui-polish.css",
+                     "/static/install.js", "/sw.js", "/manifest.webmanifest",
+                     "/static/icons/icon-192.png", "/static/icons/apple-touch-icon.png"):
             self.assertEqual(self.client.get(path).status_code, 200, path)
 
 
 # ------------------------------------------------------------------ 3. 前端接线
 class TestPageWiring(unittest.TestCase):
-    """index.html / install.js / sw.js / mobile.css 之间的契约。"""
+    """index.html / install.js / sw.js / frontend styles 之间的契约。"""
 
     @classmethod
     def setUpClass(cls) -> None:
-        for path in (INDEX_HTML, INSTALL_JS, SW_JS, MOBILE_CSS):
+        cls.polish_css = STATIC / "ui-polish.css"
+        for path in (INDEX_HTML, INSTALL_JS, SW_JS, MOBILE_CSS, cls.polish_css):
             if not path.is_file():
                 raise unittest.SkipTest(f"缺少 {path}")
         cls.html = _read(INDEX_HTML)
         cls.install = _read(INSTALL_JS)
         cls.sw = _read(SW_JS)
         cls.mobile = _read(MOBILE_CSS)
+        cls.polish = _read(cls.polish_css)
 
     def test_head_declares_pwa(self):
         """head 里的 PWA 声明：manifest / theme-color / iOS 元信息 / 图标。"""
@@ -204,11 +207,24 @@ class TestPageWiring(unittest.TestCase):
         self.assertIn("env(safe-area-inset-bottom", self.mobile,
                       "缺安全区，iPhone 底部按钮会被小横条压住")
 
+    def test_visual_theme_is_referenced_and_cached(self):
+        """主题样式可从页面加载，且离线壳会预缓存它。"""
+        self.assertIn('href="static/ui-polish.css"', self.html)
+        self.assertIn('"/static/ui-polish.css"', self.sw)
+        self.assertIn("prefers-reduced-motion: reduce", self.polish)
+        self.assertIn(":focus-visible", self.polish)
+        self.assertIn("--primary: #176b68", self.polish)
+
+    def test_apple_touch_icon_is_precached(self):
+        """离线壳预缓存 HTML 声明的 iOS 主屏图标。"""
+        self.assertIn('rel="apple-touch-icon" href="static/icons/apple-touch-icon.png"', self.html)
+        self.assertIn('"/static/icons/apple-touch-icon.png"', self.sw)
+
     def test_mobile_css_loaded_last(self):
-        """覆盖层必须排在所有样式之后，否则同权重规则打不过旧文件。"""
+        """手机覆盖层仍最后加载，新主题样式必须在它之前。"""
         idx = self.html.index('href="static/mobile.css"')
         for other in ("style.css", "chat.css", "platform.css",
-                      "settings.css", "profiles.css"):
+                      "settings.css", "profiles.css", "ui-polish.css"):
             self.assertGreater(idx, self.html.index(f'href="static/{other}"'),
                                f"mobile.css 必须晚于 {other} 引入")
 
