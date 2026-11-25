@@ -53,6 +53,7 @@ _ENV_KEYS = (
     "OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL",
     "EXAMPLE_API_KEY",
     "MYLOCALAI_ACME_API_KEY", "MYLOCALAI_ACME_MODEL", "MYLOCALAI_ACME_BASE_URL",
+    "MYLOCALAI_SKILLS_PREFERENCES_PATH",
 )
 
 _SECRET = "sk-example-4be5ra91"          # 掩码应为 sk-…ra91
@@ -140,7 +141,9 @@ class ModelsApiTestBase(unittest.TestCase):
         self.models_path = self.dir / "models.json"
         self.secrets_path = self.dir / "model_secrets.json"
         self.prefs_path = self.dir / "privacy_preferences.json"
+        self.skills_prefs_path = self.dir / "skills_preferences.json"
         env_patch = mock.patch.dict(os.environ, {
+            "MYLOCALAI_SKILLS_PREFERENCES_PATH": str(self.skills_prefs_path),
             "MYLOCALAI_MODELS_PATH": str(self.models_path),
             "MYLOCALAI_MODEL_SECRETS_PATH": str(self.secrets_path),
             "MYLOCALAI_PRIVACY_PREFERENCES_PATH": str(self.prefs_path),

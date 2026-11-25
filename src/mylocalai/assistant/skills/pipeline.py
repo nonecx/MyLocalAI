@@ -39,7 +39,7 @@ from urllib.parse import urlsplit
 
 __all__ = ["collect_evidence", "EvidenceSkills", "load_rules", "render_report",
            "strip_pii", "normalize_text", "normalize_quote", "locate_quote",
-           "STATUSES", "TASK_STATUSES", "RELATIONS", "CLAIM_STATUSES"]
+           "MAX_POWER_RULES", "STATUSES", "TASK_STATUSES", "RELATIONS", "CLAIM_STATUSES"]
 
 # 执行状态（总览 §5.5）：六种取值，取消/预算耗尽都保留已取得证据
 STATUSES = ("completed", "partial", "needs_clarification", "failed",
@@ -112,6 +112,12 @@ _RULE_LIMITS: Dict[str, Tuple[float, float]] = {
     "max_text_chars": (200, 500000),
     "max_redirect_hops": (0, 10),
     "max_quote_chars": (10, 5000),
+}
+#: 最大功率覆盖：各类计数/长度/条数/时限抬到既有安全区间上限；安全读取参数不动。
+MAX_POWER_RULES: Dict[str, Any] = {
+    key: limits[1] for key, limits in _RULE_LIMITS.items()
+    if (key.startswith("max_") or "_max_" in key or key == "total_deadline_s")
+    and key not in {"max_page_bytes", "max_text_chars", "max_redirect_hops", "max_quote_chars"}
 }
 _COUNT_KEYS = frozenset({"max_input_chars", "max_claims", "max_sources", "max_candidates",
                          "max_searches", "max_pages", "max_llm_calls", "per_claim_max_queries",

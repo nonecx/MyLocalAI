@@ -4,6 +4,9 @@
 改了什么、为什么、锁定什么：
   - 新增 `assistant.skills.preferences`：资料收集 / 权威核验**分别**选择
     `pipeline`（固定阶段）或 `agent`（受限循环），并保存自动核验/复合开关。
+   - 2026-11-25 增 `power_mode`（normal|max，最大功率）：max 时所有技能调用不考虑
+     配额（检索/读页/模型调用/条数/总时限抬到各自安全区间上限，安全参数与阈值不动），
+     只确保功能完成；回合总时限同步抬到 3600s（loop._turn_budget_s 消费）。
   - 只存本机配置，不存用户内容；坏 JSON/坏类型一律回退默认 + warning，
     绝不让设置文件写坏拖垮对话。
   - 写入走同目录临时文件 + os.replace 原子替换；接口/测试可经
@@ -21,12 +24,19 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 __all__ = ["DEFAULT_PREFERENCES", "PATH_ENV", "default_path", "load_preferences",
-           "save_preferences", "normalize_preferences"]
+           "save_preferences", "normalize_preferences", "max_power_enabled"]
 
 PATH_ENV = "MYLOCALAI_SKILLS_PREFERENCES_PATH"
 
+#: 功率模式闭集：normal=按各技能 rules.json 配额执行；max=最大功率（不考虑配额）。
+POWER_MODES = ("normal", "max")
+#: 最大功率模式下回合总时限的抬升值（秒）：与各技能 total_deadline_s 的安全上限
+#: （3600s）一致——只抬技能内部配额不抬回合时限，技能仍会在 180s 被截断。
+MAX_POWER_TURN_BUDGET_S = 3600.0
+
 DEFAULT_PREFERENCES: Dict[str, Any] = {
     "schema_version": 1,
+    "power_mode": "normal",
     "research": {"workflow_mode": "pipeline", "auto_verify_findings": True},
     "authority": {"workflow_mode": "pipeline"},
     "composite": {"enabled": True},
@@ -71,6 +81,14 @@ def _normalize(raw: Any, *, strict: bool) -> Tuple[Dict[str, Any], list]:
         if strict:
             raise ValueError("schema_version 只支持 1")
         _warn(warnings, "schema_version 不受支持，已回退默认")
+
+    power = raw.get("power_mode", out["power_mode"])
+    if power not in POWER_MODES:
+        if strict:
+            raise ValueError("power_mode 必须是 normal|max")
+        _warn(warnings, "power_mode 非法，已回退 normal")
+        power = "normal"
+    out["power_mode"] = power
 
     research = raw.get("research")
     if not isinstance(research, Mapping):
@@ -171,3 +189,14 @@ def normalize_preferences(raw: Any) -> Dict[str, Any]:
     """供测试/调用方直接校验（非法抛 ValueError）。"""
     data, _warnings = _normalize(raw, strict=True)
     return data
+
+
+def max_power_enabled(prefs: Optional[Mapping[str, Any]] = None) -> bool:
+    """是否处于最大功率模式（不考虑配额）。
+
+    传 None 时自行读盘（读盘本身永不抛：坏文件回退默认 normal）；传 dict 时按已
+    加载的偏好判断，避免热路径重复读文件。判断只认闭集内的 "max"——坏值在
+    `_normalize` 里已被回退成 "normal"，这里再兜一层类型检查。
+    """
+    data = prefs if prefs is not None else load_preferences()
+    return str(data.get("power_mode") or "") == "max"

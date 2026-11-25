@@ -31,6 +31,7 @@ record_analysis 调用点注入）；计数面不可用时逐段退回 M4 前的
 from __future__ import annotations
 
 import copy
+import importlib
 import json
 import os
 import re
@@ -52,6 +53,33 @@ from mylocalai.assistant.events import EventStream
 from mylocalai.assistant.fingerprint import DEFAULT_SHINGLE_SIZE
 from mylocalai.assistant.registry import (MAX_TEXT_LENGTH, ToolNotAllowed, ToolRegistry,
                                           ValidationError)
+
+
+def _skill_power_mode() -> str:
+    """读取技能功率模式；配置损坏时 fail-closed 回到 normal。"""
+    try:
+        from mylocalai.assistant.skills.preferences import load_preferences
+        prefs = load_preferences()
+        return "max" if str(prefs.get("power_mode") or "") == "max" else "normal"
+    except Exception:  # noqa: BLE001  设置是增益面，不能阻断助手装配
+        return "normal"
+
+
+def _skill_rules(loader: Callable[..., Dict[str, Any]], max_rules: Dict[str, Any]) -> Dict[str, Any]:
+    """加载技能规则并在最大功率模式叠加安全区间上限。"""
+    rules = dict(loader())
+    if _skill_power_mode() == "max":
+        rules.update(max_rules)
+    return rules
+
+
+def _load_skill_rules(module_name: str) -> Dict[str, Any]:
+    """从技能模块取得 loader 和最大功率上限；兼容测试注入的旧形状模块替身。"""
+    module = importlib.import_module(module_name)
+    loader = getattr(module, "load_rules")
+    max_rules = getattr(module, "MAX_POWER_RULES", {})
+    return _skill_rules(loader, max_rules)
+
 
 __all__ = ["AssistantLoop", "action_payload", "prompts_warnings"]
 
@@ -583,7 +611,7 @@ def _real_service(name: str, rules: Dict[str, Any],
     if name == "evidence_skills":
         def _evidence_skills():
             from mylocalai.assistant.skills import EvidenceSkills
-            from mylocalai.assistant.skills.pipeline import load_rules
+            pipe_rules = _load_skill_rules("mylocalai.assistant.skills.pipeline")
             from mylocalai.assistant.skills.transport import default_transport
             from mylocalai.core.privacy import load_preferences
             from mylocalai.llm import llm_client
@@ -616,28 +644,30 @@ def _real_service(name: str, rules: Dict[str, Any],
                         for r in (raw.get("results") or [])]
                 return {"results": rows, "degraded": degraded,
                         "error": error, "engines": engines}
-            transport = default_transport()
-
             def _fetch(url, *, allowed_domains=None, cancel_check=None, deadline=None):
                 if not load_preferences().external_allowed("public-web"):
                     return {"status": "error", "category": "consent_denied",
                             "detail": "外部取页未授权", "url": url, "final_url": ""}
                 return transport.fetch(url, allowed_domains=allowed_domains,
                                        cancel_check=cancel_check, deadline=deadline)
-            return EvidenceSkills(rules=load_rules(), search_fn=_search,
+            transport = default_transport(
+                max_bytes=int(pipe_rules["max_page_bytes"]),
+                max_text_chars=int(pipe_rules["max_text_chars"]),
+                timeout_s=float(pipe_rules["io_timeout_s"]),
+                max_hops=int(pipe_rules["max_redirect_hops"]))
+            return EvidenceSkills(rules=pipe_rules, search_fn=_search,
                                   fetch_fn=_fetch, llm_fn=_llm)
         return _evidence_skills
 
     if name == "research_skills":
         def _research_skills():
             from mylocalai.assistant.skills.research import ResearchSkills
-            from mylocalai.assistant.skills.research.pipeline import load_rules
+            pipe_rules = _load_skill_rules("mylocalai.assistant.skills.research.pipeline")
             from mylocalai.assistant.skills.transport import default_transport
             from mylocalai.core.privacy import load_preferences
             from mylocalai.llm import llm_client
 
             cfg = (rules or {}).get("research_model") or {}
-            pipe_rules = load_rules()
 
             def _llm(system, user):
                 return llm_client.chat_json(system, user,
@@ -688,14 +718,13 @@ def _real_service(name: str, rules: Dict[str, Any],
     if name == "authority_skills":
         def _authority_skills():
             from mylocalai.assistant.skills.authority import AuthoritySkills
-            from mylocalai.assistant.skills.authority.pipeline import load_rules
             from mylocalai.assistant.skills.collect_core import load_authority_config
             from mylocalai.assistant.skills.transport import default_transport
             from mylocalai.core.privacy import load_preferences
             from mylocalai.llm import llm_client
 
             cfg = (rules or {}).get("authority_model") or {}
-            pipe_rules = load_rules()
+            pipe_rules = _load_skill_rules("mylocalai.assistant.skills.authority.pipeline")
 
             def _llm(system, user):
                 return llm_client.chat_json(system, user,
@@ -746,14 +775,13 @@ def _real_service(name: str, rules: Dict[str, Any],
     if name == "source_skills":
         def _source_skills():
             from mylocalai.assistant.skills.source import SourceSkills
-            from mylocalai.assistant.skills.source.pipeline import load_rules
             from mylocalai.assistant.skills.collect_core import load_authority_config
             from mylocalai.assistant.skills.transport import default_transport
             from mylocalai.core.privacy import load_preferences
             from mylocalai.llm import llm_client
 
             cfg = (rules or {}).get("source_model") or {}
-            pipe_rules = load_rules()
+            pipe_rules = _load_skill_rules("mylocalai.assistant.skills.source.pipeline")
 
             def _llm(system: str, user: str) -> Any:
                 return llm_client.chat_json(system, user,
@@ -797,7 +825,7 @@ def _real_service(name: str, rules: Dict[str, Any],
                                                                   "assistant_guide")))
 
             # 零检索零取页：GuideSkills 没有 search_fn/fetch_fn/transport 注入位。
-            return GuideSkills(llm_fn=_llm)
+            return GuideSkills(rules=_load_skill_rules("mylocalai.assistant.skills.guide.guide"), llm_fn=_llm)
         return _guide_skills
 
     # 第五波：statistics_skills / timeline_skills 两个流水线工厂（dossier-comparison
@@ -808,13 +836,12 @@ def _real_service(name: str, rules: Dict[str, Any],
     if name == "statistics_skills":
         def _statistics_skills():
             from mylocalai.assistant.skills.statistics import StatisticsSkills
-            from mylocalai.assistant.skills.statistics.pipeline import load_rules
             from mylocalai.assistant.skills.transport import default_transport
             from mylocalai.core.privacy import load_preferences
             from mylocalai.llm import llm_client
 
             cfg = (rules or {}).get("statistics_model") or {}
-            pipe_rules = load_rules()
+            pipe_rules = _load_skill_rules("mylocalai.assistant.skills.statistics.pipeline")
 
             def _llm(system: str, user: str) -> Any:
                 return llm_client.chat_json(system, user,
@@ -863,13 +890,12 @@ def _real_service(name: str, rules: Dict[str, Any],
     if name == "timeline_skills":
         def _timeline_skills():
             from mylocalai.assistant.skills.timeline import TimelineSkills
-            from mylocalai.assistant.skills.timeline.pipeline import load_rules
             from mylocalai.assistant.skills.transport import default_transport
             from mylocalai.core.privacy import load_preferences
             from mylocalai.llm import llm_client
 
             cfg = (rules or {}).get("timeline_model") or {}
-            pipe_rules = load_rules()
+            pipe_rules = _load_skill_rules("mylocalai.assistant.skills.timeline.pipeline")
 
             def _llm(system: str, user: str) -> Any:
                 return llm_client.chat_json(system, user,
@@ -1193,9 +1219,11 @@ class AssistantLoop:
     # ---- 轮预算（§8） ----
 
     def _turn_budget_s(self) -> Optional[float]:
-        """本回合预算秒数：环境变量 CHAT_TURN_DEADLINE_S 优先，缺省 rules 值；<=0 不限。
+        """本回合预算秒数：环境变量优先，最大功率其次，最后使用 rules 值。
 
-        环境变量写坏（非 float）按未设处理，退回 rules 值——配置错误不放大成故障。
+        `CHAT_TURN_DEADLINE_S` 是运维闸道，优先级高于用户设置；最大功率模式把回合
+        总时限抬到 3600s，避免技能内部配额抬高后仍被默认 180s 截断。<=0 表示不限。
+        环境变量写坏（非 float）按未设处理，退回后续配置——配置错误不放大成故障。
         """
         raw = str(os.environ.get("CHAT_TURN_DEADLINE_S") or "").strip()
         if raw:
@@ -1205,6 +1233,8 @@ class AssistantLoop:
                 env_value = None
             if env_value is not None:
                 return env_value if env_value > 0 else None
+        if _skill_power_mode() == "max":
+            return 3600.0
         try:
             value = float(self.rules.get("turn_deadline_s", 180.0))
         except (TypeError, ValueError):

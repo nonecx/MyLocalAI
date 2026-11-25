@@ -26,6 +26,8 @@ class TestPreferencesLoad(unittest.TestCase):
 
     def test_missing_file_returns_defaults(self):
         out = P.load_preferences(self.path)
+        self.assertEqual(out["power_mode"], "normal")
+        self.assertFalse(P.max_power_enabled(out))
         self.assertEqual(out["research"]["workflow_mode"], "pipeline")
         self.assertEqual(out["authority"]["workflow_mode"], "pipeline")
         self.assertTrue(out["research"]["auto_verify_findings"])
@@ -50,6 +52,18 @@ class TestPreferencesLoad(unittest.TestCase):
         self.assertEqual(out["authority"]["workflow_mode"], "agent")
         self.assertFalse(out["research"]["auto_verify_findings"])
         self.assertIn("research.workflow_mode", out["warning"])
+
+    def test_invalid_power_mode_falls_back(self):
+        self.path.write_text(json.dumps({"power_mode": "unlimited"}), encoding="utf-8")
+        out = P.load_preferences(self.path)
+        self.assertEqual(out["power_mode"], "normal")
+        self.assertIn("power_mode", out["warning"])
+
+    def test_max_power_mode_roundtrips(self):
+        self.path.write_text(json.dumps({"power_mode": "max"}), encoding="utf-8")
+        out = P.load_preferences(self.path)
+        self.assertEqual(out["power_mode"], "max")
+        self.assertTrue(P.max_power_enabled(out))
 
     def test_unknown_keys_ignored(self):
         self.path.write_text(json.dumps({
@@ -94,6 +108,11 @@ class TestPreferencesSave(unittest.TestCase):
         loaded = P.load_preferences(self.path)
         self.assertEqual(loaded["authority"]["workflow_mode"], "agent")
         self.assertEqual(loaded["warning"], "")
+
+    def test_invalid_power_mode_raises(self):
+        with self.assertRaises(ValueError):
+            P.save_preferences({"power_mode": "unlimited"}, self.path)
+        self.assertFalse(self.path.exists())
 
     def test_invalid_mode_raises(self):
         with self.assertRaises(ValueError):

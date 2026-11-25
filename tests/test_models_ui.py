@@ -56,6 +56,7 @@ STATIC_DIR = ROOT / "src" / "mylocalai" / "web" / "static"
 WEB_DIR = ROOT / "src" / "mylocalai" / "web"
 MODELS_API = WEB_DIR / "models_api.py"
 PRIVACY_API = WEB_DIR / "privacy_api.py"
+SKILLS_API = WEB_DIR / "skills_api.py"
 APP_PY = WEB_DIR / "app.py"
 
 INDEX_HTML = STATIC_DIR / "index.html"
@@ -226,7 +227,7 @@ class SettingsUiStructureTest(unittest.TestCase):
 
         nav = html.split('id="settingsNav"', 1)[1].split("</nav>", 1)[0]
         tabs = re.findall(r'data-settings-tab="([a-z]+)"', nav)
-        self.assertEqual(tabs, ["models", "privacy"], "左栏导航应为「模型」+「隐私与授权」")
+        self.assertEqual(tabs, ["models", "privacy", "skills"], "左栏导航应为「模型」+「隐私与授权」+「技能」")
         models_btn = re.search(r'<button[^>]*data-settings-tab="models"[^>]*>', nav)
         self.assertIsNotNone(models_btn)
         self.assertIn("active", models_btn.group(0), "「模型」应默认选中")
@@ -752,7 +753,7 @@ class SettingsApiContractTest(unittest.TestCase):
             "models", "providers", "provider", "providerSecret", "providerActivate",
             "providerDiscover", "providerModels", "providerModel",
             "providerModelsRestore", "providerModelsReorder",
-            "discover", "configPath", "configOpen", "privacyPreferences",
+            "discover", "configPath", "configOpen", "privacyPreferences", "skillsPreferences",
         }
         self.assertEqual(set(self.api), expected_keys, f"SETTINGS_API 键集合不一致：{sorted(self.api)}")
         # 键名以 settings.js 的实际命名为准：模型排序那条叫 providerModelsReorder
@@ -768,7 +769,7 @@ class SettingsApiContractTest(unittest.TestCase):
         shapes = {_shape(path) for path in self.backend_routes}
         self.assertTrue(shapes, "models_api.py 里解析不到任何路由：装饰器写法可能变了")
         for name, template in self.api.items():
-            if name == "privacyPreferences":
+            if name in ("privacyPreferences", "skillsPreferences"):
                 continue
             self.assertIn(_shape(template), shapes,
                           f"SETTINGS_API.{name} = {template} 不在后端路由表里：{sorted(shapes)}")
@@ -785,6 +786,18 @@ class SettingsApiContractTest(unittest.TestCase):
             self.assertTrue(_matches(source, rf"@router\.{method}\(\s*[\"']/preferences[\"']"),
                             f"privacy_api.py 缺少 {method.upper()} /preferences："
                             f"隐私面板的读写会 405/404")
+
+    def test_skills_path_exists_in_skills_api_and_app(self):
+        self.assertIn("skillsPreferences", self.api)
+        source = _read(SKILLS_API)
+        shapes = {_shape(path) for path in _parse_router_paths(source, "/api/skills")}
+        self.assertIn(_shape(self.api["skillsPreferences"]), shapes)
+        for method in ("get", "put"):
+            self.assertTrue(_matches(source, rf"@router\.{method}\(\s*[\"']/preferences[\"']"),
+                            f"skills_api.py 缺少 {method.upper()} /preferences")
+        app_source = _read(APP_PY)
+        self.assertTrue(_has(app_source, "skills_api"))
+        self.assertTrue(_matches(app_source, r"include_router\([^)]*skills"))
 
     def test_http_methods_match_contract_table(self):
         """(HTTP 方法, 路径模板) 与规格 §3.2 表格逐条对应，多一条少一条都算不一致。
@@ -812,6 +825,8 @@ class SettingsApiContractTest(unittest.TestCase):
             # 增补 §8.4 第 8 条：隐私面板可读写
             ("GET", "privacyPreferences"),
             ("PUT", "privacyPreferences"),
+            ("GET", "skillsPreferences"),
+            ("PUT", "skillsPreferences"),
         }
         found = set(re.findall(
             r'request\(\s*"(GET|POST|PUT|DELETE)"\s*,\s*apiPath\(\s*SETTINGS_API\.(\w+)', self.js))
@@ -915,7 +930,7 @@ class SettingsConsumedFieldsTest(unittest.TestCase):
         "default_models", "context_window", "active_tier", "api_value", "owned_by",
         "save_enabled", "retention_days", "external_processing_enabled",
         "external_processing_providers", "warning",
-        "models_exists", "secrets_exists",
+        "models_exists", "secrets_exists", "power_mode",
         "external_processing_enabled", "external_processing_providers",
         "save_enabled", "retention_days",
     }

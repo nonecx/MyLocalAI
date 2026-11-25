@@ -7,6 +7,6 @@
 不改写、不建档、无分数；单边读失败折 partial + gaps 明示，缺章按 absent
 处理不编造；相似度只标「疑似同源」不断言同一说法。
 """
-from .compare import DEFAULT_COMPARISON_RULES, compare_dossiers, load_rules
+from .compare import DEFAULT_COMPARISON_RULES, MAX_POWER_RULES, compare_dossiers, load_rules
 
-__all__ = ["compare_dossiers", "load_rules", "DEFAULT_COMPARISON_RULES"]
+__all__ = ["compare_dossiers", "load_rules", "DEFAULT_COMPARISON_RULES", "MAX_POWER_RULES"]

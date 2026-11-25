@@ -106,7 +106,7 @@
 │   │                           + chat.js/cards.js（会话、档案库、事件流与全部卡片渲染）+ chat.css
 │   │                           + profiles.js（档案切换器）+ batch.js（材料批次面板）+ monitor.js（领域监测面板）
 │   │                           + platform.js/platform.css（监测平台视图，index.html 已接线）
-│   │                           + mobile.css（手机/平板小屏覆盖层，最后引入）
+│   │                           + ui-polish.css（证据工作台视觉层）+ mobile.css（手机/平板小屏覆盖层，最后引入）
 │   │                           + install.js / sw.js / manifest.webmanifest / icons/（添加到桌面：PWA 快捷入口）
 │   ├── util/                   text_safety（代理项规整）/ console_io（stdio 规整）
 │   └── cli.py                  命令行入口（python -m mylocalai.cli）
@@ -140,6 +140,9 @@ cp .env.example .env        # Windows PowerShell: Copy-Item .env.example .env
 #     的提供方视为本地、自动放行；数据保留三项本期不在面板里改（保存时原值回传）
 #     GET  /api/privacy/preferences   查看当前授权
 #     PUT  /api/privacy/preferences   设置（面板保存走这条；也可 curl 直调）
+#     技能资源模式：设置 → 技能 → 常规 / 最大功率；或直接读写
+#     GET/PUT /api/skills/preferences。最大功率将技能配额和回合总时限抬到安全上限（3600s），
+#     用户可随时停止；隐私授权、单页安全参数与判定阈值保持不变。
 
 # 3. 自检 + 跑一次分析
 .venv/Scripts/python.exe tests/smoke_api.py            # 配置自检 + 连通性
@@ -379,7 +382,7 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 2611 个用例（unittest discover 全量，2026-11-25 合并实测：路由诚实降级
+离线套件共 2623 个用例（unittest discover 全量，2026-11-25 合并实测：路由诚实降级
 与标题治理（fix/route-degradation-and-titles）新增 60 例；2026-11-24 巡检报告阶段
 （platform/report + schema v12 scan_reports + 两端点 + 平台页报告卡 + CLI 报告段 +
 platform_feed kind="report"）落地新增 94 例——`tests/test_platform_report.py`
@@ -598,7 +601,7 @@ CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
   verdict_basis 标记；映射外置在 `config/verdict_rules.json` 的 `card` 段。
 - **持久化**：核查自动建档（结论版本化 v1/v2…、证据按批次、分析运行记录），会话/消息/工具运行
   落 SQLite；重启后档案与会话都在。删除档案不是助手工具（只有程序内部可达）。
-- **回合预算与取消**：`CHAT_TURN_DEADLINE_S`（默认 180s）经 llm_cache 预算继承进引擎链；
+- **回合预算与取消**：`CHAT_TURN_DEADLINE_S`（默认 180s；最大功率模式默认 3600s，环境变量仍优先）经 llm_cache 预算继承进引擎链；
   前端 AbortController → SSE 断开 → 协作取消（agent 轮询 cancel_check、judge 四取消位），
   超时/取消都诚实降级、已有卡片照发。
 - **取证三技能与用户能力分层**（2026-11-20；该时点八项，后经第四波/第五波扩到**十三项**，见下方「Skill 通用/专用分类」与「第五波专用技能」两节）：彼时面向用户的能力共**八项**（事实核查 /
@@ -924,6 +927,8 @@ CLI + 计划任务是另一通道），隐私 fail-closed（外部检索未授�
 3. **能连上**：服务默认只监听 `127.0.0.1`，手机根本连不上。加 `--lan` 启动
    （`my_website/start.bat --lan` 或 `./start.sh --lan`）改成 `0.0.0.0` 并在控制台打印局域网地址；
    首次运行记得放行 Windows 防火墙。默认值不变（仍只有本机能访问），要开才开。
+
+前端视觉采用独立的 `static/ui-polish.css` 覆盖层，统一对话与监测平台的证据工作台主题（暖白画布、深青绿操作色、明确的状态色、键盘焦点环与减少动态效果支持）；业务结构与交互契约不变。该样式纳入 Service Worker 界面壳预缓存。
 
 小屏适配（`static/mobile.css`，最后引入、只覆盖不改旧规则）：≤900px 单列后把**对话区提到左栏之前**
 （否则手机首屏只看到会话列表与档案库）；≤720px 收紧顶栏与面板内边距、输入框字号统一 16px

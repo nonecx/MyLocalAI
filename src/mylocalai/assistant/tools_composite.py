@@ -48,7 +48,8 @@ def _prefs() -> Dict[str, Any]:
     try:
         return load_preferences()
     except Exception:  # noqa: BLE001
-        return {"research": {"workflow_mode": "pipeline"},
+        return {"power_mode": "normal",
+                "research": {"workflow_mode": "pipeline"},
                 "authority": {"workflow_mode": "pipeline"},
                 "composite": {"enabled": True}, "warning": ""}
 

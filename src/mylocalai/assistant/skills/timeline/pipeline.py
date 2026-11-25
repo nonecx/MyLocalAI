@@ -53,6 +53,7 @@ from mylocalai.assistant.skills.collect_core import (
     dedupe_sources,
     load_collect_rules,
     load_skill_prompt,
+    max_power_rules,
     near_duplicate_source,
     render_counts_line,
     url_key,
@@ -62,7 +63,7 @@ from mylocalai.assistant.skills.pipeline import normalize_quote, normalize_text,
 from mylocalai.assistant.skills.transport import strip_query_operators
 
 __all__ = ["TimelineSkills", "event_timeline", "render_report", "load_rules",
-           "STATUSES", "TASK_STATUSES", "DEFAULT_TIMELINE_RULES"]
+           "MAX_POWER_RULES", "STATUSES", "TASK_STATUSES", "DEFAULT_TIMELINE_RULES"]
 
 #: 用户可见的四个进度阶段；不暴露内部技能名
 _PROGRESS_STAGES = ("确定主题", "检索来源", "阅读抽取", "整理时间线")
@@ -106,6 +107,9 @@ _RULE_LIMITS: Dict[str, Tuple[float, float]] = {
     "max_redirect_hops": (0, 10),
     "max_quote_chars": (10, 5000),
 }
+
+#: 最大功率覆盖：计数/长度/条数/总时限抬到安全区间上限；单页资源限制不变。
+MAX_POWER_RULES: Dict[str, Any] = max_power_rules(_RULE_LIMITS)
 
 #: 单页最多抽取的事件条数（与研究摘录同口径：一段一条，不把整页抄一遍）
 _MAX_EVENTS_PER_PAGE = 3
