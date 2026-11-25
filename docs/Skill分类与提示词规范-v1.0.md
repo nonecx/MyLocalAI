@@ -61,6 +61,13 @@ source → 服务 source-credibility；guide → 服务 fact-check-guide。
 RumorAgent 引擎 SYSTEM_PROMPT 服务 claim-checking（专用；判定语义共享铁律不变，
 角色与分类都不改变判定）。
 
+**平台内部技能不占本表**：`platform/report` 的 `patrol-report`（巡检报告，2026-11-24）
+是**平台巡检阶段的内部执行技能**——只经 runner 收尾自动执行，结果走平台页 / CLI /
+REST（`/api/platform/reports`）与既有只读工具 `platform_feed`（`kind="report"`），
+不进 `capabilities/` 目录、不占 `router.TOOL_ACTIONS`、不新增对话能力，故不在
+十三项枚举内（与 `platform/domains.py` 的领域分类助理提示词同属平台线；其 SKILL.md
+头注释的「分类：平台内部技能」只作机器可读声明）。
+
 **元数据字段约定**（不动目录、不动既有字段）：
 
 - 能力层 SKILL.md 头注释（`capabilities/<dir>/SKILL.md`）新增两字段：
@@ -194,6 +201,8 @@ router `TOOL_ACTIONS` + allowlist 追加 `check_source` / `guide_fact_check`（1
   先定分类再登记。
 - **平台线提示词未覆盖**：`feature/platform-monitor` 分支的领域分类助理提示词
   （platform/domains.py）不在本分支；等两线合并后按本规范 §4 补三段结构。
+  2026-11-24 的巡检报告技能提示词（`platform/report/SKILL.md`）同属平台线内部技能
+  （§2 末段：不占用户能力枚举），三段结构升级随平台线一并处理。
 - **对话层注入面的拼接失真未动**：`context.build_context` 的双串契约与假 assistant
   应答机制保持现状（动它属于对话层机制改造，另行立项）。
 - **check_source 历史战绩**：当前 loop 工厂未注入 history_fn（输出"无记录"）；

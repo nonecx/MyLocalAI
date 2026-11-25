@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""巡检编排（platform/runner.py）：发现 → 去重 → 初筛 → 深查 → 风险分级 → 落库。
+"""巡检编排（platform/runner.py）：发现 → 去重 → 初筛 → 深查 → 风险分级 → 落库 → 报告。
 
 两阶段成本控制（计划 §5）：
   阶段一（轻，每候选）：多源发现 → URL/指纹去重 → 话题热度估计（零额外检索）
@@ -20,6 +20,13 @@
 服务一律经构造函数注入（测试可换 stub），本模块自身不 import web/assistant。
 领域线程（platform.domains：监控词 → 领域判定与检索提示）同样可注入、缺省
 惰性 import；模块缺失/解析失败 → 无领域模式（domain=""）继续巡检，不静默。
+
+报告阶段（platform.report：巡检收尾后跑一次，契约冻结的三段式）：
+   status 定稿后、scan_runs 落账前调用 PatrolReport.build()——纯代码汇总
+   （计数/分布/环比，零 LLM）+ LLM 一次调用（只做语言组织与逻辑判断）+ 代码
+   校验器（安全闸/截断/白名单）。报告是增益面：技能不可用/LLM 失败/落库
+   失败都只落 warning 与 payload 里的 llm_status/gaps，scan 状态与返回绝不
+   被拖累（skipped 与"无监控词"两条早退路径没有可汇总的一轮，不产报告）。
 """
 
 from __future__ import annotations
@@ -45,6 +52,10 @@ AGENT_MAX_CHARS = 4000
 #: 用哨兵区分"没传"与"传了 None"）。
 _DOMAINS_UNSET = object()
 
+#: report 注入点"未设置"哨兵（同上：None = 显式不要报告阶段，
+#: 哨兵区分"没传"与"传了 None"——没传才走惰性装配）。
+_REPORT_UNSET = object()
+
 
 class PlatformRunner:
     """一次巡检的编排门面。所有重依赖可注入；缺省惰性装配真实引擎。"""
@@ -55,7 +66,8 @@ class PlatformRunner:
                  dossiers: Optional[DossierService] = None,
                  providers: Optional[List[Any]] = None,
                  agent: Any = None,
-                 domains: Any = None) -> None:
+                 domains: Any = None,
+                 report: Any = None) -> None:
         from mylocalai.platform.rules import load_rules
         self.store = store or PlatformStore()
         loaded, self.rule_warnings = load_rules()
@@ -65,6 +77,8 @@ class PlatformRunner:
         self._agent = agent
         # 领域线程（platform.domains）：注入优先；未注入走惰性 import property。
         self._domains = _DOMAINS_UNSET if domains is None else domains
+        # 报告技能（platform.report）：注入优先；未注入走惰性 import（_get_report）。
+        self._report = _REPORT_UNSET if report is None else report
         # store 是否已收 topic_domain 落库字段（数据层 v7 落地前的过渡检测：
         # 未落地时不传该字段，巡检其余流程不变；落地后自动带上）。
         self._feed_topic_domain = _feed_store_supports_topic_domain(self.store)
@@ -100,6 +114,23 @@ class PlatformRunner:
                 },
             )
         return self._agent
+
+    def _get_report(self) -> Any:
+        """巡检报告技能（platform.report.PatrolReport）惰性装配。
+
+        注入优先；未注入走惰性 import 并缓存（与 domains property 同模式）。
+        import 失败（模块缺失/损坏）→ None：runner 降级为无报告阶段，
+        _build_report 据此只留 warning 说明，不重试、不抛（报告是增益面）。
+        规则段 rules["report"] 原样传给技能（缺失退技能内置默认，与
+        platform/rules.py DEFAULT_RULES["report"] 同值）。
+        """
+        if self._report is _REPORT_UNSET:
+            try:
+                from mylocalai.platform.report import PatrolReport
+                self._report = PatrolReport(rules=self.rules.get("report") or {})
+            except Exception:  # noqa: BLE001  报告模块缺失/损坏 → 无报告阶段
+                self._report = None
+        return self._report
 
     def _domain_hints(self, domain: str) -> Optional[List[str]]:
         """领域 → 检索提示（权威站点清单，喂 RumorAgent 的 domain_hints）。
@@ -206,6 +237,9 @@ class PlatformRunner:
             summary["status"] = "partial"
         else:
             summary["status"] = "completed"
+        # 报告阶段：status 定稿后才生成（scan_status 要如实进 payload）。
+        # 增益面——任何失败只落 warning，不影响下面落账与返回。
+        self._build_report(summary, scan_id, persist, cancel_check)
         self._finish(scan_id, summary, started)
         return summary
 
@@ -243,9 +277,14 @@ class PlatformRunner:
         growth = relative_change(e_score, e_prev) if e_score is not None else 0.0
 
         breadth = _breadth_stats(kept)
+        # growth 进 queries 供报告的分监控词环比用：relative_change 是 [0,1]
+        # 相对变化（risk 的 growth 因素照旧吃这个小数），报告条目行要的是
+        # 「环比=X%」——同一语义两种单位，这里换算成百分比（×100，两位小数），
+        # 免得报告里出现「环比=0.12%」这种把小数当百分比的误导。
         summary["queries"].append({"id": query_id, "query": query, "e": e_score,
                                    "quality": heat.get("quality", "missing"),
                                    "candidates": len(kept),
+                                   "growth": round(growth * 100.0, 2),
                                    "domain": domain,
                                    "domain_source": domain_source})
 
@@ -398,6 +437,77 @@ class PlatformRunner:
         summary["counters"]["verified"] += 1
         return "verified", {"label": str(result.get("label") or ""),
                             "risk_score": result.get("risk_score")}
+
+    def _build_report(self, summary: Dict[str, Any], scan_id: Optional[int],
+                      persist: bool,
+                      cancel_check: Optional[Callable[[], bool]]) -> Optional[Dict[str, Any]]:
+        """生成一轮巡检报告（platform.report.PatrolReport）并挂进 summary。
+
+        位置：scan() 里 status 定稿后、_finish 前——报告要读到定稿的
+        scan_status 与全部计数；skipped 与"无监控词"两条早退路径没有可汇总的
+        一轮，直接 return 不走到这里。
+
+        入参（skills 契约）：entries/queries/counters/warnings 取自 summary，
+        prev_scan 是上一轮 scan_runs 行（环比基准），cancel_check 透传
+        （已取消的巡检 → 报告记 llm_status=cancelled，不白烧一次 LLM）。
+
+        降级文化（每个出口都有降级，scan 主流程绝不因本阶段抛异常）：
+          - 报告技能未注入且 import 失败 → 只留 warning，不产报告；
+          - prev_scan 取不到（store 无该方法/读失败/首轮）→ None，报告按
+            "无基准"处理（changes={}，不假装有环比）；
+          - build 自身承诺永不抛，这里仍兜最外层异常：任何意外只落成
+            warning「巡检报告生成失败：...」并返回 None；
+          - 落库失败（save_report 抛：如 llm_status 越界/外键冲突）同样只留
+            warning「巡检报告落库失败：...」——报告已进 summary 照常呈现。
+        """
+        try:
+            report_skill = self._get_report()
+            if report_skill is None:
+                summary["warnings"].append(
+                    "巡检报告未生成：报告技能不可用（模块缺失或装配失败）")
+                return None
+            prev_scan: Optional[Dict[str, Any]] = None
+            if scan_id is not None:
+                try:
+                    prev_scan = self.store.previous_scan_run(scan_id)
+                except Exception as exc:  # noqa: BLE001  基准轮缺失只影响环比
+                    summary["warnings"].append(
+                        f"上一轮巡检读取失败，报告不含环比：{type(exc).__name__}")
+            # 报告 LLM 调用有独立预算面（rules["report"]["deadline_s"]，默认
+            # 60s；<=0 不限）——与深查的 deadline scope 同一机制、互不占用。
+            try:
+                scope_s = float((self.rules.get("report") or {}).get("deadline_s", 60) or 0)
+            except (TypeError, ValueError):
+                scope_s = 0.0
+            from mylocalai.llm import llm_cache
+            with llm_cache.deadline_scope(scope_s if scope_s > 0 else None):
+                report = report_skill.build(
+                    scan_id=scan_id,
+                    scan_status=summary["status"],
+                    entries=summary.get("entries") or [],
+                    queries=summary.get("queries") or [],
+                    counters=summary.get("counters") or {},
+                    warnings=summary.get("warnings") or [],
+                    prev_scan=prev_scan,
+                    cancel_check=cancel_check)
+        except Exception as exc:  # noqa: BLE001  报告是增益面：绝不炸 scan
+            summary["warnings"].append(
+                f"巡检报告生成失败：{type(exc).__name__}: {exc}")
+            return None
+        if not isinstance(report, dict):
+            summary["warnings"].append("巡检报告生成失败：返回形状不是对象")
+            return None
+        summary["report"] = report
+        if persist and scan_id is not None and hasattr(self.store, "save_report"):
+            try:
+                self.store.save_report(
+                    scan_id, title=report.get("title", ""),
+                    llm_status=report.get("llm_status", ""),
+                    status=report.get("scan_status", ""), payload=report)
+            except Exception as exc:  # noqa: BLE001  落库失败不影响报告呈现
+                summary["warnings"].append(
+                    f"巡检报告落库失败：{type(exc).__name__}: {exc}")
+        return report
 
     def _finish(self, scan_id: Optional[int], summary: Dict[str, Any],
                 started: float) -> None:

@@ -823,6 +823,167 @@
       </div>`;
   }
 
+  /* ---------- 监测平台卡（platform_feed：预警/信息流/巡检记录/巡检报告） ----------
+     由后端 assistant/tools_platform.py 产出：card = {card_type:"platform", kind,
+     as_of, warnings|feed|scans|report}（kind 是封闭枚举，越界不猜）。
+     样式复用两处既有家族：列表行走 platform.css ⑪ 备好的 .chat-platform-*
+     （list/entry/entry-head/entry-title/entry-meta），标题/徽章/口径行走
+     chat.css 的 .chat-card* 与 .chat-insight-*——不新造 class（样式落点
+     由 test_platform_api 的前后端自洽断言看守）。
+     口径诚实铁律同全文件：只转述后端产物，不新增/改写/补造任何证据；传播
+     风险分级只描述传播风险、不判定真假；E 是代理估计值；巡检报告 = 代码
+     汇总 + LLM 语言组织（platform.report），同样不做真假判断。空数据一律
+     「暂无」，未知 llm_status 原样显示。
+     位置与编号注：本渲染区放在第 8 节之前、节头不编号——test_research_ui /
+     test_timeline_ui 等用例以分发段头为终点做物理边界切块（并禁用 score
+     等词），新渲染区插到文件末尾会落进那些断言区间；编号从略则不必为重排
+     1-14 的既有编号而改动其他节头。 */
+  const PLATFORM_RISK_CLS = {
+    notice: "gray", suspect: "amber", high: "red", urgent: "critical",
+  };
+
+  /* 巡检状态 → 徽章（与 CLI _STATUS_TEXT / platform.js SCAN_STATUS 同口径） */
+  const PLATFORM_SCAN_STATUS = {
+    completed: { text: "完成", cls: "green" },
+    partial: { text: "部分完成", cls: "amber" },
+    cancelled: { text: "已取消", cls: "gray" },
+    skipped: { text: "跳过", cls: "amber" },
+    failed: { text: "失败", cls: "red" },
+    running: { text: "进行中", cls: "gray" },
+  };
+
+  /* 报告 LLM 组织状态 → 中文（与 platform.js LLM_STATUS_TEXT、
+     tools_platform._LLM_STATUS_TEXT 同封闭集；越界原样透传不猜） */
+  const PLATFORM_LLM_STATUS = {
+    ok: "已生成", disabled: "已关闭", unavailable: "模型不可用",
+    budget_exhausted: "预算耗尽", cancelled: "已取消",
+    skipped_empty: "本轮无新发现", error: "生成异常",
+  };
+
+  const PLATFORM_META = {
+    warnings: { icon: "🚨", title: "监测平台·预警", empty: "暂无预警（没有高危/紧急档信息）" },
+    feed: { icon: "📰", title: "监测平台·信息流", empty: "暂无信息（还没有巡检记录）" },
+    scans: { icon: "🗓️", title: "监测平台·巡检记录", empty: "暂无巡检记录" },
+    report: { icon: "🗂️", title: "巡检报告", empty: "暂无巡检报告（还没有生成过巡检简报数据）" },
+  };
+
+  /* 平台列表行：徽章 + 标题 + meta 一行（三项都由后端给全，前端只陈列） */
+  function platformRow(item) {
+    item = item || {};
+    const badge = item.badge
+      ? `<span class="badge ${item.badge.cls || "gray"}">${escapeHtml(item.badge.text || "")}</span>`
+      : "";
+    return `<li class="chat-platform-entry">
+        <div class="chat-platform-entry-head">${badge}
+          <span class="chat-platform-entry-title">${escapeHtml(item.title || "（无标题）")}</span>
+        </div>
+        ${item.meta ? `<div class="chat-platform-entry-meta">${escapeHtml(item.meta)}</div>` : ""}
+      </li>`;
+  }
+
+  function platformList(items) {
+    return `<ul class="chat-platform-list">${items.map(platformRow).join("")}</ul>`;
+  }
+
+  /* 信息流条目 → 列表行（档位徽章 + 标题 + E/结论/领域 meta）。
+     E 只在后端真给了有限数值时才显示（不拿 0 冒充"低"）。 */
+  function platformFeedItem(entry) {
+    entry = entry || {};
+    const level = String(entry.risk_level || "notice");
+    const bits = [];
+    const e = Number(entry.e_score);
+    if (entry.e_score !== null && entry.e_score !== undefined && Number.isFinite(e)) {
+      bits.push(`E=${e.toFixed(1)}`);
+    }
+    if (entry.verdict_label) bits.push(String(entry.verdict_label));
+    if (entry.topic_domain) bits.push(`领域：${entry.topic_domain}`);
+    return {
+      badge: { cls: PLATFORM_RISK_CLS[level] || "gray",
+               text: String(entry.risk_label || level) },
+      title: entry.title || entry.url || "（无标题）",
+      meta: bits.join(" · "),
+    };
+  }
+
+  /* 巡检记录行 → 列表行（状态徽章 + 轮次 + 计数 meta） */
+  function platformScanItem(run) {
+    run = run || {};
+    const status = String(run.status || "");
+    const smeta = PLATFORM_SCAN_STATUS[status] || null;
+    const started = String(run.started_at || "").replace("T", " ");
+    return {
+      badge: { cls: smeta ? smeta.cls : "gray",
+               text: smeta ? smeta.text : (status || "未知") },
+      title: `第 ${run.id} 轮巡检`,
+      meta: [`候选 ${Number(run.candidates) || 0} · 深查 ${Number(run.verified) || 0}`
+             + ` · 降级 ${Number(run.degraded) || 0}`,
+             started || ""].filter(Boolean).join(" · "),
+    };
+  }
+
+  /* 巡检报告轻量卡：徽章「巡检报告」+ 标题 + 摘要 + 分析前 3 条 + meta 一行
+     + 口径行。llm_status 非 ok 时叙事区（分析/话题要点/风险/跟进）整体不
+     渲染——后端此时给的也是空数组；只留代码兜底的标题/摘要与计数口径，
+     并如实注明未生成叙述性报告的原因，不为有输出而编。 */
+  function renderPlatformReport(report) {
+    report = (report && typeof report === "object") ? report : {};
+    const llmStatus = String(report.llm_status || "");
+    const narrativeOk = llmStatus === "ok";
+    const statusText = PLATFORM_LLM_STATUS[llmStatus] || llmStatus || "状态未知";
+    const counts = (report.counts && typeof report.counts === "object") ? report.counts : {};
+    const risk = (counts.risk && typeof counts.risk === "object") ? counts.risk : {};
+    const highUrgent = (Number(risk.high) || 0) + (Number(risk.urgent) || 0);
+    const title = String(report.title || "").trim() || "巡检报告";
+    const summary = String(report.summary || "").trim();
+    const analysis = (narrativeOk && Array.isArray(report.analysis)) ? report.analysis : [];
+    const analysisHtml = analysis.length ? platformList(analysis.slice(0, 3).map((an) => {
+      an = an || {};
+      const ids = Array.isArray(an.entry_ids) ? an.entry_ids.map(String) : [];
+      const suffix = ids.length ? `（条目 ${ids.join("、")}）` : "";
+      /* 原文进 title，转义交给 platformRow 统一做（避免双重转义） */
+      return { title: `${an.point || ""}${suffix}`, meta: "" };
+    })) : "";
+    const note = narrativeOk
+      ? `叙述报告：${statusText}｜传播风险分级不判定真假；E 为代理估计值；巡检报告不做真假判断`
+      : `本轮未生成叙述性报告（${statusText}），以下为代码汇总｜传播风险分级不判定真假；E 为代理估计值；巡检报告不做真假判断`;
+    return `
+        <div class="chat-card-title">🗂️ ${escapeHtml(title)}<span class="badge gray">巡检报告</span></div>
+        ${summary ? `<p class="chat-insight-sub">${escapeHtml(summary)}</p>` : ""}
+        ${analysisHtml}
+        <div class="chat-badges">
+          <span class="badge ${narrativeOk ? "green" : "gray"}">${escapeHtml(statusText)}</span>
+          <span class="badge gray">话题 ${Number(counts.queries) || 0} · 候选 ${Number(counts.candidates) || 0} · 深查 ${Number(counts.verified) || 0} · 高危+紧急 ${highUrgent} 条</span>
+        </div>
+        <p class="chat-insight-note muted">${escapeHtml(note)}</p>
+        ${asOfLine(report.as_of)}`;
+  }
+
+  function renderPlatform(card) {
+    card = card || {};
+    const kind = String(card.kind || "");
+    const meta = PLATFORM_META[kind] || null;
+    let body;
+    if (kind === "report") {
+      body = renderPlatformReport(card.report);
+    } else if (kind === "feed" || kind === "warnings") {
+      const items = Array.isArray(card[kind]) ? card[kind] : [];
+      body = items.length ? platformList(items.map(platformFeedItem))
+                          : `<p class="chat-insight-empty">${escapeHtml(meta ? meta.empty : "暂无数据")}</p>`;
+    } else if (kind === "scans") {
+      const items = Array.isArray(card.scans) ? card.scans : [];
+      body = items.length ? platformList(items.map(platformScanItem))
+                          : `<p class="chat-insight-empty">${escapeHtml(meta ? meta.empty : "暂无数据")}</p>`;
+    } else {
+      body = '<p class="chat-insight-empty">暂无数据</p>';   // 未知 kind 不猜
+    }
+    return `
+      <div class="chat-card">
+        <div class="chat-card-title">${meta ? meta.icon : "📡"} ${escapeHtml(meta ? meta.title : "监测平台")}<span class="badge gray">只读 · 零 LLM</span></div>
+        ${body}
+        ${asOfLine(card.as_of)}
+      </div>`;
+  }
+
   /* ---------- 8. 资料收集卡（collect_research：主动调研 + 逐字引文） ----------
      由后端 tools_research 产出：card = {card_type:"research", status, task_status,
      as_of, degraded, topic, scope, sub_questions, key_findings, leads, evidence,
@@ -1718,6 +1879,7 @@
     if (type === "timeline") return renderTimeline(payload);
     if (type === "batch_summary") return renderBatchSummary(payload);
     if (type === "monitor_change") return renderMonitorChange(payload);
+    if (type === "platform") return renderPlatform(payload);
     if (type === "conclusion") return renderConclusion(payload);
     if (type === "speech" || type === "classic") return renderSpeech(payload);
     if (type === "heat" || type === "attention") return renderHeat(payload);
@@ -1750,7 +1912,7 @@
     renderInsights, renderEvidence, renderResearch, renderAuthority,
     renderSource, renderGuide,
     renderStatistics, renderComparison, renderTimeline,
-    renderBatchSummary, renderMonitorChange,
+    renderBatchSummary, renderMonitorChange, renderPlatform,
     mountCard, escapeHtml,
   };
 })();

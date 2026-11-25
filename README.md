@@ -45,7 +45,7 @@
 │   │   ├── attn_rules.json / deep_read_rules.json / society_issues.json / prompts.json
 │   │   └── README.md           关注度与深读的完整说明（公式、触发、护栏、隔离）
 │   ├── dossier/                档案库（SQLite 单文件 + WAL）
-│   │   ├── store.py            连接工厂、schema_version 顺序迁移（v4 指纹表+话术标记表、v6 Profile 工作区、v7 材料批次、v8 监测订阅、v9 编排 plan/三轴列、v10 监测平台三表、v11 平台信息源与领域列；双重判定 = 版本账本 + schema 实态核对，重编号/半途中断自愈补跑、UPDATE 回填不重放）、档案域七表 + 会话域三表
+│   │   ├── store.py            连接工厂、schema_version 顺序迁移（v4 指纹表+话术标记表、v6 Profile 工作区、v7 材料批次、v8 监测订阅、v9 编排 plan/三轴列、v10 监测平台三表、v11 平台信息源与领域列、v12 巡检报告 scan_reports；双重判定 = 版本账本 + schema 实态核对，重编号/半途中断自愈补跑、UPDATE 回填不重放）、档案域七表 + 会话域三表
 │   │   ├── profiles.py         Profile 工作区（多档案数据分家 + 角色，v6）
 │   │   ├── batches.py          材料批次存储（v7）
 │   │   ├── batch_summary.py    批次汇总纯函数（零 LLM，永不抛）
@@ -85,9 +85,10 @@
 │   │   ├── prompts.json        人设与固定话术（system 类提示词带 角色/目标/边界 三段结构，
 │   │   │                       支持 ASSISTANT_PROMPTS_PATH/_EXTRA_PATH 覆盖）——改这里而非改代码
 │   │   └── assistant_rules.json  路由模型/上限/预算/指纹阈值/信源画像阈值/拒绝词表——改这里而非改代码
-│   ├── platform/                监测平台（巡检发现 → 热度估计 → 传播风险分级 → 信息流，代码判定不打分）
-│   │   ├── store.py              平台域三表读写（watch_queries/feed_entries/scan_runs + patrol_sources）
-│   │   ├── runner.py             两阶段巡检编排（发现 → 初筛 → 深查 → 风险 → 落库）
+│   ├── platform/                监测平台（巡检发现 → 热度估计 → 传播风险分级 → 信息流 → 巡检报告，代码判定不打分）
+│   │   ├── store.py              平台域表读写（watch_queries/feed_entries/scan_runs/scan_reports + patrol_sources）
+│   │   ├── runner.py             两阶段巡检编排（发现 → 初筛 → 深查 → 风险 → 落库 → 报告）
+│   │   ├── report/               巡检报告技能（pipeline.py 三段式 + SKILL.md；LLM 只做语言组织与逻辑判断，不判真假）
 │   │   ├── sources.py            检索源与用户自建 RSS/页面源（候选归一化去重）
 │   │   ├── candidates.py         候选归一化/去重/热度输入（title_similarity 复用 dossier.store）
 │   │   ├── heat.py / risk.py     热度估计纯函数 / 传播风险分级纯函数（大模型不参与打分）
@@ -100,7 +101,7 @@
 │   │   ├── batch_api.py        材料批次 API + SSE 进度（v7）
 │   │   ├── materials_api.py    上传文件内存解析（txt/md/csv/json，不落盘）
 │   │   ├── monitor_api.py      监测订阅 API + 调度线程（v8）
-│   │   ├── platform_api.py     监测平台 API（状态/信息流/预警/监控词 CRUD/巡检触发/信息源 CRUD 与试运行/领域；前缀 /api/platform，已挂载进 app.py）
+│   │   ├── platform_api.py     监测平台 API（状态/信息流/预警/监控词 CRUD/巡检触发/信息源 CRUD 与试运行/领域/巡检报告；前缀 /api/platform，已挂载进 app.py）
 │   │   └── static/             单一对话页的全部界面：index.html + shell.js（file:// 引导/服务状态）
 │   │                           + chat.js/cards.js（会话、档案库、事件流与全部卡片渲染）+ chat.css
 │   │                           + profiles.js（档案切换器）+ batch.js（材料批次面板）+ monitor.js（领域监测面板）
@@ -378,7 +379,12 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 2457 个用例（unittest discover 全量，2026-11-24 移动端快捷入口
+离线套件共 2551 个用例（unittest discover 全量，2026-11-24 巡检报告阶段
+（platform/report + schema v12 scan_reports + 两端点 + 平台页报告卡 + CLI 报告段 +
+platform_feed kind="report"）落地后实测，新增 94 例——`tests/test_platform_report.py`
+58 例，外加 `test_platform_runner` / `test_platform_api` / `test_platform_tool` /
+`test_platform_store` / `test_platform_scheduler` / `test_import_rules` 的 v12 增补
+36 例；此前 2026-11-24 移动端快捷入口
 （PWA 添加到桌面 + 小屏适配 + 启动脚本 --lan）落地后实测，新增 `tests/test_mobile_pwa.py`
 15 例；此前 2026-11-24 修「触发失败：HTTP 404」
 （platform_router 挂载）+ 本地库迁移漂移自愈（账本 + schema 实态双重判定）后实测；
@@ -401,7 +407,8 @@ UI 契约与 PUT /api/privacy/preferences 接口用例；第五波新增 221 例
 受限 Agent 循环 `tests/test_agent_loop.py`、追问续接 `tests/test_continuation.py`、
 技能偏好 `tests/test_skills_preferences.py` 三模块共 64 例；
 再 2026-11-24 自 user-profiles-roles 分支提取监测平台数据层与 API 层（`platform/` 包 +
-`tools_platform` + `platform_api` + `tests/test_platform_*` 十一模块；前端骨架本已就位，
+`tools_platform` + `platform_api` + `tests/test_platform_*` 十二模块（2026-11-24 巡检报告
+阶段追加 `tests/test_platform_report.py`）；前端骨架本已就位，
 2026-11-24 同日补上 `platform_router` 挂载与调度钩子——修「触发失败：HTTP 404」，
 应用级挂载断言与平台视图结构契约随修复恢复纳入）；
 另 2026-11-24 同分支整分支合并（用户裁决：冲突以最新主线为准）带入的增量：
@@ -518,7 +525,12 @@ CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
   通用执行底座 + 四角色工作流程示意图（Mermaid）、通用 7 项 / 专用 6 项 skill 的功能与
   定位、执行层 12 份 SKILL.md 到能力层的映射、能力 × 角色裁剪矩阵与新增能力的归类步骤。
 - `docs/监测平台规格-2026-11-20.md` —— 监测平台（巡检发现 → 热度估计 → 传播风险分级 →
-  信息流）的规格：平台包结构、三表存储、风险分级口径与管理抽屉契约。
+  信息流 → 巡检报告）的规格：平台包结构、表存储（含 v12 scan_reports）、风险分级口径、
+  降级矩阵、接口与管理抽屉契约。
+- `docs/巡检报告技能-2026-11-24.md` —— 巡检报告阶段（`platform/report`：代码汇总 +
+  LLM 一次调用 + 代码校验器）的实施规格：三段式契约、payload 字段口径、LLM 角色三分
+  （语言组织/逻辑判断给模型、真假判断不给）、七态降级矩阵、四个出口（平台页/CLI/REST/
+  对话）、与 research-digest 的分界、测试矩阵与已知局限。
 - `docs/优化方案-2026-11-22.md` —— 基于实测证据的 P0/P1/P2 优化路线（检索源结构化升级、
   多源融合、用户角色与 Profile 收口）。
 - `docs/异步状态窗口清单-2026-11-22.md` —— 待办与状态口径清单（阶段进度对齐）。
@@ -824,6 +836,45 @@ E 分首末差，不外推）。
   域名明细只进卡片、不进模型上下文。
   测试：`tests.test_insights_api`（端点 + 前后端自洽）、`tests.test_insights`、
   `tests.test_source_profile_lift`。
+
+## 监测平台（2026-11-20 起；schema v10–v12）
+
+后台按监控词**自动发现**热门信息 → 本地初筛（零 LLM）→ 对过门槛候选联网深查 →
+**纯函数推导传播风险** → 平台页分级展示与预警；一轮巡检收尾再生成一份结构化
+**巡检报告**。默认关闭（`platform_rules.json` 的 `enabled`，web 不开服务就不巡检；
+CLI + 计划任务是另一通道），隐私 fail-closed（外部检索未授权 → 整轮 skipped，
+不外发、不落库、不静默）。完整契约见 `docs/监测平台规格-2026-11-20.md`。
+
+### 巡检报告（2026-11-24，schema v12：scan_reports）
+
+巡检收尾（status 定稿后、`scan_runs` 落账前）由 `platform/report` 技能生成一份
+结构化报告：代码汇总（计数/分布/环比，零 LLM）+ LLM 一次调用（只做语言组织与
+逻辑判断）+ 代码校验器（安全闸/截断/白名单）。**四个出口共用同一份 payload**，
+各出口只做呈现裁剪、不改写不补造：
+
+| 出口 | 入口 | 说明 |
+|---|---|---|
+| 平台页 | `#platformReport` 报告卡（数据 `GET /api/platform/reports?limit=1`） | 徽章「巡检报告」+ 标题 + 摘要 + 分话题观察 + 分析前 3 + 风险综述 + 后续跟进 + 计数/as_of/口径行；`llm_status≠ok` 时叙事区整体不渲染并注明原因；加载失败与"没有报告"分开呈现 |
+| CLI | `python -m mylocalai.platform --once` | 计数行后出报告段；非 ok 先如实说明「本轮未生成叙述性报告（中文原因），以下为代码汇总」，再打印代码兜底的标题/摘要与计数汇总；`--json` 路径不变 |
+| REST | `GET /api/platform/reports?limit=10`（limit 夹取 1–50，空库合法输出）、`GET /api/platform/reports/{scan_id}`（404「巡检报告不存在: {id}」） | 只读 `scan_reports`，本模块不重组、不改写 |
+| 对话 | 助手工具 `platform_feed` kind=`report`（零 LLM 只读）+ `cards.js renderPlatformReport` | 轻量卡；空库合法空卡（「暂无巡检报告」）；坏库诚实降级 |
+
+- **LLM 角色三分**：**语言组织与逻辑判断给模型**（把代码算好的数字和条目组织成
+  人能读的报告、连起点与点之间的逻辑关系）；**真假判断不给**（命中"是真的/是假的/
+  属实"等真假判定词或"证明/无疑是"等过度断言词即整条丢弃）；**打分/分级/计数/选站
+  也不给**（E、环比、风险档位、深查结论全部代码算，模型只原样转述，不补数值/URL）。
+- **enabled 开关**：`platform_rules.json` 的 `report.enabled`（默认 `true`）——
+  `false` 时完全不调 LLM，报告只有代码汇总；`llm_status` 七态封闭集
+  （ok/disabled/unavailable/budget_exhausted/cancelled/skipped_empty/error）如实记账，
+  每种降级都有中文原因，title/summary 由代码兜底（「第 N 轮巡检报告」+ 确定性概述），
+  **绝不为有输出而编**。
+- **报告是增益面**：报告技能不可用 / LLM 失败 / 落库失败都只留 warning，巡检状态与
+  返回绝不被拖累；`skipped`（未授权/无监控词）两条早退路径没有可汇总的一轮，不产报告。
+- 平台内部技能 `patrol-report`（`platform/report/SKILL.md`）**不占十三项用户能力
+  枚举**、不新开对话 action；对话侧只经既有只读工具 `platform_feed` 触达。
+- 测试：`tests/test_platform_report.py`（58 例：聚合/叙述/安全闸/截断/七态降级/
+  坏输入/payload 键冻结），外加 `test_platform_store` / `test_platform_runner` /
+  `test_platform_api` / `test_platform_tool` / `test_platform_scheduler` 的 v12 增补。
 
 ## 移动端快捷入口（2026-11-24，PWA 添加到桌面 + 小屏适配）
 

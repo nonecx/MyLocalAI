@@ -358,8 +358,15 @@ class TestMarkersStore(unittest.TestCase):
             conn.close()
 
     def test_migrate_completes_half_applied_script(self):
-        """半成品脚本被补全（不再是抛错）：末版入账被删、且少了一列时，
-        migrate() 把缺的列补上、补记账，不抛——收敛到「全脚本效果俱在」。"""
+        """半成品脚本被补全（不再是抛错）：末版入账被删、且前面一版少了一列时，
+        migrate() 逐版核对实态，把缺的列补上、缺的账补上，不抛——收敛到
+        「全脚本效果俱在」。
+
+        v12（scan_reports 建表，无新列）之后的半成品形态：本用例同时造两个——
+        ① v11 入了账但 `inferred_at` 列被拆掉（"入账但有效果缺席"补跑路径）；
+        ② v12 入账被删（"未入账"逐语句路径，效果已在场的跳过不重复施加）。
+        故预期补跑 2 版（v11 + v12），而非 v12 之前的 1 版。
+        """
         conn = connect(self.db)
         try:
             conn.execute("""CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -382,8 +389,8 @@ class TestMarkersStore(unittest.TestCase):
                             ", ".join(f'"{c}"' for c in keep)))
             conn.execute("DROP TABLE watch_queries_old")
             conn.commit()
-            # 补全：缺列补上、版本补记，不抛
-            self.assertEqual(migrate(conn), 1)
+            # 补全：v11 缺列补跑 + v12 未入账补跑，共 2 版，不抛
+            self.assertEqual(migrate(conn), 2)
             cols_now = [r[1] for r in conn.execute("PRAGMA table_info(watch_queries)")]
             self.assertIn("inferred_at", cols_now)
             self.assertEqual(
@@ -401,7 +408,7 @@ class TestMarkersStore(unittest.TestCase):
         migrate() 直接跳过，_ensure_default_profile 撞 no such table: profiles，
         PlatformStore/DossierStore 全构造失败，平台端点集体 500。
 
-        本用例复刻该态：只应用 1-5 与 8-11 段、却把 1..11 全记上账。migrate()
+        本用例复刻该态：只应用 1-5 与 8-12 段、却把 1..12 全记上账。migrate()
         应逐段核对实态，只补跑 v6/v7 缺失的 DDL（不碰已建好的段、不重放 v5 的
         UPDATE 回填），返回 2，且库就此完整可用。
         """
@@ -410,7 +417,7 @@ class TestMarkersStore(unittest.TestCase):
             conn.execute("""CREATE TABLE IF NOT EXISTS schema_migrations (
                                 version    INTEGER PRIMARY KEY,
                                 applied_at TEXT NOT NULL)""")
-            applied_scripts = {1, 2, 3, 4, 5, 8, 9, 10, 11}   # v6/v7 两段跳过不建
+            applied_scripts = {1, 2, 3, 4, 5, 8, 9, 10, 11, 12}   # v6/v7 两段跳过不建
             for i, script in enumerate(ds.MIGRATIONS, start=1):
                 if i in applied_scripts:
                     conn.executescript(script)

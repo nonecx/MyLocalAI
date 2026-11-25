@@ -30,7 +30,7 @@ logger = logging.getLogger("mylocalai.dossier.store")
 __all__ = ["SCHEMA_VERSION", "DEFAULT_DB_PATH", "connect", "migrate",
            "DossierStore", "default_db_path", "title_similarity"]
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 #: 顺序迁移：索引 i 的脚本把库从版本 i 升到 i+1。永不修改已发布的条目，只允许追加。
 MIGRATIONS: List[str] = [
@@ -404,6 +404,28 @@ MIGRATIONS: List[str] = [
     ALTER TABLE feed_entries ADD COLUMN topic_domain TEXT NOT NULL DEFAULT '';
     ALTER TABLE feed_entries ADD COLUMN topic_domain_source TEXT NOT NULL DEFAULT '';
     CREATE INDEX IF NOT EXISTS idx_feed_domain ON feed_entries(topic_domain, id);
+    """,
+    # v12：巡检报告（巡检报告技能 · 数据层，2026-11-24）。每轮巡检至多一份 LLM
+    # 组织的总结报告，scan_id 唯一约束即"一轮一报"——同一 scan_id 重复保存由
+    # platform.store.save_report 的 upsert（ON CONFLICT(scan_id) DO UPDATE）
+    # 覆盖，不重插、不产生第二轮的第二份报告。
+    # 为什么没有 result_expires_at：报告与 scan_runs 同属"巡检元数据"，跟着
+    # 巡检轮次走，不计入 feed_entries 那类核查结果的保留期清理（保留期闸门
+    # 见 PlatformStore.purge_expired_feed，只扫 feed_entries）。
+    # 级联语义：scan_id 外键 ON DELETE CASCADE——删 scan_runs 行（如清理旧
+    # 巡检轮次）时，挂在它上面的报告一并消失，不留孤儿行。
+    # 不另建索引：scan_id 的 UNIQUE 约束自带唯一索引，查询面（按 scan_id 取、
+    # 按 id 倒序取最近报告）都够用。
+    """
+    CREATE TABLE IF NOT EXISTS scan_reports (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        scan_id    INTEGER NOT NULL UNIQUE REFERENCES scan_runs(id) ON DELETE CASCADE,
+        title      TEXT NOT NULL DEFAULT '',
+        llm_status TEXT NOT NULL DEFAULT '',
+        status     TEXT NOT NULL DEFAULT '',
+        payload    TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL
+    );
     """,
 ]
 

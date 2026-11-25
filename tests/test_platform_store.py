@@ -13,6 +13,16 @@ v7（平台增强）追加覆盖面：
   - 信息流领域：add_feed_entry 带 topic_domain/topic_domain_source 往返、
     update_feed_entry 白名单放行、domain_histogram 计数与 limit 窗口；
   - 主机域参数（v6 的 domain=）不回归。
+
+v12（巡检报告）追加覆盖面（TestScanReports）：
+  - scan_reports 建表形状（列齐、无 result_expires_at、无额外索引）；
+  - v11 老库升级只补 v12 一段，重复 migrate 幂等不炸；
+  - save/get/latest/list 的形状与倒序、payload 中文与嵌套 dict 往返；
+  - 同 scan_id 二次 save 走 upsert 覆盖（行 id 与行数不变、四列更新）；
+  - llm_status 封闭集：越界/空串 → ValueError；
+  - 删 scan_runs 行 → 报告经 ON DELETE CASCADE 一并消失；
+  - previous_scan_run：无上一轮 → None，有 → 上一轮行（id 严格小于传入值）；
+  - save_report 到不存在的 scan_id → 外键 IntegrityError 原样抛。
 """
 
 from __future__ import annotations
@@ -27,8 +37,8 @@ sys.path.insert(0, str(ROOT))
 
 from mylocalai.dossier.store import (MIGRATIONS, SCHEMA_VERSION,  # noqa: E402
                                       connect, migrate)
-from mylocalai.platform.store import (FEED_STATUSES, SCAN_STATUSES,  # noqa: E402
-                                      PlatformStore)
+from mylocalai.platform.store import (FEED_STATUSES, REPORT_LLM_STATUSES,  # noqa: E402
+                                      SCAN_STATUSES, PlatformStore)
 
 
 class TestV6Migration(unittest.TestCase):
@@ -543,6 +553,236 @@ class TestFeedDomainFields(unittest.TestCase):
 
     def test_domain_histogram_empty(self):
         self.assertEqual(self.store.domain_histogram(), {})
+
+
+class TestScanReports(unittest.TestCase):
+    """巡检报告（v12 scan_reports）：迁移在场/老库升级、upsert、形状与顺序、
+    封闭集、级联删除、上一轮基准、外键冲突原样抛。"""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.db = Path(self.tmp.name) / "dossier.db"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    # ---- 迁移面 ----
+
+    def test_fresh_migrate_creates_scan_reports(self):
+        """新库 migrate：scan_reports 在场、列齐、无保留期列、无额外索引。"""
+        conn = connect(self.db)
+        try:
+            self.assertEqual(migrate(conn), SCHEMA_VERSION)
+            names = {r["name"] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            self.assertIn("scan_reports", names)
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(scan_reports)")}
+            for c in ("id", "scan_id", "title", "llm_status", "status",
+                      "payload", "created_at"):
+                self.assertIn(c, cols)
+            # 报告与 scan_runs 同属巡检元数据：不计核查结果保留期
+            self.assertNotIn("result_expires_at", cols)
+            # 不建额外索引：scan_id 的 UNIQUE 约束自带唯一索引即全部索引面
+            idx = {r["name"] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+                " AND tbl_name='scan_reports'")}
+            self.assertEqual(idx, {"sqlite_autoindex_scan_reports_1"})
+            # 级联语义落库：scan_id 外键 ON DELETE CASCADE
+            fks = conn.execute("PRAGMA foreign_key_list(scan_reports)").fetchall()
+            self.assertEqual([(f["table"], f["on_delete"]) for f in fks],
+                             [("scan_runs", "CASCADE")])
+        finally:
+            conn.close()
+
+    def test_v11_database_upgrades_and_is_idempotent(self):
+        """v11 老库升级：手工只跑 MIGRATIONS[:SCHEMA_VERSION-1] 建库并记账到 v11，
+        再 migrate 自动补建 scan_reports；重复 migrate 幂等不炸。"""
+        conn = connect(self.db)
+        try:
+            # schema_migrations 由 migrate() 引导创建，不在迁移脚本里——手工补上
+            # （与 test_dossier_store.TestMarkersStore 的老库构造手法同口径）
+            conn.execute("""CREATE TABLE IF NOT EXISTS schema_migrations (
+                                version    INTEGER PRIMARY KEY,
+                                applied_at TEXT NOT NULL)""")
+            for i, script in enumerate(MIGRATIONS[:SCHEMA_VERSION - 1], start=1):
+                with conn:
+                    conn.executescript(script)
+                    conn.execute("INSERT INTO schema_migrations (version, applied_at)"
+                                 " VALUES (?, '2026-11-24T00:00:00+08:00')", (i,))
+            self.assertEqual(
+                conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0],
+                SCHEMA_VERSION - 1)                     # 确实停在 v11
+            self.assertIsNone(conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+                " AND name='scan_reports'").fetchone())
+            # 升级：只补 v12 一段
+            self.assertEqual(migrate(conn), 1)
+            self.assertIsNotNone(conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+                " AND name='scan_reports'").fetchone())
+            self.assertEqual(migrate(conn), 0)          # 幂等：重复 migrate 不炸
+        finally:
+            conn.close()
+
+    # ---- 读写面 ----
+
+    def test_report_llm_statuses_closed_set(self):
+        self.assertEqual(set(REPORT_LLM_STATUSES),
+                         {"ok", "disabled", "unavailable", "budget_exhausted",
+                          "cancelled", "skipped_empty", "error"})
+
+    def test_save_get_roundtrip_shape(self):
+        """save/get 形状与 payload 往返：中文 + 嵌套 dict 逐字还原；缺 scan_id → None。"""
+        store = PlatformStore(self.db)
+        try:
+            sid = store.start_scan_run()
+            payload = {"标题": "自来水异味巡检",
+                       "nested": {"counts": {"queries": 2, "candidates": 5},
+                                  "tags": ["甲", "乙"]},
+                       "empty": {}}
+            rid = store.save_report(sid, title="巡检报告", llm_status="ok",
+                                    status="completed", payload=payload)
+            self.assertIsInstance(rid, int)
+            row = store.get_report(sid)
+            for key in ("id", "scan_id", "title", "llm_status", "status",
+                        "created_at", "payload"):
+                self.assertIn(key, row)
+            self.assertEqual(row["id"], rid)
+            self.assertEqual(row["scan_id"], sid)
+            self.assertEqual(row["title"], "巡检报告")
+            self.assertEqual(row["llm_status"], "ok")
+            self.assertEqual(row["status"], "completed")
+            self.assertIsNotNone(row["created_at"])
+            self.assertIsInstance(row["payload"], dict)
+            self.assertEqual(row["payload"], payload)          # 中文 + 嵌套往返一致
+            self.assertIsNone(store.get_report(424242))        # 不存在 → None
+        finally:
+            store.close()
+
+    def test_payload_defaults_to_empty_dict(self):
+        """payload 不传按 {} 落库（与列默认值同口径），不是 None 也不是 '[]'。"""
+        store = PlatformStore(self.db)
+        try:
+            sid = store.start_scan_run()
+            store.save_report(sid, title="无 payload", llm_status="skipped_empty",
+                              status="completed")
+            row = store.get_report(sid)
+            self.assertEqual(row["payload"], {})
+            with store._lock:
+                raw = store._conn.execute(
+                    "SELECT payload FROM scan_reports WHERE scan_id = ?", (sid,)).fetchone()
+            self.assertEqual(raw["payload"], "{}")
+        finally:
+            store.close()
+
+    def test_latest_and_list_ordering(self):
+        """latest/list：id 倒序、同形状；limit 夹取 ≥1（0 与负数都归 1）。"""
+        store = PlatformStore(self.db)
+        try:
+            self.assertIsNone(store.latest_report())
+            self.assertEqual(store.list_reports(), [])
+            s1 = store.start_scan_run()
+            s2 = store.start_scan_run()
+            s3 = store.start_scan_run()
+            r1 = store.save_report(s1, title="R1", llm_status="ok", status="completed")
+            r2 = store.save_report(s2, title="R2", llm_status="ok", status="completed")
+            r3 = store.save_report(s3, title="R3", llm_status="ok", status="completed")
+            self.assertEqual(store.latest_report()["id"], r3)   # id 倒序第一条
+            self.assertEqual([r["id"] for r in store.list_reports()], [r3, r2, r1])
+            self.assertEqual([r["id"] for r in store.list_reports(limit=2)], [r3, r2])
+            self.assertEqual([r["id"] for r in store.list_reports(limit=0)], [r3])
+            self.assertEqual([r["id"] for r in store.list_reports(limit=-3)], [r3])
+            self.assertEqual(store.list_reports(limit=1)[0]["title"], "R3")
+        finally:
+            store.close()
+
+    def test_upsert_same_scan_id_overwrites(self):
+        """同 scan_id 二次 save → upsert 覆盖：行 id 与行数不变、四列更新、
+        created_at 保留首建时刻。"""
+        store = PlatformStore(self.db)
+        try:
+            sid = store.start_scan_run()
+            r1 = store.save_report(sid, title="旧题", llm_status="ok",
+                                   status="completed", payload={"v": 1})
+            first_created = store.get_report(sid)["created_at"]
+            r2 = store.save_report(sid, title="新题", llm_status="unavailable",
+                                   status="partial", payload={"v": 2, "中文": "值"})
+            self.assertEqual(r1, r2)                          # 同一行：id 不变
+            with store._lock:
+                n = store._conn.execute(
+                    "SELECT COUNT(*) FROM scan_reports").fetchone()[0]
+            self.assertEqual(n, 1)                            # 行数不变
+            row = store.get_report(sid)
+            self.assertEqual(row["title"], "新题")             # 四列均已覆盖
+            self.assertEqual(row["llm_status"], "unavailable")
+            self.assertEqual(row["status"], "partial")
+            self.assertEqual(row["payload"], {"v": 2, "中文": "值"})
+            self.assertEqual(row["created_at"], first_created)  # 首建时刻不改
+        finally:
+            store.close()
+
+    def test_llm_status_out_of_set_raises(self):
+        """llm_status 越界/空串 → ValueError，不静默纠正（含大小写与尾空格）。"""
+        store = PlatformStore(self.db)
+        try:
+            sid = store.start_scan_run()
+            for good in REPORT_LLM_STATUSES:                  # 封闭集内全部放行
+                self.assertIsInstance(
+                    store.save_report(sid, title="t", llm_status=good,
+                                      status="completed"), int)
+            for bad in ("OK", "", "  ", "unknown", "ok ", None):
+                with self.assertRaises(ValueError):
+                    store.save_report(sid, title="t", llm_status=bad,
+                                      status="completed")
+            # 越界写入不落库：库里仍是封闭集内最后一次成功的那条
+            self.assertEqual(store.get_report(sid)["llm_status"],
+                             REPORT_LLM_STATUSES[-1])
+        finally:
+            store.close()
+
+    def test_save_report_missing_scan_raises_fk(self):
+        """scan_id 不存在 → 外键冲突原样抛 IntegrityError（与 add_feed_entry
+        同文化：不伪装成返回值让上层误判成功）。"""
+        import sqlite3
+        store = PlatformStore(self.db)
+        try:
+            with self.assertRaises(sqlite3.IntegrityError):
+                store.save_report(424242, title="t", llm_status="ok",
+                                  status="completed")
+            self.assertEqual(store.list_reports(), [])
+        finally:
+            store.close()
+
+    def test_delete_scan_run_cascades_report(self):
+        """删 scan_runs 行 → 挂它上面的报告经 ON DELETE CASCADE 一并消失。"""
+        store = PlatformStore(self.db)
+        try:
+            sid = store.start_scan_run()
+            store.save_report(sid, title="t", llm_status="ok", status="completed")
+            self.assertIsNotNone(store.get_report(sid))
+            with store._lock, store._conn:
+                store._conn.execute("DELETE FROM scan_runs WHERE id = ?", (sid,))
+            self.assertIsNone(store.get_report(sid))
+            self.assertIsNone(store.latest_report())
+            self.assertEqual(store.list_reports(), [])
+        finally:
+            store.close()
+
+    def test_previous_scan_run(self):
+        """上一轮基准：空库/首轮 → None；有 → 上一轮行（id 严格小于传入值）。"""
+        store = PlatformStore(self.db)
+        try:
+            self.assertIsNone(store.previous_scan_run(1))       # 空库 → None
+            first = store.start_scan_run()
+            self.assertIsNone(store.previous_scan_run(first))   # 首轮无上一轮
+            second = store.start_scan_run()
+            prev = store.previous_scan_run(second)
+            self.assertEqual(prev["id"], first)                 # 上一轮行
+            self.assertLess(prev["id"], second)                 # 严格小于传入值
+            third = store.start_scan_run()
+            self.assertEqual(store.previous_scan_run(third)["id"], second)
+        finally:
+            store.close()
 
 
 if __name__ == "__main__":

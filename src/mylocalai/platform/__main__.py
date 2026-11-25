@@ -28,6 +28,15 @@ _STATUS_TEXT = {
     "skipped": "跳过（未授权外部检索/无监控词）", "failed": "失败",
 }
 
+#: 巡检报告 LLM 组织状态 → 中文口径（与 web/static/platform.js 的
+#: LLM_STATUS_TEXT、platform/store.py REPORT_LLM_STATUSES 同封闭集；
+#: 越界值如实显示原值，不猜一个看似正常的状态）。
+_LLM_STATUS_TEXT = {
+    "ok": "已生成", "disabled": "已关闭", "unavailable": "模型不可用",
+    "budget_exhausted": "预算耗尽", "cancelled": "已取消",
+    "skipped_empty": "本轮无新发现", "error": "生成异常",
+}
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -59,6 +68,54 @@ def _entry_line(entry: Dict[str, Any]) -> str:
             f"  {entry.get('url') or ''}")
 
 
+def _print_report(report: Dict[str, Any]) -> None:
+    """巡检报告段（runner._build_report 挂进 summary 的 payload）。
+
+    口径：叙述性部分由 LLM 组织（只做语言组织与逻辑判断，不判真假）；llm_status
+    非 ok 时先如实说明本轮没有叙述性报告（中文原因同前端 platform.js），再打印
+    代码兜底的标题/摘要——代码汇总（计数/分布）不受 LLM 状态影响，绝不为有输出
+    而编。叙事四区（话题要点/分析/风险/跟进）只在 ok 时打印。
+    """
+    if not isinstance(report, dict):
+        return
+    llm_status = str(report.get("llm_status") or "")
+    if llm_status != "ok":
+        reason = _LLM_STATUS_TEXT.get(llm_status, llm_status or "状态未知")
+        print(f"巡检报告：本轮未生成叙述性报告（{reason}），以下为代码汇总")
+    else:
+        print("巡检报告：")
+    print(f"  {str(report.get('title') or '').strip() or '（无标题）'}")
+    summary_text = str(report.get("summary") or "").strip()
+    if summary_text:
+        print(f"  {summary_text}")
+    if llm_status != "ok":
+        return                      # 叙事四区在非 ok 时本就是空列表，不摆空标题
+    for note in report.get("topic_notes") or []:
+        if not isinstance(note, dict):
+            continue
+        query = str(note.get("query") or "").strip()
+        text = str(note.get("note") or "").strip()
+        if query or text:
+            print(f"  · {query or '（未命名监控词）'}：{text}")
+    for item in (report.get("analysis") or [])[:3]:
+        if not isinstance(item, dict):
+            continue
+        point = str(item.get("point") or "").strip()
+        ids = [str(i) for i in (item.get("entry_ids") or [])]
+        suffix = f"（条目 {', '.join(ids)}）" if ids else ""
+        if point or suffix:
+            print(f"  · {point}{suffix}")
+    risks = str(report.get("risks") or "").strip()
+    if risks:
+        print(f"  风险提示：{risks}")
+    followups = [str(f).strip() for f in (report.get("followups") or [])
+                 if str(f or "").strip()]
+    if followups:
+        print("  后续跟进：")
+        for text in followups:
+            print(f"   - {text}")
+
+
 def _print_summary(summary: Dict[str, Any], as_json: bool) -> None:
     if as_json:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
@@ -71,6 +128,8 @@ def _print_summary(summary: Dict[str, Any], as_json: bool) -> None:
           f" · 降级 {counters.get('degraded', 0)} 次")
     if summary.get("scan_id"):
         print(f"scan_id: {summary['scan_id']}")
+    if summary.get("report") is not None:
+        _print_report(summary["report"])       # 无 report 键（早退路径）时跳过
     for entry in summary.get("entries") or []:
         print(_entry_line(entry))
     for warning in summary.get("warnings") or []:

@@ -3,10 +3,11 @@
    独立文件：只依赖 index.html 的元素，不碰 chat.js 的契约。
    职责：
      - 通栏 Tab 切换：对话视图 ↔ 监测平台视图（默认对话；platform.js 接管）；
-     - 拉取 /api/platform/{status,feed,warnings,watch,scan,scans,domains,sources} 渲染：
+     - 拉取 /api/platform/{status,feed,warnings,watch,scan,scans,domains,sources,reports} 渲染：
        状态摘要条（状态点三态 + 诚实话术）、筛选后信息流（风险分级徽章 +
        领域徽章）、监控词管理（右侧抽屉，含领域下拉与行内编辑）、
-       信息源管理（rss/page，全局/按词绑定，启停与单源试运行）、巡检时间线；
+       信息源管理（rss/page，全局/按词绑定，启停与单源试运行）、巡检时间线、
+        巡检报告卡（代码汇总 + LLM 整理；llm_status 非 ok 时叙事四区强制隐藏）；
      - 手动巡检：POST /api/platform/scan → 轮询 status 直到 scan_in_progress
        结束 → 刷新全部（单飞：后端忙时 started=false 如实提示）；
      - 空态双引导：没有监控词 → 引导去抽屉添加；有词无信息 → 引导立即巡检；
@@ -45,7 +46,9 @@
 
   const $ = (sel) => document.querySelector(sel);
 
-  /* 后端接口清单（与 web/platform_api.py 路由表一一对应，测试做前后端自洽断言） */
+  /* 后端接口清单（与 web/platform_api.py 路由表一一对应，测试做前后端自洽断言）。
+     reports 是巡检报告卡的契约先行项：端点由接线阶段落库实现，未上线前本路
+     fetch 收非 2xx → 落失败行 + 重试（不演成「无报告」），上线后自动恢复。 */
   const PLATFORM_API = {
     status: "/api/platform/status",
     feed: "/api/platform/feed",
@@ -55,6 +58,7 @@
     scans: "/api/platform/scans",
     domains: "/api/platform/domains",
     sources: "/api/platform/sources",
+    reports: "/api/platform/reports",
   };
 
   /* 风险档位 → 展示名与徽章色（后端 risk.LEVELS/LEVEL_LABELS 同口径；
@@ -70,6 +74,14 @@
   const SCAN_STATUS = {
     completed: "完成", partial: "部分完成", cancelled: "已取消",
     skipped: "跳过", failed: "失败", running: "进行中",
+  };
+
+  /* 巡检报告 LLM 组织状态 → 中文口径（与 platform/store.py REPORT_LLM_STATUSES
+     同封闭集；越界值如实显示原值，不猜一个看似正常的状态） */
+  const LLM_STATUS_TEXT = {
+    ok: "已生成", disabled: "已关闭", unavailable: "模型不可用",
+    budget_exhausted: "预算耗尽", cancelled: "已取消",
+    skipped_empty: "本轮无新发现", error: "生成异常",
   };
 
   const SCAN_POLL_MS = 2000;
@@ -89,6 +101,7 @@
   let lastFeed = [];
   let lastScans = [];
   let feedLoadFailed = false;             // 信息流加载失败态：失败时不渲染空态引导（那是空态的活）
+  let reportLoadFailed = false;           // 报告加载失败态：失败出失败行，「无报告」才隐藏（两者分开说）
 
   /* 安全外链（对照 cards.js 的 safeUrl 口径）：原文链接来自外部检索内容，必须
      按不可信输入处理——只接受 http/https；javascript:/data: 等伪协议一律落 "#"
@@ -197,6 +210,23 @@
       const data = await resp.json();
       return (data && data.sources) || [];
     } catch (e) { return null; }
+  }
+
+  /* 巡检报告（GET /reports?limit=1）：取最近一份 {scan_id,title,llm_status,
+     status,as_of,counts,created_at,payload(解析后 dict)}。
+     分流口径（与其他 load* 同模式，失败返回 null）：
+       - 网络失败 / 非 2xx / JSON 解析失败 → null 且置 reportLoadFailed=true
+         （renderReport 落失败行 + 重试）；
+       - 成功但一份报告都没有 → null 且不置标志（renderReport 隐藏卡区）——
+         「加载失败」与「无报告」是两回事，不把故障演成「从没巡检过」。 */
+  async function loadReport() {
+    reportLoadFailed = false;
+    try {
+      const resp = await fetch(`${PLATFORM_API.reports}?limit=1`);
+      if (!resp.ok) { reportLoadFailed = true; return null; }
+      const data = await resp.json();
+      return (data && data.reports && data.reports[0]) || null;
+    } catch (e) { reportLoadFailed = true; return null; }
   }
 
   async function loadDomains() {
@@ -814,6 +844,199 @@
     }).join("");
   }
 
+  /* ---------- 渲染：巡检报告卡 ---------- */
+  /* 报告口径：巡检结束时代码汇总（计数/档位/as_of，全部由后端代码算）+ LLM
+     叙事整理（话题要点/分析/风险/跟进）。本卡只陈列，不做真假判定。
+     llm_status 非 ok 时叙事四区强制隐藏，只留代码兜底的标题/摘要/口径行——
+     「本轮没生成叙述」不演成「生成了但内容为空」。
+     「加载失败」与「无报告」分开说：无报告 → 整卡隐藏；加载失败 → 卡内出
+     .platform-load-error 失败行 + 重试（renderLoadErrorRow 同款纯 DOM）。
+     全部文本走 textContent 赋值，无 innerHTML 插值（见文件头白名单声明）。 */
+
+  /* 静态骨架补全：失败行 replaceChildren 会抹掉 index.html 里的骨架，重试
+     成功要先按同结构同 id 重建（纯 DOM），renderReport 再照常按 id 填充——
+     不摆一张内容被抹空的卡给用户。 */
+  function ensureReportSkeleton() {
+    const sec = $("#platformReport");
+    if (!sec || $("#platformReportTitle")) return;   // 骨架完好：直接用
+    const head = document.createElement("div");
+    head.className = "platform-report-head";
+    const badge = document.createElement("span");
+    badge.className = "platform-report-badge";
+    badge.textContent = "巡检报告";
+    const title = document.createElement("h2");
+    title.className = "platform-report-title";
+    title.id = "platformReportTitle";
+    head.append(badge, title);
+    const summary = document.createElement("p");
+    summary.className = "platform-report-summary";
+    summary.id = "platformReportSummary";
+    const topics = document.createElement("div");
+    topics.className = "platform-report-topics";
+    topics.id = "platformReportTopics";
+    const analysis = document.createElement("ul");
+    analysis.className = "platform-report-analysis";
+    analysis.id = "platformReportAnalysis";
+    const risks = document.createElement("p");
+    risks.className = "platform-report-risks";
+    risks.id = "platformReportRisks";
+    const followups = document.createElement("ul");
+    followups.className = "platform-report-followups";
+    followups.id = "platformReportFollowups";
+    const meta = document.createElement("div");
+    meta.className = "platform-report-meta";
+    meta.id = "platformReportMeta";
+    sec.replaceChildren(head, summary, topics, analysis, risks, followups, meta);
+  }
+
+  /* 报告加载失败：在 #platformReport 位置出失败行（renderLoadErrorRow 同款，
+     纯 DOM 无插值），重试回调与筛选切信息流同模式。失败行会替换卡内内容，
+     重试成功由 renderReport → ensureReportSkeleton 补回骨架再重填。 */
+  function renderReportLoadError() {
+    const sec = $("#platformReport");
+    if (!sec) return;
+    renderLoadErrorRow(sec, () => loadReport().then(renderReport));
+    sec.classList.remove("hidden");
+  }
+
+  function renderReport(report) {
+    const sec = $("#platformReport");
+    if (!sec) return;
+    if (report === null) {
+      /* null = 加载失败或真没报告：靠 reportLoadFailed 分流（loadReport 置位） */
+      if (reportLoadFailed) renderReportLoadError();
+      else sec.classList.add("hidden");
+      return;
+    }
+    reportLoadFailed = false;
+    ensureReportSkeleton();           // 失败行抹过骨架的话先补回（重试成功路径）
+    sec.classList.remove("hidden");
+    const payload = (report.payload && typeof report.payload === "object")
+      ? report.payload : {};
+    const llmStatus = String(report.llm_status || "");
+    const narrativeOk = llmStatus === "ok";    // 非 ok：叙事四区强制隐藏
+    const statusText = LLM_STATUS_TEXT[llmStatus] || llmStatus || "状态未知";
+
+    /* 标题 / 摘要：代码兜底字段，llm_status 非 ok 也照显 */
+    const titleEl = $("#platformReportTitle");
+    if (titleEl) titleEl.textContent = String(report.title || "").trim() || "巡检报告";
+    const summaryEl = $("#platformReportSummary");
+    const summaryText = String(payload.summary || "").trim();
+    if (summaryEl) {
+      summaryEl.textContent = summaryText;
+      summaryEl.classList.toggle("hidden", !summaryText);
+    }
+
+    /* 话题要点：每个监控词一条 LLM 整理note；非 ok 或无内容 → 整区隐藏 */
+    const topicsBox = $("#platformReportTopics");
+    if (topicsBox) {
+      const notes = Array.isArray(payload.topic_notes) ? payload.topic_notes : [];
+      topicsBox.replaceChildren();
+      if (narrativeOk) {
+        notes.forEach((item) => {
+          const it = (item && typeof item === "object") ? item : {};
+          const row = document.createElement("div");
+          row.className = "platform-report-topic";
+          const query = document.createElement("strong");
+          query.textContent = String(it.query || "");
+          row.appendChild(query);
+          const note = String(it.note || "").trim();
+          if (note) {
+            const noteEl = document.createElement("span");
+            noteEl.className = "platform-report-note";
+            noteEl.textContent = note;
+            row.appendChild(noteEl);
+          }
+          topicsBox.appendChild(row);
+        });
+      }
+      topicsBox.classList.toggle("hidden", !(narrativeOk && notes.length));
+    }
+
+    /* 分析：每条 = 观点文本 + 「条目 {entry_ids}」纯文本后缀（ids 以、连接；
+        entry_ids 为空则不显示后缀；point 与 ids 都空的条目不渲染） */
+    const analysisBox = $("#platformReportAnalysis");
+    if (analysisBox) {
+      const items = Array.isArray(payload.analysis) ? payload.analysis : [];
+      analysisBox.replaceChildren();
+      if (narrativeOk) {
+        items.forEach((item) => {
+          const it = (item && typeof item === "object") ? item : {};
+          const ids = Array.isArray(it.entry_ids) ? it.entry_ids : [];
+          const point = String(it.point || "").trim();
+          if (!point && !ids.length) return;   // 空条目不摆空 bullet
+          const li = document.createElement("li");
+          li.textContent = point;
+          if (ids.length) {
+            const suffix = document.createElement("span");
+            suffix.textContent = `条目 ${ids.map(String).join("、")}`;
+            li.appendChild(suffix);
+          }
+          analysisBox.appendChild(li);
+        });
+      }
+      analysisBox.classList.toggle("hidden", !(narrativeOk && items.length));
+    }
+
+    /* 风险：LLM 整理的传播风险叙述（数组按；连接成段）；空 → 隐藏 */
+    const risksEl = $("#platformReportRisks");
+    if (risksEl) {
+      const raw = payload.risks;
+      const risksText = Array.isArray(raw)
+        ? raw.map((r) => String(r || "").trim()).filter(Boolean).join("；")
+        : String(raw || "").trim();
+      risksEl.textContent = risksText;
+      risksEl.classList.toggle("hidden", !(narrativeOk && risksText));
+    }
+
+    /* 跟进建议：逐条 li；空 → 隐藏 */
+    const followupsBox = $("#platformReportFollowups");
+    if (followupsBox) {
+      const items = Array.isArray(payload.followups) ? payload.followups : [];
+      followupsBox.replaceChildren();
+      let shown = 0;
+      if (narrativeOk) {
+        items.forEach((item) => {
+          const text = typeof item === "string" ? item.trim()
+            : String((item && (item.text || item.note || item.point)) || "").trim();
+          if (!text) return;
+          const li = document.createElement("li");
+          li.textContent = text;
+          followupsBox.appendChild(li);
+          shown += 1;
+        });
+      }
+      followupsBox.classList.toggle("hidden", !(narrativeOk && shown));
+    }
+
+    /* 口径行：代码汇总计数 + 证据截至 + 叙述报告状态（计数由后端代码算，
+       前端只陈列，不重算不判定） */
+    const metaBox = $("#platformReportMeta");
+    if (metaBox) {
+      const counts = (report.counts && typeof report.counts === "object")
+        ? report.counts
+        : ((payload.counts && typeof payload.counts === "object") ? payload.counts : {});
+      const riskCounts = (counts.risk && typeof counts.risk === "object") ? counts.risk : {};
+      const n = (v) => Number(v) || 0;
+      const highUrgent = n(riskCounts.high) + n(riskCounts.urgent);
+      const countsLine = document.createElement("p");
+      countsLine.textContent = `${n(counts.queries)} 个话题 · ${n(counts.candidates)} 条发现`
+        + ` · 深查 ${n(counts.verified)} · 高危+紧急 ${highUrgent} 条`;
+      const asOfLine = document.createElement("p");
+      /* as_of 口径：store 行没有顶层 as_of（payload 里才有），created_at 是
+         落库时刻——三级回退，取不到就如实说缺失，不摆空时间 */
+      const asOf = report.as_of || payload.as_of || report.created_at || "";
+      asOfLine.textContent = asOf ? `证据截至 ${fmtTime(asOf)}` : "证据截至时间缺失";
+      const note = document.createElement("p");
+      note.className = "platform-report-note";
+      note.textContent = narrativeOk
+        ? `叙述报告：${statusText}`
+        : `本轮未生成叙述性报告（${statusText}），以下为代码汇总`;
+      metaBox.replaceChildren(countsLine, asOfLine, note);
+      metaBox.classList.remove("hidden");
+    }
+  }
+
   /* ---------- 动作 ---------- */
   /* 监控词清单重取 + 重画 + 绑定多选同步（新增/删除/保存领域后都走这里） */
   async function reloadWatch() {
@@ -826,10 +1049,13 @@
     try {
       /* 领域表先取：徽章中文名与领域下拉都吃它；失败只退成"显示原始 id + 只有自动推断项" */
       lastDomains = await loadDomains();
-      /* 六路并行：状态 / 预警 / 监控词 / 信息流 / 巡检记录 / 信息源；单路失败
-         自行降级成对应区域的失败行（render* 收 null 落错误态），不再演成空数据 */
+      /* 七路并行：状态 / 预警 / 监控词 / 信息流 / 巡检记录 / 信息源 / 巡检报告；
+         单路失败自行降级成对应区域的失败行（render* 收 null 落错误态），不再演成空数据 */
       const [status, warnings, watch, feed, scans, sources] = await Promise.all(
-        [loadStatus(), loadWarnings(), loadWatch(), loadFeed(), loadScans(), loadSources()]);
+        [loadStatus(), loadWarnings(), loadWatch(), loadFeed(), loadScans(), loadSources(),
+         /* 报告路自带渲染（同筛选切信息流模式）；.catch 兜住 renderReport 的意外
+            抛错——单路失败不拖垮其他六路 */
+         loadReport().then(renderReport).catch(() => {})]);
       renderStatus(status);
       renderWarnings(warnings);
       renderWatch(watch);

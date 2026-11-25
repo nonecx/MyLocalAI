@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""平台只读工具测试（P7）：platform_feed 的参数封闭枚举、三视图、降级、接线。"""
+"""平台只读工具测试（P7 + v12 巡检报告视图）：platform_feed 的参数封闭枚举、
+四视图（预警/信息流/巡检记录/巡检报告）、降级、接线。"""
 
 from __future__ import annotations
 
@@ -33,6 +34,8 @@ class TestKindParam(unittest.TestCase):
         self.assertEqual(tp.kind_param("warnings"), "warnings")
         self.assertEqual(tp.kind_param("FEED"), "feed")
         self.assertEqual(tp.kind_param(" scans "), "scans")
+        self.assertEqual(tp.kind_param("REPORT"), "report")
+        self.assertEqual(tp.KINDS, ("warnings", "feed", "scans", "report"))
         for bad in (None, 42, "", "alerts"):
             with self.subTest(bad=bad), self.assertRaises(ValidationError):
                 tp.kind_param(bad)
@@ -85,6 +88,92 @@ class TestPlatformFeedTool(unittest.TestCase):
         out = tp._platform_feed(None, "scans")
         self.assertEqual(len(out["card"]["scans"]), 1)
         self.assertEqual(out["card"]["scans"][0]["status"], "completed")
+
+    def _seed_report(self, llm_status="ok"):
+        sid = self.store.start_scan_run()
+        self.store.finish_scan_run(sid, "completed", queries=1, candidates=2,
+                                   verified=1)
+        self.store.save_report(
+            sid, title="第 1 轮巡检报告", llm_status=llm_status, status="completed",
+            payload={"summary": "本轮巡检覆盖 1 个监控话题。",
+                     "counts": {"queries": 1, "candidates": 2, "verified": 1,
+                                "risk": {"notice": 1, "suspect": 0, "high": 1,
+                                         "urgent": 0}},
+                     "topic_notes": [{"query": "话题A", "note": "热度上升"}],
+                     "analysis": [{"point": "要点一", "entry_ids": [1, 2]}],
+                     "risks": "存在传播风险",
+                     "followups": ["继续观察"],
+                     "gaps": ["本轮有 1 次降级"]})
+        return sid
+
+    def test_report_view_shape(self):
+        """report 视图：卡形状 + 视图字段（scan_id/title/llm_status/counts/
+        topic_notes/analysis/risks/followups/gaps）+ digest 带口径行。"""
+        sid = self._seed_report()
+        out = tp._platform_feed(None, "report")
+        self.assertTrue(out["ok"])
+        self.assertFalse(out["degraded"])
+        card = out["card"]
+        self.assertEqual(card["card_type"], "platform")
+        self.assertEqual(card["kind"], "report")
+        view = card["report"]
+        self.assertIsInstance(view, dict)
+        self.assertEqual(view["scan_id"], sid)
+        self.assertEqual(view["title"], "第 1 轮巡检报告")
+        self.assertEqual(view["llm_status"], "ok")
+        self.assertEqual(view["status"], "completed")
+        self.assertTrue(view["as_of"])               # = 报告行 created_at
+        self.assertEqual(view["counts"]["candidates"], 2)
+        self.assertEqual(view["counts"]["risk"]["high"], 1)
+        self.assertEqual(view["topic_notes"],
+                         [{"query": "话题A", "note": "热度上升"}])
+        self.assertEqual(view["analysis"][0]["entry_ids"], [1, 2])
+        self.assertEqual(view["risks"], "存在传播风险")
+        self.assertEqual(view["followups"], ["继续观察"])
+        self.assertEqual(view["gaps"], ["本轮有 1 次降级"])
+        self.assertIn("第 1 轮巡检报告", out["digest"])
+        self.assertIn("传播风险分级不判定真假", out["digest"])
+        self.assertIn("巡检报告不做真假判断", out["digest"])
+
+    def test_report_view_non_ok_reason_in_digest(self):
+        """llm_status 非 ok：digest 如实带中文原因（不演成"已生成"）。"""
+        self._seed_report(llm_status="unavailable")
+        out = tp._platform_feed(None, "report")
+        self.assertEqual(out["card"]["report"]["llm_status"], "unavailable")
+        self.assertIn("模型不可用", out["digest"])
+
+    def test_report_view_empty_store_is_legal(self):
+        """空库是合法输出：空卡（report=[]）+ 如实摘要，不是降级。"""
+        out = tp._platform_feed(None, "report")
+        self.assertTrue(out["ok"])
+        self.assertFalse(out["degraded"])
+        self.assertEqual(out["card"]["report"], [])
+        self.assertIn("暂无巡检报告", out["digest"])
+
+    def test_report_view_broken_store_degrades(self):
+        class Boom:
+            def latest_report(self):
+                raise RuntimeError("db gone")
+
+        tp.set_store(Boom())
+        out = tp._platform_feed(None, "report")
+        self.assertFalse(out["ok"])
+        self.assertTrue(out["degraded"])
+        self.assertIn("db gone", out["digest"] or "")
+        self.assertIsNone(out["card"])
+
+    def test_report_view_bad_payload_shape_is_tolerated(self):
+        """坏 payload（非对象/缺键）不炸：视图按缺键兜底，digest 照常出。"""
+        sid = self.store.start_scan_run()
+        self.store.save_report(sid, title="坏形状报告", llm_status="ok",
+                               status="completed", payload=None)
+        out = tp._platform_feed(None, "report")
+        self.assertTrue(out["ok"])
+        view = out["card"]["report"]
+        self.assertEqual(view["title"], "坏形状报告")
+        self.assertEqual(view["counts"], {})
+        self.assertEqual(view["analysis"], [])
+        self.assertEqual(view["gaps"], [])
 
     def test_empty_store_is_legal(self):
         """空库是合法输出：ok=True + 空卡，不是降级。"""
