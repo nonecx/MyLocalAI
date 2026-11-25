@@ -22,7 +22,8 @@
 │   │   ├── verdict_rules.json  分层阈值/风险分阈值/封顶/抬分锚点/稳定性/话术权重
 │   │   └── sources_registry.json  信源分级名单与官方/非官方站名表——改这里而非改代码
 │   ├── retrieval/              联网取数基础设施
-│   │   ├── search.py           搜索聚合（可配置化）
+│   │   ├── search.py           搜索聚合（多源装配/反爬冷却/RSS/降级六态）
+│   │   ├── search_sources.json 结构化检索源清单（API 源 + rss_sources 段，改这里而非改代码）
 │   │   ├── browser.py          受控浏览（原文抓取约束）
 │   │   ├── dns_fallback.py     DNS 兜底
 │   │   └── sources.py          域名分级/站名归一（名单读 config/sources_registry.json）
@@ -181,6 +182,51 @@ cp .env.example .env        # Windows PowerShell: Copy-Item .env.example .env
 所以范围是**同一进程、缓存 TTL（默认 900 秒）内、且检索层拿回同一批证据条目**。进程重启、
 多进程/多 worker 部署、TTL 过期、条数淘汰之后，上游模型的采样漂移会重新显现——上游不认 seed，
 这一点工程侧只能收敛、无法根除。agent 模式还会受检索结果本身变化的影响。
+
+## 检索层：源优先级、反爬冷却与降级六态（2026-11-25）
+
+`src/mylocalai/retrieval/search.py` 是全部联网检索的唯一入口（`search_all`），
+2026-11-22 的实测暴露了它的短板：中文搜索引擎反爬（百度 302 跳 `wappass`、Bing 同意页、
+360/Sogou 风控页）会让发现层拿到 0 条，**而旧口径把"被拦截"显示成"没查到"**——这比模型不够强
+更致命。本节的四项改动就是针对它：
+
+**① 源优先级**：结构化源优先于网页解析源，顺序固定为
+`search_sources.json` 的 API 源（`sources`，bing/bocha）→ RSS/Atom 源（`rss_sources`）→
+网页解析源（`RUMOR_SEARCH_BACKENDS=so360,baidu`，默认）。结构化源结果稳定、无验证码，
+是生产推荐形态；一个结构化源都没启用时装配结果与从前完全一致（既有守卫用例锁定）。
+
+**② 反爬识别与冷却**：共用判定 `detect_verification_page()` 三路信号任一命中即算拦截页——
+关键词（`wappass`/`captcha`/`geetest`/安全验证/人机验证/异常流量/`unusual traffic`/
+`before you continue`）、结构特征（captcha 容器、`challenge` 表单、滑块容器）、
+正文长度阈值（去脚本样式后的可见正文 < 400 字符且解析不出结果）。命中后该源进入冷却：
+时长由 `search_sources.json` 顶层 `cooldown_seconds` 控制（默认 **1800 秒**，上限 86400），
+冷却期内**零外发**，`engines` 里该源标 `blocked: true` + 中文 `reason`，到期自动恢复；
+`/api/health` 的 `retrieval.cooldowns` 与返回体都如实可见（不静默、不抛异常）。
+
+**③ RSS/Atom 源配置位**：`search_sources.json` 的 `rss_sources` 段，每条
+`{name, url, enabled, weight, timeout_s, allow_domains, deny_domains}`；缺省（空列表）是合法配置。
+XML 用标准库 `xml.etree.ElementTree` 解析（**不新增第三方依赖**），按查询关键词过滤条目、
+按 URL 归一化去重、按域名白/黑名单过滤，`pubDate`/`published` 解析失败不抛（最差 `date=None`）；
+单源失败只影响自己。国内可用的 RSS 源（政务/媒体/RSSHub 中转）**待实测**，仓库只给配置位与注释示例。
+
+**④ 降级六态（`status`）**：`search_all` 返回体恒定带
+`status / degraded / all_blocked / sources_configured / api_sources / rss_sources /
+web_sources / degraded_reason`，每个 `engines{name}` 槽位带
+`{ok, error, count, blocked, reason}`：
+
+| `status` | 含义 | `degraded` |
+| --- | --- | --- |
+| `ok` | 有结果，所有源都成功 | false |
+| `partial` | 有结果，但至少一个源失败/被跳过/被拦截 | true |
+| `empty` | 确实查到 0 条（有源成功返回空结果）——**不是降级** | false |
+| `all_blocked` | 0 条且全部源被反爬拦截——**"被拦截"不等于"没发现"** | true |
+| `no_sources` | 没有可用源（未装配任何源；或只有网页解析源且全挂、API/RSS 都没配置） | true |
+| `all_failed` | 0 条且所有源都失败（网络/解析错误，不是拦截） | true |
+
+`sources_configured=false` + `api_sources=[]` 是"只有网页解析源、遇反爬无备用通道"的显式信号
+（日志、`/api/health`、返回体三处一致）。上层已按同一口径接线：`rumor.collect_evidence` 把拦截
+记成 `search_status=blocked_by_antibot`（不再是 `搜索无结果`）、`assistant` 的检索工具透传
+`status/all_blocked/degraded_reason`、`platform` 的搜索发现源按 `degraded` 标降级并带中文原因。
 
 ## 关注度（Attention）评估
 
@@ -379,9 +425,15 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 2613 个用例（unittest discover 全量，2026-11-25 角色切换入口 v8 落地
+离线套件共 2659 个用例（unittest discover 全量，2026-11-25 检索层韧性补齐
+（反爬共用判定 + 源冷却 + RSS/Atom 源 + 降级六态 + 上层接线）后实测，
+本次新增 `tests/test_retrieval_resilience.py` 46 例：验证页三路识别与冷却、
+冷却到期恢复、API 源重试退避/健康账本/阈值跳过、坏配置回默认告警、
+RSS 正常/坏 XML/单源失败隔离/日期缺失/示例位默认停用、六态 status、
+上层不把 blocked 当没发现；
+2026-11-25 角色切换入口 v8 落地
 （顶栏角色标签 / 菜单一键换角色 / 左栏入口 + cards.js 收口 apiPath 补实现）后实测，
-本次新增 2 例：角色切换入口前后端自洽、cards.js 的 apiPath 导出守护；
+该轮新增 2 例：角色切换入口前后端自洽、cards.js 的 apiPath 导出守护；
 2026-11-25 合并实测：路由诚实降级
 与标题治理（fix/route-degradation-and-titles）新增 60 例；2026-11-24 巡检报告阶段
 （platform/report + schema v12 scan_reports + 两端点 + 平台页报告卡 + CLI 报告段 +

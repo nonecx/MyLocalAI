@@ -112,13 +112,26 @@ class SearchDiscoveryProvider(DiscoveryProvider):
         engines = out.get("engines") or {}
         results = out.get("results") or []
         # 有结果但全部后端报错 ≠ 成功；部分后端失败只记 degraded（候选照常用）。
-        degraded = bool(results) is False and bool(engines)
-        if engines and all(not e.get("ok") for e in engines.values() if isinstance(e, dict)):
+        # 2026-11-25 检索层韧性（D）：search_all 带 degraded 口径时直接吃它——
+        # "真的 0 条"（status=empty）不算降级；被反爬拦截（all_blocked）、无可用源
+        # （no_sources）、全失败（all_failed）才算，并把中文原因带出去。
+        if "degraded" in out:
+            degraded = bool(out.get("degraded"))
+        else:
+            degraded = bool(results) is False and bool(engines)
+            if engines and all(not e.get("ok") for e in engines.values()
+                               if isinstance(e, dict)):
+                degraded = True
+        error = str(out.get("degraded_reason") or "")
+        status = str(out.get("status") or "")
+        if status in ("all_blocked", "no_sources", "all_failed", "partial"):
             degraded = True
+            if not error:
+                error = f"search_{status}"
         from mylocalai.platform.candidates import candidate_from_search_result
         candidates = [c for c in (candidate_from_search_result(r, source=self.name)
                                   for r in results) if c is not None]
-        return ProviderResult(candidates=candidates, degraded=degraded)
+        return ProviderResult(candidates=candidates, degraded=degraded, error=error)
 
 
 class RssDiscoveryProvider(DiscoveryProvider):

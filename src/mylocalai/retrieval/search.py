@@ -24,6 +24,28 @@
         只缓存"无错误、无跳过、结果非空"的完全成功，且只缓存默认装配路径
         （显式 providers 是测试/本地适配器自有传输，不缓存）。缓存逻辑位于
         授权闸之后：未授权时连缓存都不查，"未授权零外发"语义原封不动。
+  - 检索层韧性（2026-11-25，针对实测"中文搜索引擎反爬 → 0 结果但看起来像没查到"）：
+    (A) 反爬共用判定 detect_verification_page()——关键词（wappass/captcha/
+        geetest/安全验证/异常流量/unusual traffic…）+ 结构特征（captcha 容器、
+        challenge 表单、滑块容器）+ 正文长度阈值（可见正文 < 400 字符且解析不出
+        结果）三路信号，覆盖百度 wappass、Bing 同意/验证页、360/Sogou 风控页。
+        命中即该源进入冷却（cooldown_seconds，search_sources.json 顶层可配，
+        默认 1800 秒），engines 槽位标 blocked 并给中文 reason——不抛异常、
+        不当成"搜索成功但没有结果"；冷却写在进程级表里（加锁），到期自动恢复。
+    (B) 结构化 API 源是"一等公民"：配置缺省不报错，但 search_all 返回
+        sources_configured/api_sources/rss_sources 让调用方能判断"只有网页解析源、
+        遇反爬无备用"；配置校验（URL 必须 http/https 且有主机、协议白名单、
+        超时/重试/权重类型）坏值回默认并告警；失败重试有限且带指数退避
+        （默认 0 次 = 既有单次语义，JSON 按源可配），失败计入健康账本。
+    (C) RssProvider——search_sources.json 的 rss_sources 段声明的 RSS/Atom 源，
+        标准库 xml.etree.ElementTree 解析（不新增第三方依赖），按关键词过滤条目，
+        产出与网页源同形状的 SearchResult；单源失败不影响其它源，条目做 URL 去重
+        与域名过滤，pubDate/published 解析失败不抛。
+    (D) 降级要诚实：search_all 顶层带 status（ok/partial/empty/all_blocked/
+        no_sources/all_failed）、degraded、all_blocked、sources_configured、
+        degraded_reason，让调用方能区分"真的 0 条 / 全被反爬拦截 / 没有可用源 /
+        部分源成功"；engines 每个槽位带 {ok, error, count, blocked, reason}。
+        上层（rumor/assistant/platform）复用同一口径，不把"被拦截"显示成"没发现"。
 
 所有函数都不抛异常：失败返回 (空结果, 错误说明) 或 None，由上层记入降级组件。
 """
@@ -31,6 +53,7 @@
 from __future__ import annotations
 
 import copy
+import email.utils
 import html as _html
 import ipaddress
 import json
@@ -38,9 +61,11 @@ import logging
 import os
 import re
 import socket
+import threading
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote, urldefrag, urlparse
 
 import requests
@@ -59,7 +84,7 @@ _HEADERS = {
     "Accept-Language": "zh-CN,zh;q=0.9",
 }
 _SEARCH_TIMEOUT = 10          # 搜索请求超时（秒）
-_DEGRADE_SECONDS = 1800.0     # 百度触发验证码后 30 分钟内不再尝试
+_DEGRADE_SECONDS = 1800.0     # 百度触发验证码后的冷却时长（历史默认；现由 cooldown_seconds 覆盖）
 _FETCH_TIMEOUT = 6            # 原文抓取超时
 _FETCH_MAX_BYTES = 600_000    # 原文抓取大小上限（600KB）
 _FETCH_MIN_TEXT = 200         # 提取正文短于此视为反爬页/失败
@@ -76,15 +101,187 @@ _FETCH_TIERS = FETCH_TIERS
 #: 实例，实例计数器跨不过调用边界；账本按源 id 记账，跨调用、跨实例生效：
 #: search() 失败 +1 / 成功清零，健康跳过一次 -1（cool_health_skip）。
 _API_SOURCE_HEALTH: Dict[str, int] = {}
+#: 健康账本锁：账本跨线程读写（web 多 worker 线程 + 后台调度），必须串行化。
+_HEALTH_LOCK = threading.RLock()
 #: 查询级缓存：键 = (query, domains, k, 源集合签名)，值 = (过期时刻, 返回值深拷贝)。
 #: 只存"完全成功"的查询结果（判定见 search_all 的 cacheable），命中零外发。
 _QUERY_CACHE: Dict[Tuple, Tuple[float, Dict[str, object]]] = {}
 _QUERY_CACHE_TTL_DEFAULT = 300.0     # 缓存 TTL 默认 300 秒（search_sources.json 可配）
 _QUERY_CACHE_MAX = 128               # 缓存条数上限（满时先清过期、再按插入序逐出最旧）
 _FAILURE_SKIP_THRESHOLD_DEFAULT = 3  # 连续失败跳过阈值默认值（search_sources.json 可配）
-#: search_sources.json 顶层设置（failure_skip_threshold / query_cache_ttl_s）：
+#: search_sources.json 顶层设置（failure_skip_threshold / query_cache_ttl_s / cooldown_seconds）：
 #: 每次 load_api_source_configs() 都刷新（改 JSON 即生效）；文件缺失/损坏回默认。
 _SOURCE_SETTINGS: Dict[str, object] = {}
+
+
+# ---------------------------------------------------------------------------
+# 检索层韧性（A）：验证页/拦截页共用判定 + 源冷却表
+# ---------------------------------------------------------------------------
+
+#: 反爬命中后的冷却时长（秒）：search_sources.json 顶层 cooldown_seconds 可配，默认 1800。
+#: 与历史常量 _DEGRADE_SECONDS 同源（百度降级时长沿用同一个默认值，不出现两处漂移）。
+_COOLDOWN_SECONDS_DEFAULT = _DEGRADE_SECONDS
+_COOLDOWN_SECONDS_MAX = 86_400.0      # 上限 24 小时（防手滑写成一年的"永久出局"）
+#: 正文长度阈值：正常结果页有导航/页脚，可见正文不会这么短；短于此且解析不出结果 = 疑似拦截页。
+_VERIFY_MIN_TEXT = 400
+_VERIFY_PROBE_BYTES = 200_000         # 关键词/结构检测只看页面头部（正常页 < 200KB）
+#: 关键词信号：命中即拦截。顺序有意义——先命中先返回（更具体的原因优先）。
+_VERIFY_KEYWORDS: Tuple[Tuple[str, str], ...] = (
+    ("wappass", "百度安全验证页（wappass）"),
+    ("geetest", "滑块验证页（geetest）"),
+    ("nc_1_wrapper", "滑块验证页（nc_1_wrapper）"),
+    ("captcha", "人机验证页（captcha）"),
+    ("安全验证", "安全验证页"),
+    ("人机验证", "人机验证页"),
+    ("访问验证", "访问验证页"),
+    ("请输入验证码", "验证码页"),
+    ("异常流量", "风控页（异常流量）"),
+    ("访问过于频繁", "风控页（访问过于频繁）"),
+    ("请求过于频繁", "风控页（请求过于频繁）"),
+    ("unusual traffic", "风控页（unusual traffic）"),
+    ("verify you are human", "人机验证页（verify you are human）"),
+    ("before you continue", "同意/前置确认页（before you continue）"),
+    ("同意并继续", "同意/前置确认页（同意并继续）"),
+    ("接受所有 cookie", "同意/前置确认页（cookie consent）"),
+)
+#: 结构特征：容器/表单的形状，比关键词更难被文案改动绕过。
+_VERIFY_STRUCT: Tuple[Tuple[str, str], ...] = (
+    (r'id=["\']?wappass', "结构特征：wappass 容器"),
+    (r'id=["\']?captcha', "结构特征：captcha 容器"),
+    (r'class=["\'][^"\']*captcha', "结构特征：captcha 样式"),
+    (r"geetest|nc_1_wrapper", "结构特征：滑块验证容器"),
+    (r"<form[^>]+challenge", "结构特征：challenge 表单"),
+    (r"verify[-_]form", "结构特征：验证表单"),
+)
+#: 源冷却表：源名 → {"until": 到期时刻, "reason": 中文原因, "since": 命中时刻, "hits": 累计命中}。
+#: 进程级、跨调用生效（默认装配每次 search_all 都新建 provider 实例，实例计数器靠不住）。
+_SOURCE_COOLDOWN: Dict[str, Dict[str, object]] = {}
+_COOLDOWN_LOCK = threading.RLock()
+
+
+def _visible_text_len(page: str) -> int:
+    """去脚本/样式/标签后的可见正文字符数（空白不计）——正文长度阈值的度量口径。"""
+    text = re.sub(r"(?is)<(script|style|noscript)[^>]*>.*?</\1>", " ", page or "")
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = _html.unescape(text)
+    return len(re.sub(r"\s+", "", text))
+
+
+def detect_verification_page(page: str, *, min_text: int = _VERIFY_MIN_TEXT) -> Optional[str]:
+    """共用"验证页/拦截页"判定：命中返回中文原因，正常页返回 None（不抛异常）。
+
+    三路信号，任一命中即视为拦截页（调用方**不得**把它解析成"0 条结果"）：
+      1. 关键词：wappass / captcha / geetest / 安全验证 / 人机验证 / 异常流量 /
+         unusual traffic / before you continue（Bing 同意页）…
+      2. 结构特征：captcha 容器、challenge 表单、滑块容器——比文案更稳。
+      3. 正文长度阈值：去掉脚本样式后的可见正文 < min_text（正常结果页有导航/页脚，
+         不会这么短）。按设计由调用方在"解析不出结果"时使用，避免误伤真有结果的页。
+    只看页面头部 _VERIFY_PROBE_BYTES 字节：验证页的判定信号总在头部，整页扫描没必要。
+    """
+    probe = (page or "")[:_VERIFY_PROBE_BYTES]
+    lowered = probe.lower()
+    for keyword, reason in _VERIFY_KEYWORDS:
+        if keyword in lowered:
+            return reason
+    for pattern, reason in _VERIFY_STRUCT:
+        if re.search(pattern, lowered):
+            return reason
+    visible = _visible_text_len(probe)
+    if visible < max(0, int(min_text)):
+        return f"正文过短（{visible} 字符），疑似拦截页"
+    return None
+
+
+def _cooldown_seconds() -> float:
+    """源冷却时长（秒）：search_sources.json 顶层 cooldown_seconds，缺省/非法回默认 1800。"""
+    value = _SOURCE_SETTINGS.get("cooldown_seconds")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return _COOLDOWN_SECONDS_DEFAULT
+    return min(float(value), _COOLDOWN_SECONDS_MAX)
+
+
+def mark_source_blocked(source: str, reason: str, seconds: Optional[float] = None) -> float:
+    """把一个源打上"被反爬拦截"的冷却标记，返回冷却到期时刻（epoch 秒）。
+
+    冷却表加锁读写（跨线程）；reason 只记中文原因，不含密钥/URL 查询串。
+    seconds 缺省取 cooldown_seconds（默认 1800）。重复命中会把到期时刻刷新到更晚。
+    """
+    name = str(source or "").strip() or "unknown"
+    duration = _cooldown_seconds() if seconds is None else max(0.0, float(seconds))
+    until = time.time() + duration
+    with _COOLDOWN_LOCK:
+        entry = _SOURCE_COOLDOWN.setdefault(name, {"since": time.time(), "hits": 0})
+        entry["until"] = max(float(entry.get("until", 0.0) or 0.0), until)
+        entry["reason"] = str(reason or "命中验证页")
+        entry["hits"] = int(entry.get("hits", 0) or 0) + 1
+    return until
+
+
+def clear_source_cooldowns(source: Optional[str] = None) -> None:
+    """清冷却标记（source=None 清全部）。测试隔离与运维手动"立即重试"用。"""
+    with _COOLDOWN_LOCK:
+        if source is None:
+            _SOURCE_COOLDOWN.clear()
+            return
+        _SOURCE_COOLDOWN.pop(str(source or "").strip(), None)
+
+
+def source_cooldown(source: str) -> Dict[str, object]:
+    """读一个源的冷却状态（不会改动状态）：active / remaining_s / reason / until。
+
+    到期即视为恢复（惰性过期：读取时发现过期顺手清掉），无需后台定时器。
+    """
+    name = str(source or "").strip()
+    with _COOLDOWN_LOCK:
+        entry = _SOURCE_COOLDOWN.get(name)
+        if not entry:
+            return {"active": False, "remaining_s": 0.0, "reason": "", "until": 0.0}
+        remaining = float(entry.get("until", 0.0) or 0.0) - time.time()
+        if remaining <= 0:
+            _SOURCE_COOLDOWN.pop(name, None)      # 冷却到期：自动恢复，期间零外发
+            return {"active": False, "remaining_s": 0.0, "reason": "", "until": 0.0}
+        return {"active": True, "remaining_s": remaining,
+                "reason": str(entry.get("reason", "") or ""),
+                "until": float(entry.get("until", 0.0) or 0.0)}
+
+
+def cooldown_snapshot() -> Dict[str, Dict[str, object]]:
+    """当前仍在冷却的源（如实呈现，供 /api/health 与返回体使用；过期项顺手清掉）。"""
+    with _COOLDOWN_LOCK:
+        names = list(_SOURCE_COOLDOWN)
+    out: Dict[str, Dict[str, object]] = {}
+    for name in names:
+        state = source_cooldown(name)
+        if state["active"]:
+            out[name] = {"remaining_s": round(float(state["remaining_s"]), 1),
+                         "reason": str(state["reason"])}
+    return out
+
+
+def _note_blocked(source: str, reason: str) -> str:
+    """命中验证页：记冷却并返回给上层的错误串（中文、不抛、不当成"0 条结果"）。"""
+    mark_source_blocked(source, reason)
+    state = source_cooldown(source)
+    return f"{reason}（该源冷却 {int(state.get('remaining_s', 0) or 0)} 秒，期间不再请求）"
+
+
+def reset_resilience_state() -> None:
+    """清进程级韧性状态（健康账本 + 冷却表）：测试隔离与运维复位用，不动查询缓存。"""
+    with _HEALTH_LOCK:
+        _API_SOURCE_HEALTH.clear()
+    clear_source_cooldowns()
+
+
+def _health_get(source: str, default: int = 0) -> int:
+    """读健康账本（加锁）：未登记时返回 default（显式装配的实例计数兜底）。"""
+    with _HEALTH_LOCK:
+        return int(_API_SOURCE_HEALTH.get(str(source or ""), default))
+
+
+def _health_set(source: str, value: int) -> None:
+    """写健康账本（加锁）：失败 +1 / 成功清零 / 健康跳过 -1 都走这里。"""
+    with _HEALTH_LOCK:
+        _API_SOURCE_HEALTH[str(source or "")] = max(0, int(value))
 
 
 @dataclass
@@ -126,21 +323,40 @@ def _dedup_url(url: str) -> str:
 # ===========================================================================
 
 class So360Provider:
-    """360 搜索（so.com）。主力后端：实测稳定返回，约 1 秒，无验证码。"""
+    """360 搜索（so.com）。主力后端：实测稳定返回，约 1 秒，无验证码。
+
+    韧性（A）：200 但解析不出结果时过一遍 detect_verification_page——命中风控/验证页
+    即记冷却（cooldown_seconds，默认 1800 秒）并返回中文原因；冷却期内零外发。
+    """
     name = "360"
     # 视频/图片等垂直类目的卡片，不是网页结果，跳过
     _SKIP_HOSTS = ("tv.360kan.com", "image.so.com", "video.so.com", "www.360kan.com",
                    "leshou.com", "so.com")
 
     def search(self, query: str, k: int = 6) -> Tuple[List[SearchResult], Optional[str]]:
+        cooling = source_cooldown(self.name)
+        if cooling.get("active"):
+            return [], (f"360后端已冷却（{cooling.get('reason')}，"
+                        f"剩余 {int(cooling.get('remaining_s', 0) or 0)} 秒）")
         url = "https://www.so.com/s?q=" + quote(query) + "&pn=1"
         try:
             resp = requests.get(url, headers=_HEADERS, timeout=_SEARCH_TIMEOUT)
         except requests.RequestException as exc:
             return [], f"360请求失败: {type(exc).__name__}"
+        page = getattr(resp, "text", "") or ""
+        if resp.status_code in (403, 429):
+            # 风控的 HTTP 层信号：403/429 一定是被拦，不等解析。
+            reason = detect_verification_page(page) or f"360返回HTTP {resp.status_code}"
+            return [], _note_blocked(self.name, reason)
         if resp.status_code != 200:
             return [], f"360返回HTTP {resp.status_code}"
-        return self.parse(resp.text)[:k], None
+        results = self.parse(page)[:k]
+        if not results:
+            # 解析不出结果时才有必要判拦截页：有结果的页面即使夹带"验证"字样也不算被拦。
+            reason = detect_verification_page(page)
+            if reason:
+                return [], _note_blocked(self.name, reason)
+        return results, None
 
     def parse(self, page: str) -> List[SearchResult]:
         """解析结果页：条目 li.res-list，真实 URL 在 <a data-mdurl>，摘要在 res-list-summary。"""
@@ -171,14 +387,19 @@ class So360Provider:
 class BaiduProvider:
     """百度搜索。备用后端：可用，但连续请求会 302 跳 wappass 验证码。
 
-    触发验证码后类级降级 30 分钟（_degraded_until），期间直接返回错误，不再发请求。
+    触发验证码后类级降级（_degraded_until，时长 = cooldown_seconds，默认 1800 秒），
+    期间直接返回错误、不再发请求；同时写入共享冷却表，让 search_all 与 /api/health
+    都能看到"这个源正在冷却"（A：如实呈现，不静默）。
     """
     name = "baidu"
     _degraded_until = 0.0
 
     @classmethod
     def is_degraded(cls) -> bool:
-        return time.time() < cls._degraded_until
+        """是否处于降级期：类级 _degraded_until（历史口径）或共享冷却表任一命中。"""
+        if time.time() < cls._degraded_until:
+            return True
+        return bool(source_cooldown(cls.name).get("active"))
 
     def search(self, query: str, k: int = 6) -> Tuple[List[SearchResult], Optional[str]]:
         if self.is_degraded():
@@ -189,16 +410,32 @@ class BaiduProvider:
                                 allow_redirects=False)
         except requests.RequestException as exc:
             return [], f"百度请求失败: {type(exc).__name__}"
-        loc = resp.headers.get("Location", "")
+        loc = resp.headers.get("Location", "") if hasattr(resp, "headers") else ""
+        page = getattr(resp, "text", "") or ""
         if resp.status_code in (301, 302) and "wappass" in loc:
-            type(self)._degraded_until = time.time() + _DEGRADE_SECONDS
+            self._degrade("百度返回验证码页（wappass）")
             return [], "百度触发验证码，后端降级30分钟"
+        if resp.status_code in (403, 429):
+            reason = detect_verification_page(page) or f"百度返回HTTP {resp.status_code}"
+            self._degrade(reason)
+            return [], f"百度触发验证码，后端降级30分钟（{reason}）"
         if resp.status_code != 200:
             return [], f"百度返回HTTP {resp.status_code}"
-        if "wappass.baidu.com" in resp.text[:4000]:
-            type(self)._degraded_until = time.time() + _DEGRADE_SECONDS
-            return [], "百度返回验证码页，后端降级30分钟"
-        return self.parse(resp.text)[:k], None
+        results = self.parse(page)[:k]
+        if not results:
+            # 解析不出结果时才判拦截页：wappass 页面正文也可能出现在 200 响应里。
+            reason = detect_verification_page(page)
+            if reason:
+                self._degrade(reason)
+                return [], f"百度返回验证码页，后端降级30分钟（{reason}）"
+        return results, None
+
+    @classmethod
+    def _degrade(cls, reason: str) -> None:
+        """记类级降级 + 共享冷却（两处都写：历史断言看前者，health/上层看后者）。"""
+        seconds = _cooldown_seconds()
+        cls._degraded_until = time.time() + seconds
+        mark_source_blocked(cls.name, reason, seconds=seconds)
 
     def parse(self, page: str) -> List[SearchResult]:
         """解析结果页：结果块 div.result.c-container，真实 URL 在块级 mu 属性
@@ -285,6 +522,23 @@ _SEARCH_SOURCES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 #: 当前支持的清单版本与协议集合；版本不符/协议未知都按 fail-soft 丢弃并留告警。
 _API_SOURCES_SCHEMA_VERSION = 1
 _API_SOURCE_PROTOCOLS = ("bing", "bocha")
+#: API 源失败重试（B）：默认 0 次 = 保留既有"单次请求"语义；JSON 按源可配 max_retries。
+#: 有重试时按 retry_backoff_s * 2**attempt 指数退避（有上限），不会把 3 次请求一口气打出去。
+_API_RETRY_DEFAULT = 0
+_API_RETRY_MAX = 3
+_API_RETRY_BACKOFF_DEFAULT = 0.5
+
+#: RSS/Atom 源（C）：抓取上限与条目过滤口径。标准库解析，不新增第三方依赖。
+_RSS_TIMEOUT_DEFAULT = 10.0
+_RSS_MAX_BYTES = 1_000_000        # 单个 feed 响应上限（1MB）
+_RSS_MAX_ITEMS = 40               # 单源最多尝试的条目数（过滤前）
+_RSS_MIN_TERM_LEN = 2             # 检索词长度 ≥2 才参与匹配（单字噪音大）
+_RSS_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
+    "Accept": "application/rss+xml,application/atom+xml,application/xml,text/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+}
 
 #: 源级字段校验器：合法 → 归一后的配置 dict；不合法 → None（调用方丢弃并告警）。
 _API_SOURCE_FIELDS = {
@@ -315,70 +569,118 @@ def _clear_source_warnings() -> None:
         pass
 
 
-def load_api_source_configs(path: Optional[str] = None) -> List[Dict[str, object]]:
-    """读 API 型搜索源清单，返回归一后的配置 dict 列表。
+def _load_sources(path: Optional[str] = None, *,
+                  apply_settings: bool = True) -> Dict[str, object]:
+    """统一加载 search_sources.json（一次读完：顶层设置 + API 源 + RSS 源）。
 
-    fail-soft 纪律（对齐 config/rules.py 的 _load()）：
-      - 文件不存在 → 合法配置（未启用 API 源），静默返回 []；
-      - JSON 损坏 / 根不是对象 / schema_version 不符 / sources 段不是数组
-        → 返回 [] 并经 add_warning 留告警（load_warnings() 可见）；
-      - 单个源声明缺 id/protocol 未知/base_url 非法 → 丢弃该条并合并告警；
-      - 绝不抛异常：检索主链路不因一个配置文件的笔误而崩。
-    每次调用都重新读盘（文件很小，检索本身是网络 IO 量级）：改 JSON 即生效，
-    不需要重启服务。
-    顶层设置（P1-5 多源融合）：failure_skip_threshold（连续失败跳过阈值，默认 3）
-    与 query_cache_ttl_s（查询缓存 TTL 秒数，默认 300，≤0 = 显式关闭缓存）在每次
-    加载时刷新进 _SOURCE_SETTINGS，并随每条源配置附带 threshold；值非法时告警 +
-    回默认，文件缺失/损坏时设置整体回默认。
+    返回 {"exists", "error", "api", "rss"}：api/rss 是**已归一且 enabled** 的配置列表。
+    fail-soft 纪律（对齐 config/rules.py 的 _load()）：文件缺失是合法空配置（静默）；
+    JSON 损坏 / 根不是对象 / schema_version 不符 → 空配置 + 一条告警（load_warnings 可见）；
+    单条坏声明丢弃并合并进同一条告警。**绝不抛异常**：检索主链路不因配置文件笔误而崩。
+    告警统一在本函数末尾一次写出（add_warning 同键只留最新一条，分多次写会互相覆盖）。
+    apply_settings=False 时只读配置、不回写进程级 _SOURCE_SETTINGS——供
+    source_config_summary 这类"只看声明了什么"的只读查询使用（否则每次检索都刷新
+    全局设置，会覆盖调用方/测试对 TTL、冷却时长的显式设定）。
     """
     _clear_source_warnings()
-    _SOURCE_SETTINGS.clear()     # 本次加载结果即设置全集（缺失/损坏 → 回默认值）
+    settings: Dict[str, object] = {} if apply_settings else dict(_SOURCE_SETTINGS)
+    if apply_settings:
+        _SOURCE_SETTINGS.clear()     # 本次加载结果即设置全集（缺失/损坏 → 回默认值）
+    warnings: List[str] = []
+    result: Dict[str, object] = {"exists": False, "error": "", "api": [], "rss": []}
     file_path = path or _SEARCH_SOURCES_PATH
     try:
         with open(file_path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
     except FileNotFoundError:
-        return []                # 文件被移除 = 明确的不启用，不是故障
-    except Exception as exc:     # noqa: BLE001  JSON 损坏、权限问题等
-        _warn_sources(f"search_sources.json 读取失败（{file_path}）："
-                      f"{type(exc).__name__}: {exc}，已退回无 API 源")
-        return []
+        if apply_settings:
+            _parse_source_settings({}, warnings, _SOURCE_SETTINGS)
+        return result                # 文件被移除 = 明确的不启用，不是故障
+    except Exception as exc:         # noqa: BLE001  JSON 损坏、权限问题等
+        result["error"] = f"读取失败（{file_path}）：{type(exc).__name__}: {exc}"
+        _warn_sources(f"search_sources.json {result['error']}，已退回无结构化源")
+        return result
     if not isinstance(data, dict):
-        _warn_sources("search_sources.json 根节点必须是对象，已退回无 API 源")
-        return []
+        result["error"] = "根节点必须是对象"
+        _warn_sources("search_sources.json 根节点必须是对象，已退回无结构化源")
+        return result
     version = data.get("schema_version")
     if version != _API_SOURCES_SCHEMA_VERSION:
-        _warn_sources(f"search_sources.json schema_version 不符（期望 "
-                      f"{_API_SOURCES_SCHEMA_VERSION}，实际 {version!r}），已退回无 API 源")
-        return []
-    # 顶层设置解析（P1-5）：fail-soft，非法值告警 + 回默认；TTL ≤0 是显式关闭开关。
+        result["error"] = f"schema_version 不符（期望 {_API_SOURCES_SCHEMA_VERSION}，实际 {version!r}）"
+        _warn_sources(f"search_sources.json {result['error']}，已退回无结构化源")
+        return result
+    result["exists"] = True
+    _parse_source_settings(data, warnings, settings)
+    if apply_settings:
+        _SOURCE_SETTINGS.update(settings)
+    result["api"] = _parse_api_rows(data, warnings, settings)
+    result["rss"] = _parse_rss_rows(data, warnings)
+    if warnings:
+        # 前缀文件名：告警按同一个键存（同键只留最新），读的人要能看出是哪份配置。
+        _warn_sources("search_sources.json：" + "；".join(warnings))
+    return result
+
+
+def _parse_source_settings(data: Dict[str, object], warnings: List[str],
+                           target: Dict[str, object]) -> None:
+    """顶层设置解析（P1-5 + A）：非法值告警 + 回默认；TTL ≤0 是显式关闭开关。
+
+    target 是本次加载的设置字典（通常就是 _SOURCE_SETTINGS；只读查询用局部副本）。
+    """
     raw_threshold = data.get("failure_skip_threshold")
     if raw_threshold is None:
-        _SOURCE_SETTINGS["failure_skip_threshold"] = _FAILURE_SKIP_THRESHOLD_DEFAULT
+        target["failure_skip_threshold"] = _FAILURE_SKIP_THRESHOLD_DEFAULT
     elif (isinstance(raw_threshold, bool) or not isinstance(raw_threshold, (int, float))
           or raw_threshold <= 0):
-        _warn_sources(f"failure_skip_threshold 不合法（{raw_threshold!r}），"
-                      f"回默认 {_FAILURE_SKIP_THRESHOLD_DEFAULT}")
-        _SOURCE_SETTINGS["failure_skip_threshold"] = _FAILURE_SKIP_THRESHOLD_DEFAULT
+        warnings.append(f"failure_skip_threshold 不合法（{raw_threshold!r}），"
+                        f"回默认 {_FAILURE_SKIP_THRESHOLD_DEFAULT}")
+        target["failure_skip_threshold"] = _FAILURE_SKIP_THRESHOLD_DEFAULT
     else:
-        _SOURCE_SETTINGS["failure_skip_threshold"] = raw_threshold
+        target["failure_skip_threshold"] = raw_threshold
     raw_ttl = data.get("query_cache_ttl_s")
     if raw_ttl is None:
-        _SOURCE_SETTINGS["query_cache_ttl_s"] = _QUERY_CACHE_TTL_DEFAULT
+        target["query_cache_ttl_s"] = _QUERY_CACHE_TTL_DEFAULT
     elif isinstance(raw_ttl, bool) or not isinstance(raw_ttl, (int, float)):
-        _warn_sources(f"query_cache_ttl_s 不合法（{raw_ttl!r}），"
-                      f"回默认 {_QUERY_CACHE_TTL_DEFAULT:g}")
-        _SOURCE_SETTINGS["query_cache_ttl_s"] = _QUERY_CACHE_TTL_DEFAULT
+        warnings.append(f"query_cache_ttl_s 不合法（{raw_ttl!r}），"
+                        f"回默认 {_QUERY_CACHE_TTL_DEFAULT:g}")
+        target["query_cache_ttl_s"] = _QUERY_CACHE_TTL_DEFAULT
     else:
-        _SOURCE_SETTINGS["query_cache_ttl_s"] = float(raw_ttl)
+        target["query_cache_ttl_s"] = float(raw_ttl)
+    raw_cooldown = data.get("cooldown_seconds")
+    if raw_cooldown is None:
+        target["cooldown_seconds"] = _COOLDOWN_SECONDS_DEFAULT
+    elif (isinstance(raw_cooldown, bool) or not isinstance(raw_cooldown, (int, float))
+          or raw_cooldown <= 0):
+        warnings.append(f"cooldown_seconds 不合法（{raw_cooldown!r}），"
+                        f"回默认 {_COOLDOWN_SECONDS_DEFAULT:g}")
+        target["cooldown_seconds"] = _COOLDOWN_SECONDS_DEFAULT
+    else:
+        target["cooldown_seconds"] = min(float(raw_cooldown), _COOLDOWN_SECONDS_MAX)
+
+
+def _as_number(raw: object, default: float, *, minimum: float = 0.0,
+               maximum: Optional[float] = None) -> Tuple[float, bool]:
+    """数值字段校验：合法返回 (值, True)；非法/越界返回 (默认, False)（调用方决定告警）。"""
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return default, False
+    value = float(raw)
+    if value < minimum or (maximum is not None and value > maximum):
+        return default, False
+    return value, True
+
+
+def _parse_api_rows(data: Dict[str, object], warnings: List[str],
+                    settings: Dict[str, object]) -> List[Dict[str, object]]:
+    """API 源段解析 + 逐字段校验（B）：坏值回默认并告警，绝不抛。"""
     rows = data.get("sources")
     if rows is None:
         return []                # 没写 sources 段 = 无 API 源（合法）
     if not isinstance(rows, list):
-        _warn_sources("search_sources.json#sources 必须是数组，已退回无 API 源")
+        warnings.append("search_sources.json#sources 必须是数组，已退回无 API 源")
         return []
     out: List[Dict[str, object]] = []
     dropped: List[str] = []
+    threshold = settings.get("failure_skip_threshold", _FAILURE_SKIP_THRESHOLD_DEFAULT)
     for item in rows:
         if not isinstance(item, dict):
             dropped.append("（元素不是对象）")
@@ -393,27 +695,398 @@ def load_api_source_configs(path: Optional[str] = None) -> List[Dict[str, object
         if protocol not in _API_SOURCE_PROTOCOLS:
             dropped.append(f"{sid}（protocol 未知: {protocol or '空'}）")
             continue
-        if not base_url.startswith(("http://", "https://")):
-            dropped.append(f"{sid}（base_url 非 http/https）")
+        if not _is_http_url(base_url):
+            dropped.append(f"{sid}（base_url 非 http/https 或缺主机）")
             continue
         if not key_env:
             dropped.append(f"{sid}（缺 key_env）")
             continue
-        weight = item.get("weight", 1.0)
-        if isinstance(weight, bool) or not isinstance(weight, (int, float)):
-            weight = 1.0
-        timeout = item.get("timeout_s", _SEARCH_TIMEOUT)
-        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
-            timeout = _SEARCH_TIMEOUT
+        weight, weight_ok = _as_number(item.get("weight", 1.0), 1.0, minimum=0.0)
+        if not weight_ok:
+            warnings.append(f"{sid} 的 weight 不合法（{item.get('weight')!r}），回默认 1.0")
+        timeout, timeout_ok = _as_number(item.get("timeout_s", _SEARCH_TIMEOUT),
+                                         float(_SEARCH_TIMEOUT), minimum=0.1,
+                                         maximum=120.0)
+        if not timeout_ok:
+            warnings.append(f"{sid} 的 timeout_s 不合法（{item.get('timeout_s')!r}），"
+                            f"回默认 {_SEARCH_TIMEOUT}")
+        retries_raw = item.get("max_retries", _API_RETRY_DEFAULT)
+        retries, retries_ok = _as_number(retries_raw, float(_API_RETRY_DEFAULT),
+                                         minimum=0.0, maximum=float(_API_RETRY_MAX))
+        if not retries_ok:
+            warnings.append(f"{sid} 的 max_retries 不合法（{retries_raw!r}），"
+                            f"回默认 {_API_RETRY_DEFAULT}")
+        backoff_raw = item.get("retry_backoff_s", _API_RETRY_BACKOFF_DEFAULT)
+        backoff, backoff_ok = _as_number(backoff_raw, _API_RETRY_BACKOFF_DEFAULT,
+                                         minimum=0.0, maximum=5.0)
+        if not backoff_ok:
+            warnings.append(f"{sid} 的 retry_backoff_s 不合法（{backoff_raw!r}），"
+                            f"回默认 {_API_RETRY_BACKOFF_DEFAULT}")
         enabled = item.get("enabled", True)
         out.append({"id": sid, "protocol": protocol, "base_url": base_url,
                     "key_env": key_env, "enabled": bool(enabled),
-                    "weight": float(weight), "timeout_s": float(timeout),
-                    "failure_skip_threshold":
-                        _SOURCE_SETTINGS["failure_skip_threshold"]})
+                    "weight": weight, "timeout_s": timeout,
+                    "max_retries": int(retries), "retry_backoff_s": backoff,
+                    "failure_skip_threshold": threshold})
     if dropped:
-        _warn_sources(f"search_sources.json#sources 里这些条不合规，已丢弃：{'；'.join(dropped)}")
+        warnings.append(f"search_sources.json#sources 里这些条不合规，已丢弃：{'；'.join(dropped)}")
     return [cfg for cfg in out if cfg["enabled"]]
+
+
+def _parse_rss_rows(data: Dict[str, object],
+                    warnings: List[str]) -> List[Dict[str, object]]:
+    """RSS/Atom 源段解析（C）：缺省是合法空列表；坏条丢弃 + 告警，绝不抛。"""
+    rows = data.get("rss_sources")
+    if rows is None:
+        return []                # 没写 rss_sources 段 = 无 RSS 源（合法）
+    if not isinstance(rows, list):
+        warnings.append("search_sources.json#rss_sources 必须是数组，已退回无 RSS 源")
+        return []
+    out: List[Dict[str, object]] = []
+    dropped: List[str] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            dropped.append("（元素不是对象）")
+            continue
+        url = str(item.get("url") or "").strip()
+        name = str(item.get("name") or item.get("id") or "").strip()
+        if not _is_http_url(url):
+            dropped.append(f"{name or '（未命名）'}（url 非 http/https 或缺主机）")
+            continue
+        if not name:
+            name = normalize_host(url) or "rss"
+        timeout, timeout_ok = _as_number(item.get("timeout_s", _RSS_TIMEOUT_DEFAULT),
+                                         _RSS_TIMEOUT_DEFAULT, minimum=0.1, maximum=120.0)
+        if not timeout_ok:
+            warnings.append(f"{name} 的 timeout_s 不合法（{item.get('timeout_s')!r}），"
+                            f"回默认 {_RSS_TIMEOUT_DEFAULT:g}")
+        weight, weight_ok = _as_number(item.get("weight", 1.0), 1.0, minimum=0.0)
+        if not weight_ok:
+            warnings.append(f"{name} 的 weight 不合法（{item.get('weight')!r}），回默认 1.0")
+        out.append({"name": name, "url": url, "enabled": bool(item.get("enabled", True)),
+                    "weight": weight, "timeout_s": timeout,
+                    "allow_domains": _domain_list(item.get("allow_domains")),
+                    "deny_domains": _domain_list(item.get("deny_domains"))})
+    if dropped:
+        warnings.append(f"search_sources.json#rss_sources 里这些条不合规，已丢弃："
+                        f"{'；'.join(dropped)}")
+    return [cfg for cfg in out if cfg["enabled"]]
+
+
+def _domain_list(raw: object) -> List[str]:
+    """域名过滤字段归一：只收非空字符串，小写、去空白；类型写坏当空列表。"""
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [str(d).strip().lower() for d in raw if str(d).strip()]
+
+
+def _is_http_url(url: str) -> bool:
+    """URL 校验：必须 http/https 且有主机名（ftp://、javascript:、空主机都算非法）。"""
+    if not str(url or "").startswith(("http://", "https://")):
+        return False
+    try:
+        return bool(urlparse(str(url)).hostname)
+    except ValueError:
+        return False
+
+
+def load_api_source_configs(path: Optional[str] = None) -> List[Dict[str, object]]:
+    """读 API 型搜索源清单，返回归一后的配置 dict 列表。
+
+    fail-soft 纪律（对齐 config/rules.py 的 _load()）：
+      - 文件不存在 → 合法配置（未启用 API 源），静默返回 []；
+      - JSON 损坏 / 根不是对象 / schema_version 不符 / sources 段不是数组
+        → 返回 [] 并经 add_warning 留告警（load_warnings() 可见）；
+      - 单个源声明缺 id/protocol 未知/base_url 非法（非 http/https 或缺主机）/
+        缺 key_env → 丢弃该条并合并告警；
+      - 权重/超时/重试/退避字段类型或范围写坏 → 回默认值 + 告警（不再静默）；
+      - 绝不抛异常：检索主链路不因一个配置文件的笔误而崩。
+    每次调用都重新读盘（文件很小，检索本身是网络 IO 量级）：改 JSON 即生效，
+    不需要重启服务。
+    顶层设置（P1-5 多源融合 + A 反爬冷却）：failure_skip_threshold（连续失败跳过
+    阈值，默认 3）、query_cache_ttl_s（查询缓存 TTL 秒数，默认 300，≤0 = 显式关闭）
+    与 cooldown_seconds（反爬命中后的源冷却秒数，默认 1800）在每次加载时刷新进
+    _SOURCE_SETTINGS，并随每条源配置附带 threshold；值非法时告警 + 回默认，
+    文件缺失/损坏时设置整体回默认。
+    """
+    return list(_load_sources(path)["api"])          # type: ignore[arg-type]
+
+
+def load_rss_source_configs(path: Optional[str] = None) -> List[Dict[str, object]]:
+    """读 RSS/Atom 源清单（search_sources.json 的 rss_sources 段），返回归一配置列表。
+
+    与 load_api_source_configs 共用同一个读盘/告警通道：缺省是合法空列表，
+    坏条丢弃 + 告警，绝不抛异常。字段：name（引擎名，缺省取 feed 主机名）、url、
+    enabled、weight（预留融合权重）、timeout_s、allow_domains / deny_domains
+    （条目域名白/黑名单，空 = 不过滤）。
+    """
+    return list(_load_sources(path)["rss"])          # type: ignore[arg-type]
+
+
+def source_config_summary(path: Optional[str] = None) -> Dict[str, object]:
+    """配置层摘要（不看密钥是否就绪）：调用方据此判断"有没有结构化备选源"。
+
+    返回 {"sources_configured": bool, "api_sources": [id…], "rss_sources": [name…],
+          "sources_file_exists": bool, "error": str}。
+    sources_configured=False 表示只有网页解析源（遇反爬就没有备用通道）——
+    这正是 2026-11-22 实测暴露的短板，本字段让它可见而不是静默。
+    只读：不回写 _SOURCE_SETTINGS（不覆盖调用方对 TTL/冷却时长的显式设定）。
+    """
+    doc = _load_sources(path, apply_settings=False)
+    api = [str(cfg.get("id") or "") for cfg in (doc.get("api") or [])]
+    rss = [str(cfg.get("name") or "") for cfg in (doc.get("rss") or [])]
+    return {"sources_configured": bool(api or rss), "api_sources": api,
+            "rss_sources": rss, "sources_file_exists": bool(doc.get("exists")),
+            "error": str(doc.get("error") or "")}
+
+
+
+def _is_deterministic_error(err: str) -> bool:
+    """错误串是否"重试也没用"：HTTP 4xx（鉴权/限流/参数）与协议未知。
+
+    连接失败、超时、5xx、非 JSON 响应都可能是一次性抖动，才值得退避重试。
+    """
+    text = str(err or "")
+    if "协议未知" in text:
+        return True
+    match = re.search(r"返回HTTP (\d{3})", text)
+    return bool(match and 400 <= int(match.group(1)) < 500)
+
+
+def _query_terms(query: str) -> List[str]:
+    """检索词 → 关键词列表：按空白/中英文标点切分，保留长度 ≥2 的词（单字噪音大）。
+
+    切不出可用词时退回整串（保持"至少按原文匹配一次"的语义，不静默丢查询）。
+    """
+    parts = [p.strip() for p in re.split(r"[\s,，、;；:：/|]+", str(query or "").strip())]
+    terms = [p for p in parts if len(p) >= _RSS_MIN_TERM_LEN]
+    if terms:
+        return terms
+    whole = str(query or "").strip()
+    return [whole] if whole else []
+
+
+def _feed_date(raw: str, url: str) -> Optional[str]:
+    """解析 pubDate/published/updated → YYYY-MM-DD；解析失败退回 extract_date，再失败 None。
+
+    支持 RFC 822（RSS 常见 "Wed, 20 Nov 2026 08:00:00 GMT"）与 ISO 8601（Atom 常见）。
+    全程不抛异常：时间字段写坏只是少一个日期，不该让整条结果消失。
+    """
+    text = str(raw or "").strip()
+    if text:
+        try:
+            return email.utils.parsedate_to_datetime(text).strftime("%Y-%m-%d")
+        except (TypeError, ValueError, IndexError, OverflowError):
+            pass
+        try:
+            from datetime import datetime as _datetime
+            return _datetime.fromisoformat(text.replace("Z", "+00:00")).strftime("%Y-%m-%d")
+        except (TypeError, ValueError, OverflowError):
+            pass
+    try:
+        return extract_date(text, url)
+    except Exception:            # noqa: BLE001  日期解析永不让检索失败
+        return None
+
+
+def _decode_feed_bytes(raw: bytes) -> str:
+    """按 XML 声明 → utf-8 → gbk 顺序解码 feed 内容（中文 RSS 常见 gb2312）。"""
+    match = re.search(rb'encoding=["\']([\w-]+)', raw[:2048])
+    for encoding in ([match[1].decode("ascii", "ignore")] if match else []) + \
+            ["utf-8", "gbk", "gb18030"]:
+        try:
+            return raw[:_RSS_MAX_BYTES].decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw[:_RSS_MAX_BYTES].decode("utf-8", "replace")
+
+
+def _localname(tag: object) -> str:
+    """XML 标签的本地名（去命名空间前缀），RSS/Atom/RDF 混排时靠它认字段。"""
+    return str(tag or "").rsplit("}", 1)[-1]
+
+
+def _child_text(item: ET.Element, names: Tuple[str, ...]) -> str:
+    """取第一个本地名命中的子元素的文本（压空白）；没有就返回空串。"""
+    for child in list(item):
+        if _localname(child.tag) in names and child.text:
+            return re.sub(r"\s+", " ", child.text).strip()
+    return ""
+
+
+def _item_link(item: ET.Element) -> str:
+    """RSS 的 <link>文本</link> 与 Atom 的 <link href="…"/> 都认。"""
+    for child in list(item):
+        if _localname(child.tag) != "link":
+            continue
+        href = child.get("href")
+        if href and href.strip():
+            return href.strip()
+        if child.text and child.text.strip():
+            return child.text.strip()
+    return ""
+
+
+class RssProvider:
+    """RSS/Atom 结构化源（C）：按关键词过滤条目，产出与网页源同形状的 SearchResult。
+
+    为什么要有它：中文搜索引擎反爬（百度 wappass、Bing 同意页、360/Sogou 风控）
+    会让发现层 0 结果，而 RSS 是**结构化、无验证码、可长期稳定抓取**的备选通道。
+    行为约定：
+      - XML 解析只用标准库 xml.etree.ElementTree（不新增第三方依赖）；解析前剥掉
+        DOCTYPE/ENTITY 声明（stdlib 本就不解析外部实体，剥掉是纵深防御）；
+      - 单源失败只影响自己（返回 ([], 中文原因)），search_all 里其它源照常；
+      - 条目按 URL 归一化去重，按 allow_domains/deny_domains 做域名过滤，
+        非 http(s)/无主机的链接直接丢弃；
+      - pubDate/published 解析失败不抛（_feed_date 多路兜底，最差 date=None）；
+      - 命中验证页/拦截页（例如 feed 地址被反爬换成了 HTML 验证页）走共用判定
+        detect_verification_page，与网页源同一套冷却；
+      - 绝不抛异常：任何失败都返回 ([], 原因)。
+    """
+
+    def __init__(self, config: Dict[str, object]) -> None:
+        self.name = str(config.get("name") or config.get("id") or "rss").strip() or "rss"
+        self.url = str(config.get("url") or "").strip()
+        self.weight = float(config.get("weight") or 1.0)
+        self.timeout_s = float(config.get("timeout_s") or _RSS_TIMEOUT_DEFAULT)
+        self.allow_domains = tuple(_domain_list(config.get("allow_domains")))
+        self.deny_domains = tuple(_domain_list(config.get("deny_domains")))
+
+    # ---- 跳过判定（与 API 源同一接口口径：RSS 不需要密钥，恒不跳过） ----
+
+    def skip_reason(self) -> str:
+        """RSS 源无密钥要求；只有 url 缺失才算配置性跳过（配置层已拦，兜底用）。"""
+        return "" if _is_http_url(self.url) else "rss_url_missing"
+
+    def search(self, query: str, k: int = 6) -> Tuple[List[SearchResult], Optional[str]]:
+        cooling = source_cooldown(self.name)
+        if cooling.get("active"):
+            return [], (f"{self.name}已冷却（{cooling.get('reason')}，"
+                        f"剩余 {int(cooling.get('remaining_s', 0) or 0)} 秒）")
+        items, err = self._fetch_items()
+        if err:
+            return [], f"{self.name}{err}"
+        terms = _query_terms(query)
+        if not terms:
+            return [], None
+        out: List[SearchResult] = []
+        seen: set = set()
+        for item in items:
+            url = str(item.get("url") or "").strip()
+            if not _is_http_url(url) or not self._domain_allowed(url):
+                continue
+            key = _dedup_url(url)
+            if not key or key in seen:
+                continue
+            haystack = f"{item.get('title', '')} {item.get('snippet', '')}".lower()
+            if not any(term.lower() in haystack for term in terms):
+                continue
+            seen.add(key)
+            out.append(SearchResult(self.name, len(out) + 1,
+                                    str(item.get("title") or ""), url,
+                                    str(item.get("snippet") or ""),
+                                    _feed_date(str(item.get("published") or ""), url),
+                                    classify_domain(url)))
+            if len(out) >= max(1, int(k)):
+                break
+        return out, None
+
+    # ---- 内部：抓取与解析 ----
+
+    def _domain_allowed(self, url: str) -> bool:
+        """域名过滤：白名单非空时只收命中的域名；黑名单命中的一律丢弃。"""
+        host = normalize_host(url)
+        if not host:
+            return False
+        if self.deny_domains and any(host == d or host.endswith("." + d)
+                                     for d in self.deny_domains):
+            return False
+        if self.allow_domains and not any(host == d or host.endswith("." + d)
+                                          for d in self.allow_domains):
+            return False
+        return True
+
+    def _fetch_items(self) -> Tuple[List[Dict[str, str]], str]:
+        """抓一个 feed → (条目列表, 错误串)。任何失败都返回 ([], 原因)，不抛。"""
+        try:
+            resp = requests.get(self.url, headers=_RSS_HEADERS, timeout=self.timeout_s,
+                                stream=True)
+        except requests.RequestException as exc:
+            return [], f"请求失败: {type(exc).__name__}"
+        try:
+            status = int(getattr(resp, "status_code", 0) or 0)
+            raw = getattr(resp, "content", b"") or b""
+        finally:
+            close = getattr(resp, "close", None)
+            if callable(close):
+                close()
+        text = _decode_feed_bytes(raw)
+        if status in (403, 429):
+            reason = detect_verification_page(text) or f"返回HTTP {status}"
+            return [], _note_blocked(self.name, reason)
+        if status != 200:
+            return [], f"返回HTTP {status}"
+        if len(raw) > _RSS_MAX_BYTES:
+            return [], "响应过大，已丢弃"
+        # feed 地址被反爬换成 HTML 验证页：走与网页源同一套判定，不当成"空 feed"。
+        # 只认关键词/结构特征（min_text=0 关掉正文长度阈值）——合法 feed 的可见正文
+        # 本来就短（几十到几百字符），套长度阈值会把正常 feed 误判成拦截页。
+        reason = detect_verification_page(text, min_text=0)
+        if reason:
+            return [], _note_blocked(self.name, reason)
+        return self._parse_feed(text)
+
+    def _parse_feed(self, text: str) -> Tuple[List[Dict[str, str]], str]:
+        """解析 RSS 2.0 / Atom / RDF → (条目列表, 错误串)；坏 XML 返回 ([], 原因)。
+
+        坏 XML 与"空 feed"必须区分：前者是源坏了（上层应标 degraded），
+        后者是合法的 0 条。两种都不抛异常。
+        """
+        payload = text or ""
+        if "<!DOCTYPE" in payload or "<!ENTITY" in payload:
+            payload = re.sub(r"<!DOCTYPE[^>]*>", "", payload, flags=re.I)
+            payload = re.sub(r"<!ENTITY[^>]*>", "", payload, flags=re.I)
+        try:
+            root = ET.fromstring(payload)
+        except (ET.ParseError, ValueError):
+            return [], "XML 解析失败"
+        root_tag = _localname(root.tag)
+        items: List[ET.Element] = []
+        if root_tag == "rss":
+            channel = None
+            for child in list(root):
+                if _localname(child.tag) == "channel":
+                    channel = child
+                    break
+            if channel is not None:
+                items = [c for c in list(channel) if _localname(c.tag) == "item"]
+        elif root_tag == "feed":
+            items = [c for c in list(root) if _localname(c.tag) == "entry"]
+        elif root_tag in ("RDF", "rdf"):
+            items = [c for c in list(root) if _localname(c.tag) == "item"]
+        out: List[Dict[str, str]] = []
+        for item in items[:_RSS_MAX_ITEMS]:
+            title = _strip_tags(_child_text(item, ("title",)))
+            url = _item_link(item)
+            summary = _child_text(item, ("description", "summary", "content", "abstract"))
+            snippet = _strip_tags(summary)
+            published = _child_text(item, ("pubDate", "published", "updated", "date"))
+            if not title and not snippet:
+                continue
+            out.append({"title": title, "url": url, "snippet": snippet,
+                        "published": published})
+        return out, ""
+
+
+def _build_rss_providers() -> List["RssProvider"]:
+    """清单 → RSS 源执行器列表（默认装配用）：单条构造失败不拖垮检索（fail-soft）。"""
+    providers: List[RssProvider] = []
+    for cfg in load_rss_source_configs():
+        try:
+            providers.append(RssProvider(cfg))
+        except Exception:        # noqa: BLE001  配置错误的单个源不拖垮检索
+            continue
+    return providers
 
 
 def _build_api_providers() -> List["ApiSearchProvider"]:
@@ -433,6 +1106,46 @@ def _build_api_providers() -> List["ApiSearchProvider"]:
     return providers
 
 
+def default_providers() -> List[object]:
+    """按环境变量组装后端列表（源优先级：结构化 API → RSS → 网页解析）：
+
+      1. search_sources.json 里**已启用且已配密钥**的 API 型源（最前：结构稳定、
+         无验证码，生产推荐形态）；
+      2. search_sources.json 里**已启用**的 RSS/Atom 源（结构化备选：网页源被反爬
+         拦住时仍有结果）；
+      3. RUMOR_SEARCH_BACKENDS 声明的网页解析源（逗号分隔：custom-api,so360,baidu，
+         默认 so360,baidu）；配了 RUMOR_SEARCH_API_URL 时 custom-api 才生效。
+    一个结构化源都没启用时返回值与从前逐位一致（既有装配契约不变，守卫用例锁定）。
+    结构化源缺失时 search_all 返回 sources_configured=false，让"只有网页源、遇反爬
+    无备用"这件事可见（见 source_config_summary / /api/health）。
+    """
+    order = [s.strip().lower() for s in
+             os.environ.get("RUMOR_SEARCH_BACKENDS", "so360,baidu").split(",") if s.strip()]
+    mapping: Dict[str, Callable[[], object]] = {
+        "so360": So360Provider,
+        "baidu": BaiduProvider,
+        "custom-api": lambda: GenericAPIProvider(
+            os.environ["RUMOR_SEARCH_API_URL"],
+            os.environ.get("RUMOR_SEARCH_API_KEY", ""),
+            os.environ.get("RUMOR_SEARCH_API_NAME", "custom-api")),
+    }
+    out: List[object] = []
+    for name in order:
+        if name == "custom-api" and not os.environ.get("RUMOR_SEARCH_API_URL"):
+            continue
+        factory = mapping.get(name)
+        if factory:
+            try:
+                out.append(factory())
+            except Exception:      # noqa: BLE001  配置错误的单个后端不拖垮检索
+                continue
+    structured = _build_api_providers() + _build_rss_providers()
+    if structured:
+        return structured + out
+    return out or [So360Provider(), BaiduProvider()]
+
+
+
 class ApiSearchProvider:
     """API 型搜索源执行器：与爬虫源（So360/Baidu）并列的第三类后端。
 
@@ -447,11 +1160,15 @@ class ApiSearchProvider:
     - 授权闸与爬虫源同一条：HTTP 只会发生在 search_all 的 public-search 闸之后
       （未授权时 search_all 在构建任何 provider 之前就返回 blocked）；
     - fail-soft：单次失败返回 ([], 原因) 并累计 consecutive_failures（实例计数 +
-      进程级 _API_SOURCE_HEALTH 账本同写）；连续失败 ≥ failure_skip_threshold
-      （search_sources.json 顶层可配，默认 3）时 health_skip_reason() 给出原因，
-      search_all 据此做健康度动态降权（P1-5）：本次调用先跳过该源（零外发、记
-      skipped），跳过一次账本降温 1（cool_health_skip），源不会永久出局；成功
-      一次即清零回归（"连续失败源暂时跳过并记数，恢复后自动回归"）。
+      进程级 _API_SOURCE_HEALTH 账本同写，账本读写加锁）；连续失败 ≥
+      failure_skip_threshold（search_sources.json 顶层可配，默认 3）时
+      health_skip_reason() 给出原因，search_all 据此做健康度动态降权（P1-5）：
+      本次调用先跳过该源（零外发、记 skipped），跳过一次账本降温 1
+      （cool_health_skip），源不会永久出局；成功一次即清零回归
+      （"连续失败源暂时跳过并记数，恢复后自动回归"）。
+    - 失败重试（B）：max_retries（默认 0 = 既有单次语义，JSON 按源可配，上限 3）
+      次重试按 retry_backoff_s * 2**attempt 指数退避（time.sleep），**不会把 3 次
+      请求一口气打出去**；重试次数计入请求次数，最终失败仍只记一次账本。
     """
 
     def __init__(self, config: Dict[str, object]) -> None:
@@ -468,6 +1185,16 @@ class ApiSearchProvider:
                 or threshold <= 0):
             threshold = _FAILURE_SKIP_THRESHOLD_DEFAULT
         self.failure_skip_threshold = threshold
+        retries = config.get("max_retries", _API_RETRY_DEFAULT)
+        if isinstance(retries, bool) or not isinstance(retries, (int, float)) \
+                or not 0 <= retries <= _API_RETRY_MAX:
+            retries = _API_RETRY_DEFAULT
+        self.max_retries = int(retries)
+        backoff = config.get("retry_backoff_s", _API_RETRY_BACKOFF_DEFAULT)
+        if isinstance(backoff, bool) or not isinstance(backoff, (int, float)) \
+                or not 0 <= backoff <= 5:
+            backoff = _API_RETRY_BACKOFF_DEFAULT
+        self.retry_backoff_s = float(backoff)
         self.consecutive_failures = 0
 
     # ---- 跳过判定（search_all 在发任何请求前检查） ----
@@ -488,7 +1215,7 @@ class ApiSearchProvider:
         时回退实例计数（显式装配的持久实例与账本同写，两者一致）。与 skip_reason
         分工：那是配置性跳过（密钥缺失），这是运行时健康度，两者都进 skipped 计数。
         """
-        fails = _API_SOURCE_HEALTH.get(self.id, self.consecutive_failures)
+        fails = _health_get(self.id, self.consecutive_failures)
         if fails >= self.failure_skip_threshold:
             return (f"unhealthy:consecutive_failures={int(fails)}"
                     f">={self.failure_skip_threshold}")
@@ -500,23 +1227,46 @@ class ApiSearchProvider:
         探针成功清零回归；探针失败账本重新累加、回到跳过态（最坏情况跳过/探针
         交替，一半调用省掉该源的超时等待）——保证"暂时跳过"，不会永久出局。
         """
-        cooled = max(0, _API_SOURCE_HEALTH.get(self.id, self.consecutive_failures) - 1)
-        _API_SOURCE_HEALTH[self.id] = cooled
+        cooled = max(0, _health_get(self.id, self.consecutive_failures) - 1)
+        _health_set(self.id, cooled)
         self.consecutive_failures = cooled
 
     # ---- 请求与 normalize ----
 
     def search(self, query: str, k: int = 6) -> Tuple[List[SearchResult], Optional[str]]:
-        results, err = self._request(query, max(1, int(k)))
+        cooling = source_cooldown(self.id)
+        if cooling.get("active"):
+            return [], (f"{self.id}已冷却（{cooling.get('reason')}，"
+                        f"剩余 {int(cooling.get('remaining_s', 0) or 0)} 秒）")
+        results, err = self._request_with_retry(query, max(1, int(k)))
         if err:
             self.consecutive_failures += 1
-            _API_SOURCE_HEALTH[self.id] = self.consecutive_failures  # 跨调用健康账本
+            _health_set(self.id, self.consecutive_failures)   # 跨调用健康账本（加锁）
             _logger.warning("api-source %s 连续失败 %d 次: %s",
                             self.id, self.consecutive_failures, err)
             return [], err
         self.consecutive_failures = 0
-        _API_SOURCE_HEALTH[self.id] = 0
+        _health_set(self.id, 0)
         return results, None
+
+    def _request_with_retry(self, query: str,
+                            k: int) -> Tuple[List[SearchResult], Optional[str]]:
+        """有限次重试 + 指数退避（B）：默认 0 次重试 = 既有单次语义，逐位不变。
+
+        HTTP 4xx（含 401/403/429）是**确定性失败**，重试没有意义，直接返回；
+        连接/超时/5xx/坏 JSON 才重试——避免把错误密钥打到限流黑名单里。
+        """
+        attempt = 0
+        while True:
+            results, err = self._request(query, k)
+            if not err or attempt >= self.max_retries or _is_deterministic_error(err):
+                return results, err
+            attempt += 1
+            delay = min(self.retry_backoff_s * (2 ** (attempt - 1)), 5.0)
+            if delay > 0:
+                time.sleep(delay)
+            _logger.info("api-source %s 第 %d 次重试（退避 %.1fs）：%s",
+                         self.id, attempt, delay, err)
 
     def _request(self, query: str, k: int) -> Tuple[List[SearchResult], Optional[str]]:
         key = os.environ.get(self.key_env, "").strip()
@@ -577,40 +1327,6 @@ class ApiSearchProvider:
             out.append(SearchResult(self.name, i + 1, title, url, snippet, date,
                                     classify_domain(url)))
         return out
-
-
-def default_providers() -> List[object]:
-    """按环境变量组装后端列表：
-      RUMOR_SEARCH_BACKENDS  逗号分隔：custom-api,so360,baidu（默认 so360,baidu）
-    配了 RUMOR_SEARCH_API_URL 时 custom-api 才会生效。
-    另外前置 search_sources.json 里**已启用且已配密钥**的 API 型源（启用 =
-    enabled:true + key_env 环境变量有非空密钥，两者共同决定——正是"改 JSON/
-    填 .env 即启用，不改代码"的口径）。未配密钥的源不进默认装配，因此一个 API
-    源都没启用时本函数返回值与从前逐位一致（既有装配契约不变）；skip 机制
-    （skip_reason → skipped 计数）保留给显式装配的 provider 与"装配后才失钥"
-    的运行时窗口，见 search_all。"""
-    order = [s.strip().lower() for s in
-             os.environ.get("RUMOR_SEARCH_BACKENDS", "so360,baidu").split(",") if s.strip()]
-    mapping: Dict[str, Callable[[], object]] = {
-        "so360": So360Provider,
-        "baidu": BaiduProvider,
-        "custom-api": lambda: GenericAPIProvider(
-            os.environ["RUMOR_SEARCH_API_URL"],
-            os.environ.get("RUMOR_SEARCH_API_KEY", ""),
-            os.environ.get("RUMOR_SEARCH_API_NAME", "custom-api")),
-    }
-    out: List[object] = []
-    for name in order:
-        if name == "custom-api" and not os.environ.get("RUMOR_SEARCH_API_URL"):
-            continue
-        factory = mapping.get(name)
-        if factory:
-            try:
-                out.append(factory())
-            except Exception:      # noqa: BLE001  配置错误的单个后端不拖垮检索
-                continue
-    api = _build_api_providers()
-    return api + out if api else (out or [So360Provider(), BaiduProvider()])
 
 
 # ---------------------------------------------------------------------------
@@ -695,6 +1411,14 @@ def search_all(query: str, k: int = 6,
     不传时只查原 query，与加参数前逐位不变。搜索引擎对 site: 的支持是尽力
     而为：变体全空时兜底保留非限定结果并标注 scope_degraded=True（同时
     domain_scope_applied=False），调用方按实到结果呈现，不谎报"已限定"。
+    反爬冷却（A）：每个源发请求前先查共享冷却表（source_cooldown）——冷却期内
+    零外发、槽位标 blocked=True 并给中文 reason；命中验证页由各 provider 调
+    mark_source_blocked 记冷却（时长 cooldown_seconds，默认 1800 秒），到期自动恢复。
+    降级四态（D）：顶层 status ∈ {ok, partial, empty, all_blocked, no_sources,
+    all_failed}，配合 degraded / all_blocked / sources_configured / degraded_reason，
+    让调用方能区分"真的 0 条 / 全被反爬拦截 / 没有可用源 / 部分源成功"；
+    engines 每个槽位固定带 {ok, error, count, blocked, reason}（另可按需带
+    skipped/skip_reason），上层按这些字段如实呈现，不把"被拦截"显示成"没发现"。
     """
     if authorized is None:
         if providers is not None:
@@ -727,11 +1451,13 @@ def search_all(query: str, k: int = 6,
         cached = _query_cache_get(cache_key)
         if cached is not None:
             return cached
+    summary = _source_summary(provs)
     engines: Dict[str, Dict[str, object]] = {}
     merged: List[SearchResult] = []
     seen = set()
     skipped_total = 0
     for p in provs:
+        key = getattr(p, "name", None) or type(p).__name__
         # API 型源的配置性跳过（密钥缺失等）：先于一切 HTTP 检查；命中即计一次
         # skipped 并进下一个源，不进入变体循环（零外发）。没有 skip_reason 的
         # 提供方（爬虫源/custom-api/测试桩）走原路径，逐位不变。
@@ -742,10 +1468,10 @@ def search_all(query: str, k: int = 6,
             except Exception:    # noqa: BLE001  判定器坏了按"不跳过"处理，交给 search() 兜
                 reason = ""
             if reason:
-                key = getattr(p, "name", None) or type(p).__name__
-                slot = engines.setdefault(key, {"ok": False, "error": "", "count": 0})
+                slot = engines.setdefault(key, _new_engine_slot())
                 slot["skipped"] = int(slot.get("skipped", 0)) + 1
                 slot["skip_reason"] = reason
+                slot["reason"] = f"源未就绪：{reason}"
                 skipped_total += 1
                 continue
         # 健康度动态降权（P1-5）：连续失败 ≥ 阈值（failure_skip_threshold，默认 3）
@@ -759,10 +1485,10 @@ def search_all(query: str, k: int = 6,
             except Exception:    # noqa: BLE001  判定器坏了按"不跳过"处理
                 hreason = ""
             if hreason:
-                key = getattr(p, "name", None) or type(p).__name__
-                slot = engines.setdefault(key, {"ok": False, "error": "", "count": 0})
+                slot = engines.setdefault(key, _new_engine_slot())
                 slot["skipped"] = int(slot.get("skipped", 0)) + 1
                 slot["skip_reason"] = hreason
+                slot["reason"] = f"连续失败已暂时跳过：{hreason}"
                 skipped_total += 1
                 cooler = getattr(p, "cool_health_skip", None)
                 if callable(cooler):
@@ -771,15 +1497,30 @@ def search_all(query: str, k: int = 6,
                     except Exception:  # noqa: BLE001  降温失败不拖垮检索
                         pass
                 continue
+        # 反爬冷却（A）：冷却期内零外发——如实记 blocked + 中文原因，不当成"0 条结果"。
+        cooling = source_cooldown(key)
+        if cooling.get("active"):
+            slot = engines.setdefault(key, _new_engine_slot())
+            slot["blocked"] = True
+            slot["reason"] = (f"反爬冷却中（{cooling.get('reason')}，"
+                              f"剩余 {int(cooling.get('remaining_s', 0) or 0)} 秒）")
+            continue
         for variant in queries:
             try:
                 results, err = p.search(variant, k)
             except Exception as exc:  # noqa: BLE001  解析器 bug 不应炸掉整个检索
                 results, err = [], f"{type(exc).__name__}: {exc}"
-            key = getattr(p, "name", None) or type(p).__name__
-            slot = engines.setdefault(key, {"ok": False, "error": "", "count": 0})
+            slot = engines.setdefault(key, _new_engine_slot())
             if err:
                 slot["error"] = str(err)
+                slot["reason"] = str(err)
+                # provider 命中验证页时会写共享冷却表：据此把槽位标成 blocked（而不是
+                # 普通错误），上层就能区分"被拦截"和"网络抖动"。
+                state = source_cooldown(key)
+                if state.get("active"):
+                    slot["blocked"] = True
+                    slot["reason"] = (f"反爬拦截（{state.get('reason')}，"
+                                      f"剩余 {int(state.get('remaining_s', 0) or 0)} 秒）")
             else:
                 slot["ok"] = True
             for r in results or []:
@@ -805,13 +1546,49 @@ def search_all(query: str, k: int = 6,
     limit = k if not domains else k * max(1, len(queries))
     out = _finalize(query, merged[:max(1, int(limit))], engines,
                     domain_scoped=scoped, scope_degraded=degraded,
-                    skipped_total=skipped_total)
-    # 只缓存"完全成功"：结果非空、零错误、零跳过——部分失败/空结果/被跳过的源
-    # 都意味着这次装配没跑满，缓存会冻结残缺视图（失败/空结果不缓存）。
+                    skipped_total=skipped_total, source_summary=summary)
+    if not summary["sources_configured"] and out["status"] in ("all_blocked", "no_sources",
+                                                              "all_failed"):
+        # B：结构化源缺位时把"没有备选通道"写进日志（不静默）——这是 2026-11-22
+        # 实测里"联网核查看起来什么都没查到"的根因之一。
+        _logger.warning("检索降级：%s（未配置 API/RSS 结构化源，遇反爬无备用通道）",
+                        out.get("degraded_reason") or out.get("status"))
+    # 只缓存"完全成功"：结果非空、零错误、零跳过、零拦截——部分失败/空结果/被跳过
+    # 的源都意味着这次装配没跑满，缓存会冻结残缺视图（失败/空结果不缓存）。
     if cache_key is not None and out["results"] and skipped_total == 0 \
-            and not any(slot.get("error") for slot in engines.values()):
+            and not any(slot.get("error") or slot.get("blocked")
+                        for slot in engines.values()):
         _query_cache_put(cache_key, out)
     return out
+
+
+def _new_engine_slot() -> Dict[str, object]:
+    """engines 槽位的固定形状：ok / error / count / blocked / reason（+ 可选 skipped）。
+
+    blocked=True 表示该源这次是被反爬拦截/冷却跳过（reason 给中文原因），与
+    ok=False+error 的"网络/解析失败"区分开——上层据此把"被拦截"显示成"被拦截"。
+    """
+    return {"ok": False, "error": "", "count": 0, "blocked": False, "reason": ""}
+
+
+def _source_summary(provs: List[object]) -> Dict[str, object]:
+    """本次检索的源结构摘要（B/D）：配置层有没有结构化备选 + 本次装配了哪些源。
+
+    sources_configured 取**配置层**口径（search_sources.json 是否声明了启用的
+    API/RSS 源），与密钥是否就绪无关：声明了但缺密钥 = 有配置、无可用源，
+    由 skipped 计数如实呈现。api_sources/rss_sources 同样取配置层名字，
+    装配实况看 engines 的键。
+    """
+    try:
+        summary = source_config_summary()
+    except Exception:            # noqa: BLE001  摘要失败不能拖垮检索
+        summary = {"sources_configured": False, "api_sources": [], "rss_sources": [],
+                   "sources_file_exists": False, "error": ""}
+    summary["web_sources"] = [str(getattr(p, "name", "") or type(p).__name__)
+                              for p in provs
+                              if isinstance(p, (So360Provider, BaiduProvider,
+                                                GenericAPIProvider))]
+    return summary
 
 
 def _in_domains(url: str, domains: List[str]) -> bool:
@@ -827,19 +1604,42 @@ def _finalize(query: str, merged: List[SearchResult],
               engines: Dict[str, Dict[str, object]],
               domain_scoped: bool = False,
               scope_degraded: bool = False,
-              skipped_total: int = 0) -> Dict[str, object]:
+              skipped_total: int = 0,
+              source_summary: Optional[Dict[str, object]] = None) -> Dict[str, object]:
     """排序 + 组装返回（原 search_all 尾段；domain_scoped 时如实标注）。
 
     scope_degraded（R9）：site: 变体全空兜底的诚实标注——domain_scope_applied
     置 False 并带 scope_degraded=True；不传 domains 时两个键都不出现（逐位不变）。
     skipped_total（P0-1 API 型源）：密钥缺失等原因被跳过的源计数；只在 >0 时
-    才加顶层 "skipped" 键（未配置 API 源时返回结构逐位不变）。skipped 不是
-    error：该次调用确实没外发、也没失败，是合法的"源不可用"状态。
+    才加顶层 "skipped" 键。skipped 不是 error：该次调用确实没外发、也没失败，
+    是合法的"源不可用"状态。
+    降级四态（D）：status + degraded + all_blocked + sources_configured +
+    degraded_reason 恒定出现（显式 providers 与默认装配同一形状，调用方不必
+    分支判断）。status 口径：
+      - ok         ：有结果，且所有源都成功（无 error/skip/blocked）；
+      - partial    ：有结果，但至少一个源失败/被跳过/被拦截；
+      - empty      ：确实查到了 0 条（至少一个源成功返回空结果）；
+      - all_blocked：0 条且所有源都被反爬拦截（"看起来什么都没查到"的真凶）；
+      - no_sources ：没有可用源（未装配任何源，或只有网页解析源且全部失败、
+                     结构化源一个都没配置）；
+      - all_failed ：0 条且所有源都失败（网络/解析错误，不是拦截）。
     截断由调用方做（见 search_all 的 limit 口径），这里只排序不裁。
     """
     # 排序不写死档名：按 registry 里 tiers 的声明顺序排（越靠前越权威），未声明的档排最后。
     merged.sort(key=lambda r: (tier_rank(r.domain_tier), r.rank))
-    out: Dict[str, object] = {"query": query, "results": merged, "engines": engines}
+    summary = dict(source_summary or {})
+    status, degraded, reason = _degrade_status(merged, engines, summary)
+    out: Dict[str, object] = {
+        "query": query, "results": merged, "engines": engines,
+        "status": status,
+        "degraded": degraded,
+        "all_blocked": status == "all_blocked",
+        "sources_configured": bool(summary.get("sources_configured")),
+        "api_sources": list(summary.get("api_sources") or []),
+        "rss_sources": list(summary.get("rss_sources") or []),
+        "web_sources": list(summary.get("web_sources") or []),
+        "degraded_reason": reason,
+    }
     if scope_degraded:
         out["domain_scope_applied"] = False
         out["scope_degraded"] = True
@@ -848,6 +1648,50 @@ def _finalize(query: str, merged: List[SearchResult],
     if skipped_total > 0:
         out["skipped"] = int(skipped_total)
     return out
+
+
+def _degrade_status(merged: List[SearchResult],
+                    engines: Dict[str, Dict[str, object]],
+                    summary: Dict[str, object]) -> Tuple[str, bool, str]:
+    """降级四态判定（D）：返回 (status, degraded, 中文原因)。
+
+    只看本次装配的槽位与配置摘要，不猜：有结果时区分 ok/partial；0 结果时按
+    "全被拦截 → 无可用源 → 全失败 → 真空结果"的顺序判（拦截与无源是本次任务
+    要显式暴露的两种，优先于笼统的 all_failed）。
+    """
+    names = [str(name) for name in engines]
+    slots = [slot for slot in engines.values() if isinstance(slot, dict)]
+    blocked = [name for name, slot in engines.items()
+               if isinstance(slot, dict) and slot.get("blocked")]
+    # failed 只算"非拦截的失败"：被拦截的槽位也会带 error 串，但它属于 blocked，
+    # 不能让它把 all_blocked 误判成 all_failed（否则"被拦截"又退回"源失败"口径）。
+    failed = [name for name, slot in engines.items()
+              if isinstance(slot, dict) and slot.get("error") and not slot.get("blocked")]
+    skipped = [name for name, slot in engines.items()
+               if isinstance(slot, dict) and slot.get("skipped")]
+    ok = [name for name, slot in engines.items()
+          if isinstance(slot, dict) and slot.get("ok")]
+    if merged:
+        if not failed and not skipped and not blocked:
+            return "ok", False, ""
+        trouble = failed + blocked + skipped
+        return "partial", True, f"部分检索源不可用：{'、'.join(trouble)}"
+    if not slots:
+        return "no_sources", True, "没有可用检索源（本次未装配任何后端）"
+    if blocked and not failed and len(blocked) + len(skipped) == len(slots):
+        # 所有"尝试过的"源都被拦、其余源未就绪（缺密钥等）：本质仍是"全被拦截"。
+        return "all_blocked", True, (
+            f"全部检索源被反爬拦截（{'、'.join(blocked)}），"
+            "没有拿到任何结果——这不等于'没有相关发现'")
+    if ok:
+        return "empty", False, ""
+    if skipped and len(skipped) == len(slots):
+        return "no_sources", True, (
+            "结构化源都未就绪（未配置或密钥缺失），且没有可用网页解析源")
+    if not summary.get("sources_configured"):
+        return "no_sources", True, (
+            "未配置 API/RSS 结构化源，网页解析源全部失败——遇反爬没有备选通道")
+    return "all_failed", True, f"所有检索源均失败：{'、'.join(failed or names)}"
 
 
 # ===========================================================================

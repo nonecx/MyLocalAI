@@ -152,6 +152,10 @@ class TestSearchMutations(unittest.TestCase):
             text = ""
         S.BaiduProvider._degraded_until = 0.0
         self.addCleanup(setattr, S.BaiduProvider, "_degraded_until", 0.0)
+        # 2026-11-25 起"验证页命中"同时写进程级冷却表（/api/health 与上层可见），
+        # 测试清理时一并复位，避免冷却态外溢到其它用例。
+        S.clear_source_cooldowns("baidu")
+        self.addCleanup(S.clear_source_cooldowns, "baidu")
         with mock.patch.object(S.requests, "get", return_value=Resp()) as g:
             S.BaiduProvider().search("q")
             self.assertTrue(S.BaiduProvider.is_degraded())

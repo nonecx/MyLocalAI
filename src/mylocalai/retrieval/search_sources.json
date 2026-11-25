@@ -2,7 +2,8 @@
   "schema_version": 1,
   "failure_skip_threshold": 3,
   "query_cache_ttl_s": 300,
-  "_comment": "API 型搜索源清单（P0-1 检索源结构化升级，针对 E1：爬虫式搜索源被反爬拦到 0 结果）。与爬虫源（RUMOR_SEARCH_BACKENDS=so360,baidu，保持不变）并列的第三类后端：结果结构稳定、无验证码，是生产环境推荐形态。启用条件 = enabled:true 且 key_env 指定的环境变量里有密钥（在 .env 里填 BING_SEARCH_API_KEY 或 BOCHA_API_KEY，密钥绝不写进本文件）；两条件缺一时源保留在清单里但自动跳过、计一次 skipped（不报错、不算降级主因）。本文件损坏或 schema_version 不符时退回无 API 源并留 load_warnings 告警，绝不抛异常拖垮检索。加载器见 retrieval/search.py 的 load_api_source_configs()。字段说明：id=引擎名（engines 计数键）；protocol=请求/响应形状分发（bing/bocha，新协议要同时在执行器里实现）；base_url=API 端点；key_env=密钥所在环境变量名（对齐 providers.json 的 key_env 模式）；enabled=总开关；weight=预留的融合权重（本次只存不用）；timeout_s=单次请求超时秒数。顶层设置（P1-5 多源融合，缺省/非法回默认并告警）：failure_skip_threshold=API 源连续失败跳过阈值（默认 3：连败达阈值时本次 search_all 先跳过该源、记 skipped 原因，跳过一次账本降温 1，成功一次清零回归，不会永久出局）；query_cache_ttl_s=查询级进程内缓存的 TTL 秒数（默认 300：同一 (query, domains, 源集合) 的完全成功结果 TTL 内直接复用、命中零外发；设 0 或负数 = 显式关闭缓存；失败/空结果/有跳过的一律不缓存）。",
+  "cooldown_seconds": 1800,
+  "_comment": "结构化检索源清单（P0-1 检索源结构化升级 + 2026-11-25 检索层韧性 A/B/C）。与网页解析源（RUMOR_SEARCH_BACKENDS=so360,baidu，保持不变）并列的后端：结果结构稳定、无验证码，是生产环境推荐形态；源优先级 = sources（API）→ rss_sources（RSS/Atom）→ 网页解析源。启用条件 = enabled:true 且 key_env 指定的环境变量里有密钥（在 .env 里填 BING_SEARCH_API_KEY 或 BOCHA_API_KEY，密钥绝不写进本文件）；两条件缺一时源保留在清单里但自动跳过、计一次 skipped（不报错、不算降级主因）。本文件损坏或 schema_version 不符时退回无结构化源并留 load_warnings 告警，绝不抛异常拖垮检索。加载器见 retrieval/search.py 的 load_api_source_configs() / load_rss_source_configs() / source_config_summary()。字段说明：id=引擎名（engines 计数键）；protocol=请求/响应形状分发（bing/bocha，新协议要同时在执行器里实现）；base_url=API 端点（必须 http/https 且有主机，否则该条丢弃）；key_env=密钥所在环境变量名（对齐 providers.json 的 key_env 模式）；enabled=总开关；weight=融合权重（预留）；timeout_s=单次请求超时秒数（0.1–120，类型/范围写坏回默认并告警）；max_retries=失败重试次数（0–3，默认 0 = 单次请求；仅连接/超时/5xx/坏 JSON 重试，HTTP 4xx 不重试）；retry_backoff_s=指数退避基数（秒，0–5，默认 0.5：第 n 次重试等待 backoff*2^(n-1)）。RSS 段（rss_sources，缺省 = 不用 RSS，合法）：每条 {name: 引擎名（缺省取 feed 主机名）, url: feed 地址（必须 http/https）, enabled: 总开关, weight: 预留权重, timeout_s: 超时（0.1–120，默认 10）, allow_domains: 条目域名白名单（空 = 不过滤）, deny_domains: 条目域名黑名单}；XML 用标准库 ElementTree 解析（不新增第三方依赖），单源失败不影响其它源，pubDate/published 解析失败不抛。示例配置位（仅作注释，写入前请自行实测可达；测试与文档里提到但产物不内置第三方 URL）：{\"name\": \"示例-官方通报\", \"url\": \"https://example.com/feed.xml\", \"enabled\": false}、{\"name\": \"示例-媒体快讯\", \"url\": \"https://example.org/rss/news.xml\", \"enabled\": false}——国内可用的 RSS 源（政务/媒体/RSSHub 中转）待实测后填入。顶层设置（缺省/非法回默认并告警）：failure_skip_threshold=API 源连续失败跳过阈值（默认 3：连败达阈值时本次 search_all 先跳过该源、记 skipped 原因，跳过一次账本降温 1，成功一次清零回归，不会永久出局）；query_cache_ttl_s=查询级进程内缓存的 TTL 秒数（默认 300：同一 (query, domains, 源集合) 的完全成功结果 TTL 内直接复用、命中零外发；设 0 或负数 = 显式关闭缓存；失败/空结果/有跳过的一律不缓存）；cooldown_seconds=反爬命中后的源冷却秒数（默认 1800 = 30 分钟，上限 86400；命中验证页/拦截页即冷却，冷却期内该源零外发、engines 槽位标 blocked + 中文 reason，到期自动恢复，/api/health 的 retrieval.cooldowns 可见）。",
   "sources": [
     {
       "id": "bing",
@@ -11,7 +12,9 @@
       "key_env": "BING_SEARCH_API_KEY",
       "enabled": true,
       "weight": 1.0,
-      "timeout_s": 10
+      "timeout_s": 10,
+      "max_retries": 1,
+      "retry_backoff_s": 0.5
     },
     {
       "id": "bocha",
@@ -20,7 +23,31 @@
       "key_env": "BOCHA_API_KEY",
       "enabled": true,
       "weight": 1.0,
-      "timeout_s": 10
+      "timeout_s": 10,
+      "max_retries": 1,
+      "retry_backoff_s": 0.5
+    }
+  ],
+  "rss_sources": [
+    {
+      "_note": "示例配置位 1（默认停用）：换成实测可用的国内 feed 地址后把 enabled 改成 true。仓库不写死第三方 URL——可达性必须由部署方实测。",
+      "name": "示例-官方通报",
+      "url": "https://example.com/official/feed.xml",
+      "enabled": false,
+      "weight": 1.0,
+      "timeout_s": 10,
+      "allow_domains": [],
+      "deny_domains": []
+    },
+    {
+      "_note": "示例配置位 2（默认停用）：媒体快讯/RSSHub 中转源同此形状；allow_domains 留空 = 不过滤域名。",
+      "name": "示例-媒体快讯",
+      "url": "https://example.org/rss/news.xml",
+      "enabled": false,
+      "weight": 1.0,
+      "timeout_s": 10,
+      "allow_domains": [],
+      "deny_domains": []
     }
   ]
 }
