@@ -13,9 +13,17 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from mylocalai.assistant import tools_verify  # noqa: E402
+from tests.test_assistant_loop import isolate_llm  # noqa: E402
 
 
 class VerifyAnswerAdapterTests(unittest.TestCase):
+    #: LLM 隔离（2026-11-24 .env 根因修复后补）：_verify_claim 的 claim 编排
+    #: 先做主张提取（真调 LLM）。真实提供方可达时提取成功走"无主张短出口"，
+    #: 断言"遗产 claims 保留 + insufficient_data"失去对象——本用例于是 silently
+    #: 依赖"开发机上 LLM 不可达/未授权"。共用工具见 test_assistant_loop.isolate_llm。
+    def setUp(self):
+        isolate_llm(self)
+
     def test_legacy_verify_has_insufficient_answer_and_keeps_claims(self):
         result = {"label": "高风险谣言", "risk_score": 90, "claims": [
             {"claim": "具体主张 A"}, {"claim": "具体主张 B"}],

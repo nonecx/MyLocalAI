@@ -2,8 +2,10 @@
 """包依赖方向约束（AST 静态检查，2026-10-30 M1-2 任务 4）。
 
 依赖方向只有一条（工作指导 §4.1）：
-    core ← llm ← retrieval ← {classic, rumor, attention} ← {dossier, assistant} ← web/cli/mcp
+    core ← llm ← retrieval ← {classic, rumor, attention} ← {dossier, assistant, platform} ← web/cli/mcp
 classic / rumor / attention 三者互不 import。config 与 util 是叶子（不 import 任何内部包）。
+platform 与 dossier/assistant 同层：被 web（platform_api）与 assistant
+（tools_platform）消费，自身禁 import web/assistant（2026-11-24 补）。
 
 检查所有 `import` / `from ... import`（含函数体内的延迟导入）。豁免清单见 _EXEMPT。
 """
@@ -22,6 +24,10 @@ SRC = ROOT / "src" / "mylocalai"
 # 2026-10-31 复核修复补三行：依赖方向（§4.1）core ← llm ← retrieval ←
 # {classic, rumor, attention} ← {dossier, assistant} ← web/cli/mcp，
 # 因此 assistant 只禁 web、dossier 禁 {web, assistant}、web 是顶层无上游可禁（{}）。
+# 2026-11-24 补 platform 一行：platform 与 dossier/assistant 同层（被 web/assistant
+# 消费），禁 {web, assistant}——runner/scheduler/store 被 web 层（platform_api）与
+# 助手工具（tools_platform）调用，反向依赖会让依赖方向倒转（测试可换 stub 的注入
+# 文化也依赖这条线）。
 FORBIDDEN = {
     "mylocalai.core": {"classic", "rumor", "attention", "retrieval", "web", "llm"},
     "mylocalai.config": {"classic", "rumor", "attention", "retrieval", "web", "llm", "core", "util"},
@@ -33,6 +39,7 @@ FORBIDDEN = {
     "mylocalai.attention": {"classic", "rumor"},
     "mylocalai.dossier": {"web", "assistant"},
     "mylocalai.assistant": {"web"},
+    "mylocalai.platform": {"web", "assistant"},
     "mylocalai.web": set(),
 }
 

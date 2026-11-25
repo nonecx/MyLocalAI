@@ -301,11 +301,12 @@
   margin-bottom: 14px;
 }
 
-/* ---------- ⑦b 数据加载失败行（信息流/监控词/巡检记录/信息源四区共用） ----------
+/* ---------- ⑦b 数据加载失败行（信息流/监控词/巡检记录/信息源/巡检报告五区共用） ----------
    失败要落在对应区域里如实说（platform.js 纯 DOM 渲染），不把网络故障演成
    「暂无数据」；错误态（dashed 红描边）与空态（dashed 灰描边）一眼可分。
    li 前缀抬高特异性，盖过各列表自身的 li 底款；全部引用 :root 令牌。 */
 .platform-feed li.platform-load-error,
+.platform-report li.platform-load-error,
 .platform-watch-list li.platform-load-error,
 .platform-source-list li.platform-load-error,
 .platform-scans li.platform-load-error {
@@ -348,7 +349,139 @@
 /* 监控词行本就可点进编辑态，补指针手势（只给真实行，empty 提示行不给） */
 .platform-watch-list li[data-qid] { cursor: pointer; }
 
-/* ---------- ⑧ 管理抽屉（监控词 + 巡检记录） ---------- */
+/* ---------- ⑧ 巡检报告卡（platformReport：巡检结束时代码汇总 + LLM 整理） ----------
+   位置：状态摘要条之后、筛选 chips 之前（index.html 平台视图内）。
+   口径：报告 = 后端代码算好的汇总（计数/档位/as_of）+ LLM 叙事整理；本卡只
+   陈列，不做真假判定。llm_status 非 ok 时叙事四区（话题/分析/风险/跟进）由
+   platform.js 强制隐藏，只留代码兜底的标题/摘要/口径行——「没生成」不演成
+   「生成了但为空」。显隐走 .hidden 通用类（style.css），此处不重定义；
+   全部复用 :root 令牌，零框架、不另起配色。 */
+.platform-report {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 18px;
+}
+
+/* 卡头：徽章（实色淡底，视觉对齐信息流领域徽章）+ 标题 */
+.platform-report-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.platform-report-badge {
+  flex: 0 0 auto;
+  background: var(--primary-soft);
+  border: 1px solid var(--primary-border);
+  color: var(--primary);
+  font-size: 11px;
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+.platform-report-title {
+  font-size: 16px;
+  font-weight: 600;
+  min-width: 0;
+}
+
+/* 摘要：LLM 整理的一段话（非 ok 时为代码兜底文案），自然换行不截断 */
+.platform-report-summary {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.8;
+  margin-bottom: 10px;
+}
+
+/* 话题要点区：每条 = 监控词（strong 独占一行）+ LLM 整理note（span 下一行） */
+.platform-report-topics {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.platform-report-topic {
+  border-left: 2px solid var(--primary-border);
+  padding: 2px 10px;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.platform-report-topic strong {
+  display: block;
+  font-weight: 600;
+}
+
+.platform-report-topic .platform-report-note {
+  display: block;
+  color: var(--muted);
+}
+
+/* 分析 / 跟进两区：无序号列表，主色小圆点前置（纯装饰，不进朗读） */
+.platform-report-analysis,
+.platform-report-followups {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.platform-report-analysis li,
+.platform-report-followups li {
+  position: relative;
+  padding-left: 16px;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.platform-report-analysis li::before,
+.platform-report-followups li::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 0.62em;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--primary);
+}
+
+/* 「条目 12、13」后缀：弱化灰色小字，与正文明辨（entry_ids 由后端代码记账） */
+.platform-report-analysis li span {
+  margin-left: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* 风险段：LLM 整理的传播风险叙述（只述证据，不判真假） */
+.platform-report-risks {
+  font-size: 13px;
+  line-height: 1.8;
+  margin-bottom: 10px;
+}
+
+/* 口径行：计数（代码汇总）+ 证据截至 + 叙述报告状态；非 ok 时出如实降级句 */
+.platform-report-meta {
+  border-top: 1px dashed var(--border);
+  padding-top: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.platform-report-meta p { line-height: 1.7; }
+
+/* 口径/备注行：话题区的 note 与 meta 的降级句共用（弱化小字） */
+.platform-report-note {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+/* ---------- ⑨ 管理抽屉（监控词 + 巡检记录） ---------- */
 .platform-drawer {
   position: fixed;
   top: 0;
@@ -632,7 +765,7 @@
 
 .platform-scan-error { color: var(--danger); }
 
-/* ---------- ⑨ 徽章扩展：urgent 深红款 ---------- */
+/* ---------- ⑩ 徽章扩展：urgent 深红款 ---------- */
 /* .badge.red/amber/green/gray 已在 style.css 定义，这里只补 critical；
    字色用 --panel（即纯白 #ffffff，全站无独立白色令牌，就近复用） */
 .badge.critical {
@@ -640,7 +773,7 @@
   color: var(--panel);
 }
 
-/* ---------- ⑩ 对话里的平台卡（cards.js renderPlatform；轻量化） ---------- */
+/* ---------- ⑪ 对话里的平台卡（cards.js renderPlatform；轻量化） ---------- */
 .chat-platform-list {
   list-style: none;
   display: flex;

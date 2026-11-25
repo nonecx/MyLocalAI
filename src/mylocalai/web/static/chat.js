@@ -29,6 +29,7 @@
     sessions: "/api/sessions",
     sessionMessages: "/api/sessions/{sid}/messages",
     sessionReminders: "/api/sessions/{sid}/reminders",
+    sessionTitle: "/api/sessions/{sid}/title",
     dossiers: "/api/dossiers",
     dossierDetail: "/api/dossiers/{id}",
     dossierExport: "/api/dossiers/{id}/export",
@@ -502,14 +503,23 @@
         const cost = (s && s.cost) || {};
         const costTxt = `成本 ${Number(cost.requests) || 0} 次 · ${Number(cost.tokens) || 0} tokens`;
         return `
-        <li data-sid="${Number(s.id)}">
+        <li data-sid="${Number(s.id)}" data-title="${escapeHtml(s.title || "")}">
           <div class="chat-session-title">${escapeHtml(s.title || "（未命名会话）")}</div>
+          <button class="chat-session-rename" type="button" data-rename-sid="${Number(s.id)}" title="修改这个会话的标题">改名</button>
           <div class="chat-session-meta">${escapeHtml(String(s.updated_at || "").replace("T", " "))}</div>
           <div class="chat-session-meta">${escapeHtml(costTxt)}</div>
         </li>`;
       }).join("");
       list.querySelectorAll("li[data-sid]").forEach((li) => {
-        li.addEventListener("click", () => selectSession(Number(li.dataset.sid)));
+        li.addEventListener("click", (e) => {
+          /* 「改名」小按钮有自己的处理（见 renameSession）：点到它就别顺手把会话
+             也切换了——提前 return，不串选中（按钮 click 会冒泡到 li）。 */
+          if (e.target.closest(".chat-session-rename")) {
+            renameSession(Number(li.dataset.sid), li.dataset.title || "");
+            return;
+          }
+          selectSession(Number(li.dataset.sid));
+        });
       });
       highlightActiveSession();
     } catch (e) { /* 会话列表加载失败不阻塞主流程 */ }
@@ -585,6 +595,34 @@
       await loadSessions();
     } catch (e) {
       chatError(`新建会话失败：${(e && e.message) || e}`);
+    }
+  }
+
+  /* ---------- 会话改名（PUT /api/sessions/{sid}/title） ----------
+     乱码/误建标题的自助修复入口（2026-11-19 数据事故后的补口）：用户自己把标题
+     改成能读的人话。空串 = 清空为「（未命名会话）」，与后端同口径；取消（null）
+     = 什么都不做。成功后必须重载列表——后端 rename 会刷新 updated_at，排序会变。 */
+  async function renameSession(sid, currentTitle) {
+    const next = window.prompt("新的会话标题：", currentTitle || "");
+    if (next === null) return;   // 用户取消：标题不动，也不发请求
+    try {
+      const resp = await fetch(apiPath(CHAT_API.sessionTitle, sid), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: next }),
+      });
+      if (!resp.ok) {
+        let detail = `HTTP ${resp.status}`;
+        try {
+          const j = await resp.json();
+          if (j && j.detail) detail = j.detail;   // 后端 400/404 的中文 detail 优先
+        } catch (e) { /* 非 JSON 错误体 */ }
+        throw new Error(detail);
+      }
+      chatClearError();
+      await loadSessions();   // 标题变了 + updated_at 刷新会换排序
+    } catch (e) {
+      chatError(`改名失败：${(e && e.message) || e}`);
     }
   }
 

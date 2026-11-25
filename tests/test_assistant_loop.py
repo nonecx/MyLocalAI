@@ -130,8 +130,52 @@ def stub_heat(detail=None):
     return _svc
 
 
+#: LLM/模型注册表隔离（2026-11-24 .env 根因修复后补）：让用例跑在"确定没有
+#: LLM"的环境里。为什么需要：本套件各模块 docstring 都承诺"全部离线、零网络
+#: 零配额"，但开发机上一旦配了可达的 LLM 提供方（.env 修复后主提供方默认走
+#: 设置面板选的"new"），verify/claim 链路里的**真实主张提取**就会真的发请求，
+#: 走出来之不易复现的路径——"无事实主张短出口"换掉 stub 的标签、缓存键多带
+#: 推理档位 extra_params 指纹让手工复算的键对不上——用例随开发机配置时红时绿
+#: （2026-11-23/24 实测：同一批用例在"提供方可达/不可达"两套配置下三跑三套
+#: 失败）。手法与 tests/test_llm_resilience.py、test_stability_config.py 的
+#: 既有隔离同源：models 路径指空 → 注册表 fail-soft 回退内置提供方表（无密钥）
+#: → 所有 llm_client 调用确定性失败；env save/restore 与 reset_cache 由
+#: addCleanup 保证，嵌套使用安全（内层先还原、外层再还原）。
+LLM_ISOLATION_KEYS = ("MYLOCALAI_MODELS_PATH", "MYLOCALAI_MODEL_SECRETS_PATH")
+
+
+def isolate_llm(test: unittest.TestCase) -> None:
+    """给用例加"确定没有 LLM"的环境隔离（跨测试模块共用的一个小工具）。"""
+    saved = {k: os.environ.get(k) for k in LLM_ISOLATION_KEYS}
+    os.environ["MYLOCALAI_MODELS_PATH"] = "Z:/nonexistent/models.json"
+    os.environ["MYLOCALAI_MODEL_SECRETS_PATH"] = "Z:/nonexistent/secrets.json"
+    from mylocalai.llm import llm_client
+    llm_client.reset_cache()
+
+    def _restore() -> None:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        llm_client.reset_cache()
+
+    test.addCleanup(_restore)
+
+
 class LoopTestBase(unittest.TestCase):
+    #: LLM/模型注册表隔离（2026-11-24 .env 根因修复后补）：本套件的契约是
+    #: "全部离线、零网络零配额"（各测试模块 docstring 都有这句），但没有任何东西
+    #: 强制它——开发机上一旦配了可达的 LLM 提供方（.env 修复后主提供方默认走
+    #: 设置面板选的"new"），verify/claim 链路里的**真实主张提取**就会真的发请求，
+    #: 走出来之不易复现的路径（"无主张短出口"换标签、缓存键多带 extra_params
+    #: 指纹），让用例随开发机配置时红时绿。隔离手法与
+    #: tests/test_llm_resilience.py 同源：models 路径指空 → 注册表回退内置提供方
+    #: 表（无密钥）→ 所有 llm_client 调用确定性失败。
+    _ISOLATION_KEYS = ("MYLOCALAI_MODELS_PATH", "MYLOCALAI_MODEL_SECRETS_PATH")
+
     def setUp(self):
+        isolate_llm(self)
         self.tmp = TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         # 会话域与档案域同库（生产形状：web 层两个门面都指 data/dossier.db）。
@@ -417,7 +461,11 @@ class TestOtherToolFlows(LoopTestBase):
         self.assertTrue(tool_end["degraded"])
 
     def test_clarify_when_route_fails(self):
-        """route_llm 返回 None → clarify：追问一次、不调工具、消息正常落库。"""
+        """route_llm 返回 None → action=clarify：诚实降级话术（WS1：模型不可用与
+        "意图不清"分开说）、不调工具、消息正常落库。"""
+        from mylocalai.assistant.loop import (_ROUTE_UNAVAILABLE_FALLBACK,
+                                              _route_failure_guidance)
+
         def _llm(system, user):
             return (None, "模型返回无法解析的JSON")
 
@@ -426,10 +474,17 @@ class TestOtherToolFlows(LoopTestBase):
         names = [e["event"] for e in events]
         self.assertEqual(names, ["meta", "status"]
                          + ["narrative"] * names.count("narrative") + ["done"])
+        # 期望话术 = route_unavailable_reply 模板 + reason/fix 替换（与 loop 同规则）
+        reason, fix = _route_failure_guidance("模型返回无法解析的JSON")
+        expected = (str(self.prompts["route_unavailable_reply"]).strip()
+                    or _ROUTE_UNAVAILABLE_FALLBACK)
+        expected = expected.replace("{reason}", reason).replace("{fix}", fix)
         self.assertEqual("".join(e["delta"] for e in events if e["event"] == "narrative"),
-                         self.prompts["clarify_reply"])
+                         expected)
         self.assertEqual(out["action"], "clarify")
-        self.assertEqual(out["reply"], self.prompts["clarify_reply"])
+        self.assertEqual(out["reply"], expected)
+        self.assertNotEqual(out["reply"], self.prompts["clarify_reply"])
+        self.assertTrue(out["degraded"])   # 如实标记降级
         self.assertEqual(self.sessions.runs_for_session(self.session_id), [])
 
 

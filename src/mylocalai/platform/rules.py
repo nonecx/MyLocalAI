@@ -12,7 +12,11 @@
   enabled / scan_interval_s / max_queries_per_scan / max_candidates_per_query
   screen.heat_screen_e / deep_verify.{max_per_scan,deadline_s}
   dedup.fingerprint_threshold / risk.{weights,breadth_full_sources,levels,floors}
+  report.{enabled,max_llm_calls,max_entries,max_chars_per_entry,deadline_s,max_tokens}
   watch_queries / rss_sources
+
+report 段是**可选段**（不在必填清单里）：缺失 → 内置默认且不告警——巡检报告
+技能（platform/report）按默认开启；段内逐键校验（见 _normalize_report）。
 """
 
 from __future__ import annotations
@@ -42,6 +46,14 @@ DEFAULT_RULES: Dict[str, Any] = {
             {"min_rumor_score": 60, "min_breadth": 50, "level": "high"},
             {"min_growth": 60, "min_heat": 50, "level": "suspect"},
         ],
+    },
+    "report": {
+        "enabled": True,
+        "max_llm_calls": 1,
+        "max_entries": 20,
+        "max_chars_per_entry": 300,
+        "deadline_s": 60,
+        "max_tokens": 1200,
     },
     "watch_queries": [],
     "rss_sources": [],
@@ -174,6 +186,64 @@ def _normalize_rss(raw: Any) -> List[Dict[str, Any]]:
     return out
 
 
+def _report_int(raw: Dict[str, Any], key: str, default: Dict[str, Any],
+                lo: int, hi: int, issues: List[str]) -> int:
+    """report 段整数键：坏类型退默认 + issue；越界夹取 + issue。"""
+    value = raw.get(key, default[key])
+    if isinstance(value, bool) or not isinstance(value, int):
+        issues.append(f"report.{key} 必须是 [{lo},{hi}] 内的整数，已用内置默认")
+        return default[key]
+    if value < lo or value > hi:
+        issues.append(f"report.{key}={value} 超出 [{lo},{hi}]，已夹取")
+        return min(max(value, lo), hi)
+    return value
+
+
+def _report_num(raw: Dict[str, Any], key: str, default: Dict[str, Any],
+                lo: float, hi: float, issues: List[str]) -> Any:
+    """report 段数值键（int/float 均可）：坏类型退默认 + issue；越界夹取 + issue。"""
+    value = raw.get(key, default[key])
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        issues.append(f"report.{key} 必须是 [{lo:g},{hi:g}] 内的数值，已用内置默认")
+        return default[key]
+    if value < lo or value > hi:
+        issues.append(f"report.{key}={value} 超出 [{lo:g},{hi:g}]，已夹取")
+        return lo if value < lo else hi
+    return value
+
+
+def _normalize_report(raw: Any) -> Tuple[Dict[str, Any], List[str]]:
+    """report 段规整（巡检报告技能口径，platform/report）。
+
+    - 段缺失（None）→ 内置默认，**不告警**（报告是可选能力，默认开启由段内
+      enabled 自己控制，缺段不等于配置错误）；
+    - 段不是对象 → 默认 + issue；
+    - 逐键校验：enabled 必须 bool；max_llm_calls int 夹取 [1,5]；max_entries int
+      [1,50]；max_chars_per_entry int [50,2000]；deadline_s num [10,600]；
+      max_tokens int [200,4000]。坏类型退默认 + issue，越界夹取 + issue。
+    """
+    default = DEFAULT_RULES["report"]
+    if raw is None:
+        return json.loads(json.dumps(default)), []
+    if not isinstance(raw, dict):
+        return json.loads(json.dumps(default)), ["report 段不是对象，已用内置默认"]
+    out: Dict[str, Any] = {}
+    issues: List[str] = []
+
+    enabled = raw.get("enabled", default["enabled"])
+    if not isinstance(enabled, bool):
+        issues.append("report.enabled 必须为布尔值，已用内置默认")
+        enabled = default["enabled"]
+    out["enabled"] = enabled
+    out["max_llm_calls"] = _report_int(raw, "max_llm_calls", default, 1, 5, issues)
+    out["max_entries"] = _report_int(raw, "max_entries", default, 1, 50, issues)
+    out["max_chars_per_entry"] = _report_int(raw, "max_chars_per_entry", default,
+                                             50, 2000, issues)
+    out["deadline_s"] = _report_num(raw, "deadline_s", default, 10, 600, issues)
+    out["max_tokens"] = _report_int(raw, "max_tokens", default, 200, 4000, issues)
+    return out, issues
+
+
 def _normalize(data: Any) -> Tuple[Dict[str, Any], List[str]]:
     """把加载到的配置规整成合法结构；段级降级（某段坏只退那一段）。"""
     rules: Dict[str, Any] = {}
@@ -224,6 +294,11 @@ def _normalize(data: Any) -> Tuple[Dict[str, Any], List[str]]:
     risk, risk_issues = _normalize_risk(data.get("risk"))
     rules["risk"] = risk
     issues.extend(risk_issues)
+
+    # report 段：可选段，缺失不告警（见 _normalize_report）
+    report, report_issues = _normalize_report(data.get("report"))
+    rules["report"] = report
+    issues.extend(report_issues)
 
     rules["watch_queries"] = _normalize_queries(data.get("watch_queries"))
     rules["rss_sources"] = _normalize_rss(data.get("rss_sources"))

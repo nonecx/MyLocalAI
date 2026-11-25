@@ -2,8 +2,20 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- viewport-fit=cover：iPhone 刘海/圆角屏下让内容铺满，安全区交给 mobile.css 处理 -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>网络言论智能分析系统</title>
+  <!-- PWA「添加到桌面」：manifest 由后端 /manifest.webmanifest 提供（Content-Type 必须是
+       application/manifest+json），图标在 static/icons/（scripts/gen_pwa_icons.py 生成） -->
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <meta name="theme-color" content="#35618f" />
+  <!-- iOS：全屏启动 + 桌面图标 + 状态栏样式（iOS 不读 manifest 的 display/icon） -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="MyLocalAI" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <link rel="apple-touch-icon" href="static/icons/apple-touch-icon.png" />
+  <!-- 手机兼容（旧版 Android Chrome） -->
+  <meta name="mobile-web-app-capable" content="yes" />
   <link rel="stylesheet" href="static/style.css" />
   <link rel="stylesheet" href="static/chat.css" />
   <!-- 监测平台视图样式：只新增 platform-* 类，复用 style.css 设计令牌 -->
@@ -12,6 +24,8 @@
   <link rel="stylesheet" href="static/settings.css" />
   <!-- 档案工作区（多 Profile 分家）样式：只新增 profile-* 类，同样复用 :root 令牌 -->
   <link rel="stylesheet" href="static/profiles.css" />
+  <!-- 手机/平板小屏覆盖层：必须最后引入（只覆盖、不改既有规则；含 standalone 安全区） -->
+  <link rel="stylesheet" href="static/mobile.css" />
 </head>
 <body>
   <header class="site-header">
@@ -51,6 +65,11 @@
         aria-haspopup="dialog" aria-controls="settingsDialog" aria-expanded="false">设置</button>
       <button id="aboutBtn" class="btn-ghost about-open-btn" type="button"
         aria-haspopup="dialog" aria-controls="aboutDialog">关于</button>
+      <!-- 快捷入口：手机/笔记本「添加到桌面」。初始 hidden，由 install.js 决定是否露出
+           （已是全屏独立应用时不显示；已装好 appinstalled 后隐藏）。
+           点击行为也归 install.js：浏览器给了安装事件就直接装，没给就弹分平台引导。 -->
+      <button id="installBtn" class="btn-ghost install-open-btn hidden" type="button"
+        aria-haspopup="dialog" aria-controls="installDialog" aria-expanded="false">＋ 添加到桌面</button>
     </div>
   </header>
 
@@ -136,6 +155,20 @@
         <li>「我的画像」与「算热度」都是零成本只读/纯公式计算，不调用大模型</li>
         <li>接口文档：<a href="/docs" target="_blank" rel="noopener noreferrer">/docs</a></li>
       </ul>
+    </div>
+  </div>
+
+  <!-- 「添加到桌面」引导弹层：骨架只放容器，分平台步骤由 install.js 用 textContent
+       填进 #installBody（同 settings 弹层的分工：外壳放骨架、逻辑在各自 js）。
+       外观复用 .about-dialog 的遮罩 + 居中卡片，额外排版在 chat.css 的 install-* 段。 -->
+  <div id="installDialog" class="about-dialog install-dialog hidden" role="dialog" aria-modal="true"
+    aria-labelledby="installTitle">
+    <div class="about-dialog-card install-dialog-card">
+      <div class="panel-head">
+        <h2 id="installTitle">添加到桌面</h2>
+        <button id="installCloseBtn" class="btn-ghost about-close-btn" type="button">关闭</button>
+      </div>
+      <div id="installBody" class="install-body"></div>
     </div>
   </div>
 
@@ -388,6 +421,25 @@
     </section>
     <div id="platformScanHint" class="platform-scan-hint hidden" role="status"></div>
 
+    <!-- 巡检报告卡（platformReport）：报告 = 巡检结束时代码汇总 + LLM 整理，
+         只述证据、不做真假判断。骨架只放分区容器，内容由 platform.js 的
+         renderReport 按 id 填充（数据走 GET /api/platform/reports?limit=1）；
+         llm_status 非 ok 时叙事四区（话题/分析/风险/跟进）由 JS 强制隐藏，
+         只留代码兜底的标题/摘要/口径行。初始 hidden：无报告 → 保持隐藏，
+         加载失败 → JS 换成 .platform-load-error 失败行（与信息流等区同款）。 -->
+    <section id="platformReport" class="platform-report hidden">
+      <div class="platform-report-head">
+        <span class="platform-report-badge">巡检报告</span>
+        <h2 id="platformReportTitle" class="platform-report-title"></h2>
+      </div>
+      <p id="platformReportSummary" class="platform-report-summary"></p>
+      <div id="platformReportTopics" class="platform-report-topics"></div>
+      <ul id="platformReportAnalysis" class="platform-report-analysis"></ul>
+      <p id="platformReportRisks" class="platform-report-risks"></p>
+      <ul id="platformReportFollowups" class="platform-report-followups"></ul>
+      <div id="platformReportMeta" class="platform-report-meta"></div>
+    </section>
+
     <!-- 筛选 chips：aria-pressed 预置初值（默认「全部」按下）；platform.js 切换筛选时
          必须同步更新 aria-pressed 与 active 类（U4 对齐，读屏器依赖该状态） -->
     <div class="platform-filterrow" id="platformFilterRow">
@@ -467,6 +519,9 @@
   </aside>
 
   <script src="static/shell.js"></script>
+  <!-- 快捷入口（PWA）：紧接 shell.js——它只管「添加到桌面」按钮、引导弹层与
+       Service Worker 注册，不碰对话/设置逻辑，独立成文件便于单独回归。 -->
+  <script src="static/install.js"></script>
   <!-- 设置弹层：紧接 shell.js（外壳只做开合绑定，面板逻辑与渲染全在 settings.js） -->
   <script src="static/settings.js"></script>
   <script src="static/cards.js"></script>

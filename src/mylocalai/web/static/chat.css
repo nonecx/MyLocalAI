@@ -53,6 +53,36 @@
 
 .about-close-btn { font-size: 13px; padding: 5px 14px; }
 
+/* ---------- 「添加到桌面」快捷入口（PWA 安装引导） ----------
+   弹层外壳复用上面的 .about-dialog / .about-dialog-card（遮罩 + 居中卡片），
+   这里只补按钮尺寸与引导正文的排版；手机小屏下的尺寸覆盖在 mobile.css。 */
+.install-open-btn { font-size: 13px; padding: 6px 14px; }
+
+.install-body { font-size: 13px; color: var(--muted); line-height: 1.9; }
+.install-body p { margin-bottom: 10px; }
+.install-body .install-lead { color: var(--text); }
+.install-body code {
+  background: #f3f4f8;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-family: inherit;
+  font-size: 12.5px;
+  color: var(--primary-dark);
+  word-break: break-all;
+}
+.install-body .install-steps { padding-left: 18px; margin-bottom: 10px; }
+.install-body .install-steps li { margin-bottom: 6px; }
+.install-body .install-note {
+  font-size: 12px;
+  line-height: 1.8;
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.install-body .install-note:last-child { margin-bottom: 0; }
+
 /* ---------- 对话布局 ---------- */
 .chat-layout {
   display: grid;
@@ -129,6 +159,9 @@
 .chat-session-list li.empty:hover,
 .chat-dossier-list li.empty:hover { border-color: var(--border); background: none; }
 
+/* 会话改名按钮的定位基准（绝对定位挂在 li 右上角，不占标题那一行的高度） */
+.chat-session-list li { position: relative; }
+
 .chat-session-title,
 .chat-dossier-title {
   font-size: 13.5px;
@@ -136,6 +169,46 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 标题行给改名按钮让位：省略号截断处不被按钮压住 */
+.chat-session-list .chat-session-title { padding-right: 48px; }
+
+/* ---------- 会话改名小按钮 ----------
+   乱码/误建标题的自助修复入口（2026-11-19 数据事故后的补口）。默认不可见
+   （opacity:0，仍可聚焦——键盘用户 Tab 到它就显现），只有悬停当前行或该行
+   是激活会话时才显示，不打扰正常阅读；:focus-visible 焦点环与 profiles.css
+   同款口径（鼠标点击不画环）。 */
+.chat-session-rename {
+  position: absolute;
+  top: 7px;
+  right: 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--muted);
+  padding: 1px 8px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.chat-session-list li:hover .chat-session-rename,
+.chat-session-list li.active .chat-session-rename,
+.chat-session-rename:focus { opacity: 1; }
+
+.chat-session-rename:hover {
+  border-color: var(--primary);
+  color: var(--primary-dark);
+  background: var(--primary-soft);
+}
+
+/* 键盘可达：焦点环（鼠标点击因 :focus 而非 :focus-visible，不画环） */
+.chat-session-rename:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
 }
 
 .chat-session-meta { font-size: 12px; color: var(--muted); margin-top: 3px; }

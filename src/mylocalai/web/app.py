@@ -261,6 +261,11 @@ def health() -> Dict[str, Any]:
             "model": _llm_client.get_model(),
             "base_url": _llm_client.get_base_url(),
             "error": "" if llm_ok else llm_detail,
+            # 失败类别词面（privacy / key / unknown，可用时为空串）：口径与顺序见
+            # llm_client._config_diagnosis()——隐私授权是第一道闸，排在密钥检查之前，
+            # 所以"未授权"不再被报成"未配置密钥"（WS2：诊断与真实失败原因对齐）。
+            # 前端 shell.js 的服务状态 chip 按它分流警示文案。
+            "error_kind": _llm_client.config_error_kind(),
         },
         # 模型注册表的加载期告警数：data/models.json 缺失/损坏/版本不符时 > 0
         # （注册表会 fail-soft 退回内置提供方表，服务照常起）。原文在设置面板里看，
@@ -606,6 +611,34 @@ def index() -> FileResponse:
     return FileResponse(os.path.join(_STATIC_DIR, "index.html"))
 
 
+# ---- PWA「添加到桌面」的两个根路径资源 ----
+# 这两个文件不能挂在 /static 下：
+#   * manifest 的 scope 由它自己的 URL 决定，放根路径才能覆盖整站；
+#   * Service Worker 的作用域上限是脚本所在目录，必须从 / 提供才能接管全站，
+#     且 Content-Type 必须是 JS（.webmanifest/.js 由 StaticFiles 猜 MIME 不可靠）。
+@app.get("/manifest.webmanifest")
+def pwa_manifest() -> FileResponse:
+    """Web App Manifest（手机/桌面「添加到主屏幕」的元数据）。"""
+    return FileResponse(
+        os.path.join(_STATIC_DIR, "manifest.webmanifest"),
+        media_type="application/manifest+json",
+    )
+
+
+@app.get("/sw.js")
+def service_worker() -> FileResponse:
+    """Service Worker（界面壳缓存；/api/* 一律不缓存，见 sw.js 的注释）。"""
+    resp = FileResponse(
+        os.path.join(_STATIC_DIR, "sw.js"),
+        media_type="application/javascript",
+    )
+    # 允许 SW 以 / 为作用域（虽然同目录已是 /，显式声明避免以后挪文件时踩坑）
+    resp.headers["Service-Worker-Allowed"] = "/"
+    # 脚本本身必须每次都回源校验，否则浏览器会长期跑旧版 SW
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
 # ===========================================================================
 # 智能助手对话层（M2）：/api/chat（SSE）+ /api/sessions + /api/dossiers
 # ===========================================================================
@@ -632,6 +665,7 @@ from mylocalai.assistant.registry import (  # noqa: E402
     ValidationError as _AssistantValidationError,
 )
 from mylocalai.assistant.reminders import aggregate_reminder_lines  # noqa: E402
+from mylocalai.assistant.session_store import derive_session_title  # noqa: E402
 
 #: chat 请求轮里 loop 正常收尾的事件名（events.py 协议：异常出口是 error）。
 _TERMINAL_SSE_EVENTS = ("done", "error")
@@ -812,7 +846,10 @@ async def chat(req: ChatRequest, request: Request) -> StreamingResponse:
         session_id = int(req.session_id)
     else:
         # 新会话归当前激活档案（SessionStore.create_session 内部同口径，这里显式传）
-        session_id = store.create_session(title=message[:24], profile_id=profile_id)
+        # 标题派生与 MCP assistant_chat 同源（含 2026-11-19 乱码防护）：见
+        # session_store.derive_session_title——不让乱码消息造出乱码标题。
+        session_id = store.create_session(title=derive_session_title(message),
+                                          profile_id=profile_id)
 
     loop = build_assistant_loop()
     if loop is None:
@@ -924,6 +961,39 @@ def sessions_create(req: Optional[SessionCreateRequest] = None) -> Dict[str, Any
     store = get_session_store()
     return store.get_session(store.create_session(title=title[:100],
                                                    profile_id=_active_profile_id()))
+
+
+class SessionTitleRequest(BaseModel):
+    """PUT /api/sessions/{session_id}/title 的请求体（可整体省略 → 清空为未命名）。"""
+    title: str = ""
+
+
+@app.put("/api/sessions/{session_id}/title")
+def session_rename(session_id: str, req: Optional[SessionTitleRequest] = None) -> Dict[str, Any]:
+    """会话改名（store.rename_session 的 HTTP 面）：乱码/误建标题的自助修复入口。
+
+    - sid 非正整数 → 404（_parse_path_id）；会话不存在 → 404；
+    - 跨档案工作区（会话属于别的 profile）→ 404，与 messages 端点同口径（不泄露存在性）；
+    - 标题含孤立代理项 → 400（has_surrogates，与 POST /api/sessions 同口径）；
+    - 标题 strip 后截断 100 字（与创建同口径）；允许空串（清空为未命名）；
+    - 返回 {"session": 更新后的完整会话记录}。
+    注意 rename_session 会刷新 updated_at（列表换序）：前端改名成功后必须重载
+    会话列表，否则改名的那条会留在原位直到下一次 touched。
+    """
+    store = get_session_store()
+    sid = _parse_path_id(session_id, "会话")
+    if store.get_session(sid) is None:
+        raise HTTPException(status_code=404, detail=f"会话不存在: {sid}")
+    # v6 多 Profile 分家：会话属于别的档案工作区 → 按不存在处理（不泄露存在性）
+    profile_id = _active_profile_id()
+    owner = store.session_profile(sid).get("profile_id")
+    if profile_id is not None and owner is not None and int(owner) != int(profile_id):
+        raise HTTPException(status_code=404, detail=f"会话不存在: {sid}")
+    title = ((req or SessionTitleRequest()).title or "").strip()
+    if has_surrogates(title):
+        raise HTTPException(status_code=400, detail="标题包含无效字符（无法编码的 Unicode 代理项）")
+    store.rename_session(sid, title[:100])
+    return {"session": store.get_session(sid)}
 
 
 @app.get("/api/sessions/{session_id}/messages")

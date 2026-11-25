@@ -7,8 +7,9 @@
      + chitchat/clarify/refuse；
   ② 参数 schema 手工校验（registry.validate：长度上限/正整数/非负数/布尔）；
   ③ 工具 allowlist + 权限检查（registry.check_allowed）。
-路由 LLM 失败（返回 None / 坏 JSON / 抛异常）与"枚举外 action"同样降级 clarify——
-误判的代价被刻意设计成"多问一句"，而不是"猜一个工具乱查"。
+路由 LLM 失败（返回 None / 坏 JSON / 抛异常）时先过"LLM 失败兜底闸"（见下）捞
+零 LLM 依赖的意图，兜不住与"枚举外 action"同样降级 clarify——误判的代价被刻意
+设计成"多问一句"，而不是"猜一个工具乱查"。
 
 角色裁剪（role_tool_allowlists）：route(role=...) 给定档案角色时，枚举与路由模型
 看到的工具目录都按该角色的白名单裁剪（专用工具 verify_claim/recheck_dossier 仅
@@ -22,13 +23,30 @@ layperson/full）；被裁剪的 action 走既有"枚举外 → clarify"降级�
  混合表达闸（mixed_choice，总览 §6.3）同样在路由 LLM 之前：一句话同时要求“核查
  真假”与“解释热度”时不拼接工具，固定选择话术让用户定先后——确定性子串匹配、
  零 LLM 成本，与 pre_refuse 同族。
+
+  LLM 失败兜底闸（salvage，2026-11-24）：路由 LLM 不可用（返回 None / 坏 JSON /
+  非 dict / 抛异常）时，在 clarify 之前先过一道与 pre_refuse/mixed_choice 同族的
+  确定性闸——只捞“热度疑问”与“x/y/z 直算”两类零 LLM 依赖的意图：
+  ① carve-out：消息含真假疑问短语（交给 mixed_choice/LLM）或档案引用
+     （“档案#3的热度快照”是记忆类意图，不能抢）→ 不兜底；
+  ② 热度疑问 → 抽话题词，过“空/过短/纯指代/停用词”检查 → check_heat；
+  ③ x/y/z 三赋值齐全 → compute_heat（纯公式，零 API）。
+  兜底产物与正常路由走完全相同的防护链（registry.validate +
+  check_allowed(allowlist=角色白名单)），任何一步不过 → 落回 clarify。
+  为什么 LLM 正常时不启用：那时路由是模型的职责，本闸只补“模型不在场”的洞——
+  模型在场却猜错有 mixed_choice/枚举防护兜着，模型不在场还一律 clarify 会把
+  “deep seek配额事件热度如何”这种明明能零 LLM 答上的问题误判成意图不清
+  （真实事故：提供方未授权 → 路由全灭 → 用户看到误导性的澄清话术、系统坏了
+  却零信号）。仅 LLM 失败分支触发；LLM 正常返回 dict 时行为逐位不变。
+  失败的 clarify 带 llm_failed=True（“模型返回 dict 但 action 枚举外/参数坏”
+  不加——那确实是意图不清，该问），供 loop 层换诚实降级话术。
 """
 
 from __future__ import annotations
 
 import json
 import re
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from mylocalai.assistant.registry import ToolNotAllowed, ToolRegistry, ValidationError
 
@@ -131,6 +149,89 @@ def mixed_choice(user_text: Any, prompts: Optional[Dict[str, Any]]) -> Optional[
         return None
 
 
+# ---------------------------------------------------------------------------
+# LLM 失败兜底闸（salvage）：与 pre_refuse/mixed_choice 同族的确定性 salvage
+# ---------------------------------------------------------------------------
+#: 热度疑问短语（比 mixed_choice 的 _HEAT_RE 更宽：多热/热度/受关注/为什么火/关注度全家）。
+_HEAT_QUESTION_RE = re.compile(r"有多热|多热|热度如何|热度怎么样|热度怎样|热度|受关注|这么火|为什么火|为什么这么火|关注度|有多少人关注")
+
+#: x/y/z 直算赋值（三赋值齐全才算；数值交 registry.xyz_param 校验收口成 float）。
+_XYZ_RE = re.compile(r"[xX]\s*=\s*(\d+(?:\.\d+)?)\D+[yY]\s*=\s*(\d+(?:\.\d+)?)\D+[zZ]\s*=\s*(\d+(?:\.\d+)?)")
+
+#: 档案引用 carve-out：消息在指"之前那条/档案#N" → 记忆类意图，兜底不抢。
+_ARCHIVE_REF_RE = re.compile(r"#\s*\d|档案|刚才|之前|上次|那条|这份")
+
+#: 话题抽取：首部填充词（礼貌/动作前缀），迭代去掉。
+_LEAD_FILLER_RE = re.compile(r"^(?:帮我|麻烦|请|想问|想知道|想了解|看看|查一下|查询|查查|算一下|计算)")
+#: 话题抽取：尾部问句词与标点，迭代去掉。
+_TAIL_WORD_RE = re.compile(r"(?:如何|怎么样|怎样|吗|呢|吧|呀|啊|嘛|？|\?|。|，|!|！|、|~|～|…|:|：)+$")
+#: 话题抽取：首部指示代词，去掉一次。
+_LEAD_DEMONSTRATIVE_RE = re.compile(r"^(?:这个|那个|该|此)")
+
+#: 停用话题（规格停用集）：整词命中 → 没有可检索的具体话题，不兜底。
+_STOP_TOPICS = {"话题", "事件", "事情", "它", "新闻", "消息"}
+#: 纯指代字符：话题只剩这些字（如"这件事"）与停用集同族——用户指的是"这个/那件事"
+#   而不是任何可检索的话题，check_heat 无从查起。= 指示代词/助词字 ∪ 停用集用字
+#   （话题/事件/事情/它/新闻/消息 拆成的单字）；把"整词命中"扩展到"纯指代串"，
+#   覆盖"这件事的热度"这类去掉热度短语后只剩指代的消息。
+_REFERENCE_CHARS = set("这那该此它个的儿") | set("话题事件情它新闻消息")
+
+
+def _heat_topic(user_text: str) -> str:
+    """热度疑问句 → 话题词：去热度短语 → 迭代去首部填充词 → 迭代去尾部问句词 → 去首部指示代词。"""
+    topic = _HEAT_QUESTION_RE.sub("", user_text).strip()
+    while True:
+        stripped = _LEAD_FILLER_RE.sub("", topic, count=1).strip()
+        if stripped == topic:
+            break
+        topic = stripped
+    while True:
+        stripped = _TAIL_WORD_RE.sub("", topic, count=1).strip()
+        if stripped == topic:
+            break
+        topic = stripped
+    return _LEAD_DEMONSTRATIVE_RE.sub("", topic, count=1).strip()
+
+
+def _deterministic_action(user_text: Any) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """LLM 失败时的确定性兜底：返回 (action, args) 或 None（不兜底）。
+
+    只捞两类零 LLM 依赖的意图（依据见模块 docstring"LLM 失败兜底闸"）：
+      a. carve-out：真假疑问短语同句（交给 mixed_choice/LLM 定先后）或档案引用
+         （记忆类意图，不能抢）→ None；
+      b. 热度疑问 → 话题词过"空/过短/纯指代/停用"检查 → ("check_heat", {"topic": ...})；
+      c. x/y/z 三赋值齐全 → ("compute_heat", {...})（纯公式直算，零 API）。
+    顺序说明：x/y/z 直算先于热度疑问——"算一下关注度 x=1000, y=…, z=…"同时含热度
+    短语与三坐标赋值，是明确的直算意图（热度短语只是修饰语）；_XYZ_RE 要求三赋值
+    齐全，误命中面极小，不会抢走"XX话题多热"这类真热度疑问。
+    x/y/z 直接转 float：registry.xyz_param（_v_num）只收 int/float、不收数字字符串，
+    提前转换才能过校验；validate 仍会再校"非负有限数"，口径不变。
+    纯函数、永不抛异常（任何怪输入都只可能返回 None）。
+    """
+    try:
+        text = str(user_text or "")
+        if not text:
+            return None
+        # a. carve-out：真假+热度同句 / 档案引用 → 不兜底
+        if _TRUTH_RE.search(text) or _ARCHIVE_REF_RE.search(text):
+            return None
+        # c. x/y/z 直算（先判：见上方顺序说明）
+        m = _XYZ_RE.search(text)
+        if m:
+            return ("compute_heat",
+                    {"x": float(m.group(1)), "y": float(m.group(2)), "z": float(m.group(3))})
+        # b. 热度疑问 → 抽话题词
+        if _HEAT_QUESTION_RE.search(text):
+            topic = _heat_topic(text)
+            if (not topic or len(topic) < 2 or topic in _STOP_TOPICS
+                    or all(ch in _REFERENCE_CHARS for ch in topic)):
+                return None
+            return ("check_heat", {"topic": topic})
+        return None
+    except Exception:  # noqa: BLE001  兜底本身永不抛：任何怪输入都只可能不兜底
+        return None
+
+
 def _router_system(registry: Optional[ToolRegistry], prompts: Dict[str, Any],
                    allowlist: Optional[List[str]] = None) -> str:
     """人设路由 prompt + 工具目录摘要（registry.catalog()，含成本/延迟/权限档）。
@@ -179,9 +280,18 @@ def _fixed_reply(action: str, prompts: Dict[str, Any]) -> str:
     return ""
 
 
-def _clarify(prompts: Dict[str, Any], error: str) -> Dict[str, Any]:
-    return {"action": "clarify", "args": {}, "reply": str(prompts.get("clarify_reply", "")),
-            "error": error}
+def _clarify(prompts: Dict[str, Any], error: str,
+             llm_failed: bool = False) -> Dict[str, Any]:
+    """降级 clarify；llm_failed=True 表示"路由模型不可用"（区别于"意图不清"）。
+
+    loop 层靠这个标记换诚实降级话术（route_unavailable_reply）：模型不在场时
+    装糊涂追问一次是把系统故障藏起来，必须如实报告 + 给修复路径。
+    """
+    out = {"action": "clarify", "args": {}, "reply": str(prompts.get("clarify_reply", "")),
+           "error": error}
+    if llm_failed:
+        out["llm_failed"] = True
+    return out
 
 
 def route(user_text: Any, registry: ToolRegistry,
@@ -197,7 +307,11 @@ def route(user_text: Any, registry: ToolRegistry,
     - chitchat/clarify/refuse：args 恒为空 dict，reply 取路由 JSON 的 reply 字段
       （空时 clarify/refuse 用 prompts 固定话术；chitchat 返回空串，由 loop 层走
       narrate_llm 补一句——见 §5.1）；
-    - 任何防护链失败 → {"action": "clarify", ...}，绝不猜。
+    - 任何防护链失败 → {"action": "clarify", ...}，绝不猜；
+    - LLM 失败（None/坏 JSON/非 dict/抛异常）时先试确定性兜底（salvage）：热度疑问
+      → check_heat、x/y/z 直算 → compute_heat，成功时结果带 "salvaged": True 且与
+      正常路由过同一套防护链；兜不住的 clarify 带 "llm_failed": True（保留 error），
+      供 loop 层换诚实降级话术。LLM 正常返回 dict 时行为逐位不变（不兜底、无标记）。
 
     history_hint（可选，§5.4 ②）：会话背景文本（活跃档案卡 + 最近对话摘要，由
     loop 层组装）。非空时拼进 route_llm 的 user 文本（"【会话背景】…\\n【用户消息】…"），
@@ -246,8 +360,25 @@ def route(user_text: Any, registry: ToolRegistry,
         obj, err = None, f"{type(exc).__name__}: {exc}"
 
     if not isinstance(obj, dict):
-        # None / 坏 JSON / 非 dict 都到不了防护链：统一 clarify（绝不猜）
-        return _clarify(prompts, err or "路由模型返回为空或无法解析")
+        # None / 坏 JSON / 非 dict / 抛异常：路由模型不在场。先过"LLM 失败兜底闸"
+        # （salvage）捞零 LLM 依赖的意图，兜不住再 clarify——且必须标记 llm_failed，
+        # 让 loop 层把"模型不可用"与"意图不清"分开说（绝不装糊涂追问）。
+        # 注意用**原始 user_text** 做兜底判定：history_hint 里的档案卡含"#3《…》"，
+        # 拼进去会误触档案引用 carve-out，把能兜的热度问题白白放掉。
+        salvaged = _deterministic_action(user_text)
+        if salvaged is not None:
+            action, args = salvaged
+            try:
+                # 兜底产物与正常路由走完全相同的防护链：schema 校验 + 角色白名单
+                # + 权限检查（allowlist 已按 role 裁剪）。任何一步不过 → 落回 clarify。
+                clean = registry.validate(action, args)
+                registry.check_allowed(action, allowlist=allowlist, write_enabled=True)
+            except Exception:  # noqa: BLE001  兜底也不过防护链：绝不猜，落回 clarify
+                salvaged = None
+            else:
+                return {"action": action, "args": clean, "reply": "", "error": "",
+                        "salvaged": True}
+        return _clarify(prompts, err or "路由模型返回为空或无法解析", llm_failed=True)
 
     action = obj.get("action")
     if not isinstance(action, str) or action not in enum:

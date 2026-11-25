@@ -533,6 +533,11 @@
     }
     const warnings = Array.isArray(state.data.warnings) ? state.data.warnings : [];
     pane.appendChild(buildKeyHealthCard());   // 密钥体检卡：「模型」Tab 顶部第一行
+    /* env 覆盖错配警示卡紧随其后：面板选的提供方被 .env 的 LLM_PROVIDER 压过时才显示
+       （不匹配就不渲染，不猜）。刷新钩子同体检卡——随 renderPane() 重建，写操作先
+       loadAll() 重拉 /api/models，服务端现状一变卡片就跟着变，不需要额外监听。 */
+    const envOverrideNotice = buildEnvOverrideNotice();
+    if (envOverrideNotice) pane.appendChild(envOverrideNotice);
     if (warnings.length) pane.appendChild(buildWarnings(warnings));
     pane.appendChild(buildModelsPane());
   }
@@ -580,6 +585,53 @@
       card.appendChild(el("span", "key-health-text",
         "未配置密钥：分析将以降级模式运行，证据发现不可用——请在下方选择提供方并填写密钥"));
     }
+    return card;
+  }
+
+  /* ---------- env 覆盖错配警示卡（WS2）----------
+     触发条件：state.data.active.provider 与 state.data.runtime.provider 都存在且不同
+     （任一段缺省就不渲染，不猜）。典型成因：.env 里 LLM_PROVIDER=longcat 压过设置
+     面板选的提供方——面板显示"已选 A"，实际生效的是 B，用户以为自己配好了，
+     而所有分析都在按 B（甚至 B 没密钥/没授权）静默降级。
+     数据源：GET /api/models 的 runtime 段（provider / source / env_provider /
+     key_source；词面以后端 src/mylocalai/llm/model_registry.py 的
+     _runtime_snapshot() 为准）。source=env 才提环境变量，否则说"来自默认解析"；
+     runtime.key_source==="none" 时补一句"当前生效提供方未配置密钥"。
+     刷新钩子：本卡在 renderPane() 里随「模型」Tab 重建，而提供方切换 / 新建 /
+     保存 / 设为当前 / 删除全都汇入 renderPane()（写操作先 loadAll() 重新拉
+     /api/models），服务端现状一变卡片自动跟随，不需要额外监听。
+     样式约定：settings.css 不新增规则，盒底复用既有 .settings-notice，配色变体用
+     chat.css 里既有的 .key-health-card/.key-health-none（红=分析降级，与体检卡
+     未配置态同一语义），不造新 CSS；DOM 全部 createElement/textContent
+     （runtime 段是接口数据，不拼 HTML）。 */
+  function buildEnvOverrideNotice() {
+    const active = state.data && state.data.active ? state.data.active : null;
+    const runtime = state.data && state.data.runtime ? state.data.runtime : null;
+    if (!active || !runtime) return null;               // 缺一段就不猜
+    const activeProvider = String(active.provider || "");
+    const runtimeProvider = String(runtime.provider || "");
+    if (!activeProvider || !runtimeProvider || activeProvider === runtimeProvider) {
+      return null;                                      // 没选/没生效/本来就一致：不警示
+    }
+    const fromEnv = String(runtime.source || "") === "env";
+    const envProvider = String(runtime.env_provider || "");
+    const sourceText = fromEnv
+      ? "来自环境变量 LLM_PROVIDER=" + envProvider
+      : "来自默认解析";
+    const fixText = fromEnv
+      ? "把 .env 里的 LLM_PROVIDER 删掉（或改成 " + activeProvider + "）并重启服务。"
+      : "请检查是什么覆盖了面板选择（未检测到 LLM_PROVIDER 环境变量），修正后重启服务。";
+    const keyNone = String(runtime.key_source || "") === "none"
+      ? "且当前生效提供方未配置密钥。"
+      : "";
+    const card = el("div", "settings-notice key-health-card key-health-none");
+    card.appendChild(el("strong", null, "环境变量覆盖了面板选择："));
+    card.appendChild(el("div", "key-health-text",
+      "实际生效的提供方是 " + runtimeProvider + "（" + sourceText + "），"
+      + "不是下面选的 " + activeProvider + "。面板里的选择没有生效；当前 "
+      + runtimeProvider + " 也不在隐私授权清单或没有密钥时，所有分析都会降级。"
+      + keyNone
+      + "要用 " + activeProvider + "：" + fixText));
     return card;
   }
 

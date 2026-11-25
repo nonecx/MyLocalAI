@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
-"""平台 API 与前端自洽测试（P6 + 方案 G 改版 + v7 信息源/领域）：
-   端点契约（状态/信息流/预警/监控词 CRUD/巡检触发/巡检记录/信息源 CRUD 与试运行/领域表/监控词领域手设）+
-   前后端自洽（platform.js 的每个接口路径、元素 id、platform-* class 都有落点）。
+"""平台 API 与前端自洽测试（P6 + 方案 G 改版 + v7 信息源/领域 + v12 巡检报告）：
+   端点契约（状态/信息流/预警/监控词 CRUD/巡检触发/巡检记录/信息源 CRUD 与试运行/领域表/监控词领域手设/巡检报告列表与详情）+
+   前后端自洽（platform.js 的每个接口路径、元素 id、platform-* class 都有落点；
+   cards.js 的 renderPlatform 用的 platform-* 类在 platform.css 有定义）。
 
 方案 G（热榜/新闻信息流）改版后，前端自洽断言在「动态提取」之外另加**点名契约**：
-index.html 平台视图的 33 个核心元素 id、通栏 Tab（main-tabs / mainTabs）、
+index.html 平台视图的 41 个核心元素 id、通栏 Tab（main-tabs / mainTabs）、
 筛选 chips（platformFilterRow 的 data-risk）、管理抽屉（platformDrawer 家族：
-信息源 / 监控词[含领域下拉与编辑态] / 巡检记录 / 授权引导），
+信息源 / 监控词[含领域下拉与编辑态] / 巡检记录 / 授权引导）、
+巡检报告卡（platformReport 家族），
 并断言旧版「面板栈 + 预警横幅」遗留标记一处不留。改 UI 骨架必须同步改这里。
 
 数据用 PlatformStore 临时库，经 platform_api.set_store/set_scheduler 注入
@@ -31,12 +33,12 @@ sys.path.insert(0, str(ROOT / "src" / "mylocalai" / "web"))   # 让 `import app`
 
 STATIC = ROOT / "src" / "mylocalai" / "web" / "static"
 
-#: 方案 G 新契约：index.html 监测平台视图点名的核心元素 id（共 33 个）。
+#: 方案 G 新契约：index.html 监测平台视图点名的核心元素 id（共 41 个）。
 #: 结构 = 通栏 Tab（对话｜监测平台）+ 状态摘要条 + 筛选 chips + 热榜信息流
-#: + 空态双引导 + 右侧管理抽屉（信息源 / 监控词[领域下拉+编辑态] /
-#: 巡检记录 / 授权引导）。
+#: + 巡检报告卡（platformReport 家族）+ 空态双引导 + 右侧管理抽屉（信息源 /
+#: 监控词[领域下拉+编辑态] / 巡检记录 / 授权引导）。
 #: 与 README「监测平台」章节、docs/监测平台规格-2026-11-20.md §7 同口径；
-#: 改 UI 骨架必须三处一起改（此清单、README、规格 §7）。
+#: 改 UI 骨架必须同步改这里。
 PLATFORM_CORE_IDS = (
     # 通栏视图切换 Tab
     "navChat", "navPlatform", "mainTabs",
@@ -46,6 +48,10 @@ PLATFORM_CORE_IDS = (
     "platformScanBtn", "platformManageBtn", "platformScanHint",
     # 筛选 chips 行 + 信息流
     "platformFilterRow", "platformFeed",
+    # 巡检报告卡（v12：platform.js renderReport 按 id 填充；GET /reports）
+    "platformReport", "platformReportTitle", "platformReportSummary",
+    "platformReportTopics", "platformReportAnalysis", "platformReportRisks",
+    "platformReportFollowups", "platformReportMeta",
     # 空态双引导
     "platformEmpty", "platformEmptyBtn",
     # 管理抽屉（遮罩 / 面板 / 关闭）
@@ -197,6 +203,65 @@ class TestPlatformEndpoints(PlatformApiTestBase):
         self.assertEqual(detail.json()["scan"]["status"], "completed")
         missing = self.client.get("/api/platform/scans/999")
         self.assertEqual(missing.status_code, 404)
+
+    def test_reports_list_empty_and_populated(self):
+        """空库是合法输出（reports=[]）；有数据时按 id 倒序、形状含 payload。"""
+        empty = self.client.get("/api/platform/reports")
+        self.assertEqual(empty.status_code, 200)
+        self.assertEqual(empty.json()["reports"], [])
+        self.assertIn("external_authorized", empty.json())
+        sid = self.store.start_scan_run()
+        self.store.save_report(sid, title="第 1 轮巡检报告", llm_status="ok",
+                               status="completed",
+                               payload={"summary": "代码汇总+LLM 整理",
+                                        "counts": {"queries": 1, "candidates": 2,
+                                                   "verified": 1}})
+        sid2 = self.store.start_scan_run()
+        self.store.save_report(sid2, title="第 2 轮巡检报告",
+                               llm_status="unavailable", status="completed",
+                               payload={"summary": "本轮未生成叙述性报告"})
+        listed = self.client.get("/api/platform/reports?limit=1").json()["reports"]
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0]["scan_id"], sid2)         # 倒序：最近在前
+        self.assertEqual(listed[0]["title"], "第 2 轮巡检报告")
+        self.assertEqual(listed[0]["llm_status"], "unavailable")
+        self.assertEqual(listed[0]["payload"]["summary"], "本轮未生成叙述性报告")
+
+    def test_reports_limit_clamped(self):
+        """limit 夹取 1-50：0 → 1；999 → 50（不信任调用方传来的任意大数）。"""
+        for i in range(51):
+            sid = self.store.start_scan_run()
+            self.store.save_report(sid, title=f"第 {i} 轮", llm_status="ok",
+                                   status="completed", payload={})
+        clamped_low = self.client.get("/api/platform/reports?limit=0").json()["reports"]
+        self.assertEqual(len(clamped_low), 1)
+        clamped_high = self.client.get("/api/platform/reports?limit=999").json()["reports"]
+        self.assertEqual(len(clamped_high), 50)
+
+    def test_report_detail_200_and_404(self):
+        sid = self.store.start_scan_run()
+        self.store.save_report(sid, title="第 1 轮巡检报告", llm_status="ok",
+                               status="completed", payload={"gaps": []})
+        detail = self.client.get(f"/api/platform/reports/{sid}")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["report"]["title"], "第 1 轮巡检报告")
+        self.assertIn("external_authorized", detail.json())
+        missing = self.client.get("/api/platform/reports/999")
+        self.assertEqual(missing.status_code, 404)
+        self.assertIn("巡检报告不存在", missing.json()["detail"])
+
+    def test_status_report_passthrough(self):
+        """/status 的 last_scan.report 透传（调度器摘要 → 前端报告卡）。"""
+        self.scheduler._status["last_scan"] = {
+            "scan_id": 3, "status": "completed",
+            "counters": {"queries": 1, "candidates": 2, "verified": 1,
+                         "deduped": 0, "degraded": 0},
+            "error": "", "warnings": [], "queries": [],
+            "report": {"title": "第 3 轮巡检报告", "llm_status": "ok"},
+        }
+        data = self.client.get("/api/platform/status").json()
+        self.assertEqual(data["last_scan"]["report"],
+                         {"title": "第 3 轮巡检报告", "llm_status": "ok"})
 
     def test_start_scheduler_disabled_no_side_effect(self):
         """enabled=false 时启动钩子不构造调度器（import 期零副作用）。"""
@@ -466,6 +531,9 @@ class TestPlatformFrontendConsistency(unittest.TestCase):
         self.assertTrue(paths, "没从 platform.js 里解析到 API 路径")
         missing = [p for p in sorted(paths) if p not in self._openapi_paths]
         self.assertEqual(missing, [], f"platform.js 引用了后端不存在的接口：{missing}")
+        # 契约先行项已闭环：巡检报告两端点（列表 + 单轮）真的在路由表里
+        self.assertIn("/api/platform/reports", paths)
+        self.assertIn("/api/platform/reports", self._openapi_paths)
 
     def test_dynamic_platform_classes_have_css(self):
         """动态拼出的平台 class 必须在 platform.css 有定义（platform.js ↔ css
@@ -508,14 +576,34 @@ class TestPlatformFrontendConsistency(unittest.TestCase):
         self.assertIn("deleteSource", self.js)
         self.assertIn("testSource", self.js)
         self.assertIn("/${sid}/test", self.js)          # 模板串：PLATFORM_API.sources}/{sid}/test
-        # 六路并行（含信息源）：refreshAll 的 Promise.all 里六个加载器一个不少
+        # 巡检报告路：加载器 + 渲染器 + 失败重试都在场（契约先行项的接线留痕）
+        self.assertIn("loadReport", self.js)
+        self.assertIn("renderReport", self.js)
+        self.assertIn("reportLoadFailed", self.js)
+        # 七路并行（含信息源与巡检报告）：refreshAll 的 Promise.all 里七个
+        # 加载器一个不少
         block = re.search(r"async function refreshAll\(\)\s*\{(.*?)\n  \}", self.js, re.S)
         self.assertIsNotNone(block, "platform.js 里找不到 refreshAll")
         for loader in ("loadStatus()", "loadWarnings()", "loadWatch()",
-                       "loadFeed()", "loadScans()", "loadSources()"):
+                       "loadFeed()", "loadScans()", "loadSources()",
+                       "loadReport()"):
             self.assertIn(loader, block.group(1),
                           f"refreshAll 的并行加载少了 {loader}（单路失败静默）")
         self.assertIn("Promise.all(", block.group(1))
+
+    def test_cards_platform_classes_have_css(self):
+        """cards.js 的 renderPlatform（对话里的平台卡）用的 platform-* 类必须
+        在 platform.css 有定义（前端自洽：不许无样式裸奔）；renderPlatform 也
+        真接进了 renderCard 分发与 window.ChatCards 导出——否则平台卡会落成
+        结论卡兜底渲染。"""
+        used = set(re.findall(r'(?:chat-)?platform-[a-z-]+', self.cards_js))
+        defined = set(re.findall(r'\.((?:chat-)?platform-[a-z-]+)', self.css))
+        missing = sorted(c for c in used if c not in defined)
+        self.assertEqual(missing, [], f"cards.js 用了 platform.css 未定义的类：{missing}")
+        self.assertTrue(used, "cards.js 里没解析到 platform-* 类（断言空转）")
+        self.assertIn("renderPlatform", self.cards_js)
+        self.assertIn('type === "platform"', self.cards_js)
+        self.assertIn("renderPlatform,", self.cards_js)     # window.ChatCards 导出
 
     def test_risk_levels_match_backend(self):
         """前端档位集合 = 后端 risk.LEVELS（换档位必须两端同步）。
@@ -546,16 +634,16 @@ class TestPlatformFrontendConsistency(unittest.TestCase):
             self.assertIn(cls, css_classes, f"platform.css 缺 .{cls} 定义")
 
     def test_platform_view_structure(self):
-        """方案 G 结构契约 + 通栏 Tab 切换接线（2026-11-24 随路由挂载一并恢复）。
+        """方案 G 结构契约 + 通栏 Tab 切换接线 + 巡检报告卡骨架。
 
         结构：通栏 Tab（mainTabs：navChat/navPlatform）→ 平台视图主容器 →
-        状态摘要条 → 筛选 chips → 信息流 → 空态双引导 → 右侧管理抽屉
-        （信息源 / 监控词[领域下拉+编辑态] / 巡检记录 / 授权引导）。
+        状态摘要条 → 筛选 chips → 信息流 → 巡检报告卡 → 空态双引导 → 右侧
+        管理抽屉（信息源 / 监控词[领域下拉+编辑态] / 巡检记录 / 授权引导）。
         旧版「面板栈 + 预警横幅」遗留标记一处不留；视图是显隐切换（都留在
         DOM），不是销毁重建。清单与 docs/监测平台规格-2026-11-20.md §7、
         README「监测平台」章节同口径；改 UI 骨架必须三处一起改。
         """
-        # ① 33 个点名核心 id 全部有落点（改 UI 骨架必须三处一起改）
+        # ① 41 个点名核心 id 全部有落点（改 UI 骨架必须三处一起改）
         missing = [i for i in PLATFORM_CORE_IDS if f'id="{i}"' not in self.html]
         self.assertEqual(missing, [], f"index.html 缺核心元素 id: {missing}")
         # ② 筛选 chips 的 data-risk 取值符合契约（"" / high,urgent / suspect / notice）
@@ -608,13 +696,14 @@ class TestPlatformAppMounting(unittest.TestCase):
 
         走 openapi() 的 paths：include_router 后 included router 的端点在
         app.routes 里的可见性随 FastAPI 版本而变，openapi 的 paths 是全量
-        权威来源。前端 PLATFORM_API 的 8 个路径一个不许少。
+        权威来源。前端 PLATFORM_API 的 9 个路径一个不许少。
         """
         paths = set(self.webapp.app.openapi().get("paths", {}))
         expected = {"/api/platform/status", "/api/platform/feed",
                     "/api/platform/warnings", "/api/platform/watch",
                     "/api/platform/scan", "/api/platform/scans",
-                    "/api/platform/domains", "/api/platform/sources"}
+                    "/api/platform/domains", "/api/platform/sources",
+                    "/api/platform/reports"}
         missing = sorted(p for p in expected if p not in paths)
         self.assertEqual(missing, [], f"真 app 未注册平台接口: {missing}")
 

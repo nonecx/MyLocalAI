@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""巡检调度器与 CLI 测试（P5）：启停、单飞、取消传播、规则热更新、退出码。"""
+"""巡检调度器与 CLI 测试（P5 + v12 报告透传/CLI 报告段）：启停、单飞、取消传播、
+规则热更新、退出码、status 的 last_scan.report 透传、--once 的报告段输出。"""
 
 from __future__ import annotations
 
@@ -152,6 +153,28 @@ class TestSchedulerLifecycle(unittest.TestCase):
             self.assertIn(key, status)
         self.assertEqual(status["interval_s"], 900)
 
+    def test_status_report_passthrough(self):
+        """summary 带 report：status().last_scan.report 透传，且只带
+        title/llm_status 两个标量（payload 不背进状态响应）。"""
+        summary = dict(OK_SUMMARY,
+                       report={"title": "第 1 轮巡检报告", "llm_status": "ok",
+                               "payload": {"summary": "不该进状态响应",
+                                           "counts": {"queries": 1}}})
+        sched = PlatformScheduler(runner=StubRunner(summary=summary),
+                                  rules_loader=lambda: RULES_ON)
+        sched._run_scan(None)
+        last = sched.status()["last_scan"]
+        self.assertEqual(last["report"],
+                         {"title": "第 1 轮巡检报告", "llm_status": "ok"})
+
+    def test_status_without_report_has_no_key(self):
+        """summary 无 report（早退路径/技能不可用）：不加该键——前端据此
+        区分"没有报告"与"有报告"，不拿空对象冒充。"""
+        sched = PlatformScheduler(runner=StubRunner(),
+                                  rules_loader=lambda: RULES_ON)
+        sched._run_scan(None)
+        self.assertNotIn("report", sched.status()["last_scan"])
+
     def test_trigger_async_rapid_double_trigger_never_overlaps(self):
         """单飞的 check-then-act 窗口（W1 审计 2026-11-22）：trigger_async 先
         locked() 判断、后由线程持锁（scheduler.py trigger_async → _run_scan），
@@ -237,6 +260,60 @@ class TestCli(unittest.TestCase):
         runner = StubRunner()
         self._run_cli(["--once", "--query", "话题A", "--query", "话题B"], runner=runner)
         self.assertEqual(runner.calls, [["话题A", "话题B"]])
+
+    def test_once_prints_report_section(self):
+        """--once 报告段（llm_status=ok）：标题/摘要/话题要点/分析前 3 条
+        （带条目 id）/风险/跟进都打印；第 4 条分析不打印（只述前三）。"""
+        report = {
+            "scan_id": 1, "as_of": "2026-11-24T22:00:00+08:00",
+            "scan_status": "completed", "llm_status": "ok",
+            "title": "第 1 轮巡检报告", "summary": "本轮覆盖 1 个话题。",
+            "counts": {"queries": 1, "candidates": 2, "verified": 1},
+            "topic_notes": [{"query": "话题A", "note": "热度上升"}],
+            "analysis": [{"point": "要点一", "entry_ids": [3, 4]},
+                         {"point": "要点二", "entry_ids": []},
+                         {"point": "要点三", "entry_ids": []},
+                         {"point": "第四条不该打印", "entry_ids": []}],
+            "risks": "存在传播风险", "followups": ["继续观察"],
+            "gaps": [], "errors": []}
+        code, out = self._run_cli(["--once"],
+                                  runner=StubRunner(summary=dict(OK_SUMMARY,
+                                                                 report=report)))
+        self.assertEqual(code, 0)
+        self.assertIn("巡检报告", out)
+        self.assertIn("第 1 轮巡检报告", out)
+        self.assertIn("本轮覆盖 1 个话题。", out)
+        self.assertIn("话题A：热度上升", out)
+        self.assertIn("要点一（条目 3, 4）", out)
+        self.assertNotIn("第四条不该打印", out)
+        self.assertIn("存在传播风险", out)
+        self.assertIn("继续观察", out)
+
+    def test_once_prints_report_degraded_reason(self):
+        """llm_status 非 ok：先如实打印未生成叙述性报告的原因，再打印代码
+        兜底的标题/摘要；叙事区（analysis 等）不打印。"""
+        report = {"title": "第 2 轮巡检报告", "summary": "代码汇总兜底。",
+                  "llm_status": "budget_exhausted",
+                  "analysis": [{"point": "叙事区不该打印", "entry_ids": [1]}],
+                  "topic_notes": [{"query": "q", "note": "n"}]}
+        code, out = self._run_cli(["--once"],
+                                  runner=StubRunner(summary=dict(OK_SUMMARY,
+                                                                 report=report)))
+        self.assertEqual(code, 0)
+        self.assertIn("本轮未生成叙述性报告（预算耗尽）", out)
+        self.assertIn("以下为代码汇总", out)
+        self.assertIn("第 2 轮巡检报告", out)
+        self.assertIn("代码汇总兜底。", out)
+        self.assertNotIn("叙事区不该打印", out)
+        self.assertNotIn("q：n", out)
+
+    def test_once_without_report_does_not_crash(self):
+        """summary 无 report 键（早退路径/技能不可用）：报告段整段跳过，
+        其余输出不变、不炸。"""
+        code, out = self._run_cli(["--once"], runner=StubRunner())
+        self.assertEqual(code, 0)
+        self.assertNotIn("巡检报告", out)
+        self.assertIn("巡检结果", out)
 
     def test_status_command(self):
         stub_sched = mock.Mock()

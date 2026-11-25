@@ -27,6 +27,15 @@
       {"min_growth": 60, "min_heat": 50, "level": "suspect"}
     ]
   },
+  "report": {
+    "_comment": "巡检报告：每轮巡检结束生成一次报告。LLM 做语言组织与逻辑判断、不做真假判断；enabled=false 时只出代码汇总（counts/topic_stats/highlights/changes，不调 LLM）。",
+    "enabled": true,
+    "max_llm_calls": 1,
+    "max_entries": 20,
+    "max_chars_per_entry": 300,
+    "deadline_s": 60,
+    "max_tokens": 1200
+  },
   "watch_queries": [],
   "rss_sources": []
 }
