@@ -464,6 +464,9 @@ def _attention_payload(x: float, y: float, z: float,
 
     输入非法时抛 400，而不是让 ValueError 冒成 500：这是用户填错数字，不是服务故障。
     `profile` 为空时用默认档（spec），非法档位名会告警并回退默认档。
+
+    另附 `phenomenon`（现象判读：五档形态 + 判读句 + 可复算依据）。判读只做形态，
+    不改 E/档位/深读任何一项；它内部绝不抛异常，最坏情况是缺这个字段。
     """
     params, warnings = _attn.load_profile(profile or None)
     try:
@@ -476,6 +479,14 @@ def _attention_payload(x: float, y: float, z: float,
     detail["threshold_s"] = round(-math.log(1 - detail["threshold"] / 100)
                                   / detail["params"]["lambda"], 6)
     detail["profile_warnings"] = warnings
+    try:
+        from mylocalai.attention.phenomenon import classify_phenomenon
+
+        detail["phenomenon"] = classify_phenomenon(
+            detail.get("x", 0.0), detail.get("y", 0.0), detail.get("z", 0.0),
+            profile=effective, proxy_flags=detail.get("proxy_flags"))
+    except Exception:  # noqa: BLE001  判读是附加字段，算不出也不能让接口 500
+        pass
     return detail
 
 

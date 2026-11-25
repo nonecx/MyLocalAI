@@ -36,7 +36,11 @@ def _num(value: Any, default: float = 0.0) -> float:
 
 
 def _heat_card(detail: Dict[str, Any], as_of: str) -> Dict[str, Any]:
-    """热度 E 分卡（cards.js renderHeat 的字段口径：score/x/y/z/band/profile/proxy_flags）。"""
+    """热度 E 分卡（cards.js renderHeat 的字段口径：score/x/y/z/band/profile/proxy_flags）。
+
+    另带 `phenomenon`（现象判读）：卡片多渲染一行形态判读；字段缺失时前端整行不渲染。
+    """
+    phenomenon = detail.get("phenomenon")
     return {
         "x": _num(detail.get("x")),
         "y": _num(detail.get("y")),
@@ -45,6 +49,7 @@ def _heat_card(detail: Dict[str, Any], as_of: str) -> Dict[str, Any]:
         "band": str(detail.get("band", "")),
         "profile": str(detail.get("profile", "")),
         "proxy_flags": [str(f) for f in (detail.get("proxy_flags") or [])],
+        "phenomenon": phenomenon if isinstance(phenomenon, dict) else {},
         "degraded": bool(detail.get("degraded")),
         "as_of": as_of,
     }
@@ -94,7 +99,8 @@ def _check_heat(ctx: Any, topic: str) -> Dict[str, Any]:
             "dossier_id": dossier_id, "degraded": degraded,
             "not_saved": not_saved,
             "save_reason": "results_disabled_or_store_unavailable" if not_saved else "",
-            "score": card["score"], "band": card["band"], "quality": detail.get("quality", "")}
+            "score": card["score"], "band": card["band"], "quality": detail.get("quality", ""),
+            "phenomenon": card["phenomenon"]}
 
 
 def _compute_heat(ctx: Any, x: float, y: float, z: float) -> Dict[str, Any]:
@@ -112,7 +118,8 @@ def _compute_heat(ctx: Any, x: float, y: float, z: float) -> Dict[str, Any]:
     return {"ok": True, "card": card, "digest": _heat_digest("给定 x/y/z 的直算", detail, card),
             "cost": {"requests": 0, "tokens": 0},
             "dossier_id": None, "degraded": bool(detail.get("degraded")),
-            "score": card["score"], "band": card["band"]}
+            "score": card["score"], "band": card["band"],
+            "phenomenon": card["phenomenon"]}
 
 
 def register_all(registry: ToolRegistry, services: Any = None) -> None:

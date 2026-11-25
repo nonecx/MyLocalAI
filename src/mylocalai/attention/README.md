@@ -6,10 +6,11 @@
 ```
 src/mylocalai/attention/
 ├── attention.py           确定性公式 E/S + 参数档位 + derive_signals（结构化信号）
+├── phenomenon.py          现象判读：五档形态 + 判读句 + 可复算依据（纯函数，零 LLM）
 ├── estimate.py            话题联网估参（产出 x/y/z，带 estimated/quality 口径）
 ├── deep_read.py           深读主流程：触发判定、受控生成、回退、隔离
 ├── deep_read_guard.py     后处理护栏（不依赖模型自觉，全部代码实现）
-├── attn_rules.json        公式参数/档位表/深读阈值
+├── attn_rules.json        公式参数/档位表/深读阈值 + phenomenon 判读阈值与档位名
 ├── deep_read_rules.json   深读触发规则 + 受控生成参数 + 护栏禁词
 ├── society_issues.json    封闭议题清单（40 项）
 ├── prompts.json           受控生成提示词（system + few-shot）
@@ -71,6 +72,48 @@ w=(0.2,0.5,0.3), λ=0.7, ε=1e-6`。硬约束：`w_x+w_y+w_z=1`、各权重 `>0`
 
 除零保护：`y<=0` 或 `x<=0` 时对应比值给 `0.0`，**不抛异常、不给 inf/nan**
 （话题模式下 y/z 抽不到数是常态）。
+
+## 3.5 现象判读：同一 E 分，不同形态
+
+`E` 是标量，只回答"多热"；`phenomenon.classify_phenomenon(x, y, z)` 把上面三个
+比值翻成**形态判读**，回答"是哪一种热"。两者正交：同样 E≈48.53 的话题，可能是
+"多篇 + 深参与"的全网热议，也可能只是"一篇文章引爆"——只按 E 分档会把它们判成
+同一结论，所以判据只看比值结构、不看 E（测试用五组 E≈48.53 的输入锁定）。
+
+| `archetype` | 档位名 | 判据 |
+| --- | --- | --- |
+| `broad_deep` | 全网热议 | 广度达标 且 深度达标（单篇共鸣达标为加强项） |
+| `broad_shallow` | 广而浅·媒体议题 | 广度达标 且 深度未达标 |
+| `narrow_deep` | 窄而深·圈层激辩 | 广度未达标 且（深度达标 或 单篇共鸣达标） |
+| `single_point` | 单点引爆 | 广度未达标 且（单篇触达极高 或 单篇留言极高） |
+| `low_attention` | 低度关注 | 广度、深度、单篇共鸣均未达标 |
+| `unknown` | 无法判读 | `x<=0` 或输入非法（非有限实数/负数），不猜 |
+
+默认阈值（`attn_rules.json` 的 `phenomenon.thresholds`，`labels` 可单独改档位名）：
+
+| 阈值 | 默认 | 含义 |
+| --- | --- | --- |
+| `spread_min` | 20 | 20 篇以上算"多篇在说"（广度达标） |
+| `engagement_min` | 0.002 | 读的人里 ≥0.2% 留言才算"参与深" |
+| `resonance_min` | 5 | 单篇平均 ≥5 条留言算"单篇共鸣高" |
+| `single_point_reach` | 1e6 | 单篇平均触达 ≥100 万算"一篇文章引爆" |
+| `single_point_resonance` | 500 | 单篇平均 ≥500 条留言同样算单点引爆 |
+
+返回固定键：`archetype`（封闭枚举）/ `label`（中文短语）/ `sentence`（必带
+「同口径相对 · 代理估计」限定）/ `basis`（可复算依据，如 `x=30 ≥ 20（广度达标）`）/
+`ratios`（直接复用 `derive_signals`，不另写口径）/ `confidence` / `profile` /
+`proxy_flags`。
+
+**退化输入**：全 0、`x<=0`、负数、inf/nan、bool、非数值、超出 float 范围的大整数
+一律给 `unknown` 或安全降级，**不抛异常、不返回 inf/nan**；`y<=0`（缺阅读量）时
+参与深度不可判，按广度与单篇共鸣降级判读并把 `confidence` 降为 `low`；`z<=0`
+降为 `medium`。配置写坏（缺 `phenomenon` 段 / 类型错 / 阈值非法 / JSON 坏 / 文件缺失）
+退回内置默认，并把「口径告警」写进 `basis`，不崩。
+
+接线：`/api/attention`、`/api/attention/search`、`/api/analyze` 的 `attention` 字段、
+`compute_heat`/`check_heat` 热度卡与 `attention_for_text`（CLI 同口径）都带
+`phenomenon`；网页热度卡渲染一行「现象判读」+ 可折叠依据。判读只是附加字段：
+E、档位、risk_score、verdict 标签一律不变。
 
 ## 4. 封闭议题清单
 
@@ -169,9 +212,11 @@ python -X utf8 -m attn_agent.deep_read --query "某话题" --x 1000 --y 10000000
 .venv/Scripts/python.exe -m unittest tests.test_deep_read_controlled -v   # 受控生成全量（96 例）
 .venv/Scripts/python.exe -m unittest tests.test_deep_read tests.test_deep_read_stage1 -v
 .venv/Scripts/python.exe -m unittest tests.test_attention tests.test_website_attention -v
+.venv/Scripts/python.exe -m unittest tests.test_attention_phenomenon -v   # 现象判读（49 例）
 ```
 
 全部离线，不调真实 API。覆盖：触发矩阵、信号派生、议题封闭性、证据覆盖、
 L3 挂靠、禁词红队、applicable 出口、反方必填、字数上限、物理隔离（AST 检查
 不 import verdict、深读异常不影响主结论、**缓存分区端到端验证**）、降级、
-配置告警、向后兼容。
+配置告警、向后兼容；现象判读另覆盖五档形态、退化输入、同一 E 不同形态、
+配置回退、payload 接线与前端契约。

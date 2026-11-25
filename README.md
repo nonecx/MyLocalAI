@@ -36,14 +36,15 @@
 │   │   ├── mcp.py              MCP 服务器封装（python -m mylocalai.rumor.mcp）
 │   │   ├── prompts.json        Agent 提示词与枚举白名单——改这里而非改代码
 │   │   └── README.md           Agent 的详细说明（证据本、受控浏览、MCP、降级行为）
-│   ├── attention/              关注度评分与深读（确定性公式 + 联网估参 + 受控生成）
+│   ├── attention/              关注度评分、现象判读与深读（确定性公式 + 形态判读 + 受控生成）
 │   │   ├── attention.py        E/S 确定性公式、参数档位、derive_signals 结构化信号
+│   │   ├── phenomenon.py       现象判读：五档形态 + 判读句 + 可复算依据（纯函数，零 LLM）
 │   │   ├── estimate.py         话题联网估参（产出 x/y/z，带 estimated/quality 口径）
 │   │   ├── attach.py           关注度挂载器（入口层接到 classic 结果上；classic 不 import attention）
 │   │   ├── deep_read.py        深读主流程（触发判定、受控生成、回退、物理隔离）
 │   │   ├── deep_read_guard.py  后处理护栏（议题封闭/证据/L3 挂靠/禁词，代码实现）
 │   │   ├── attn_rules.json / deep_read_rules.json / society_issues.json / prompts.json
-│   │   └── README.md           关注度与深读的完整说明（公式、触发、护栏、隔离）
+│   │   └── README.md           关注度、现象判读与深读的完整说明（公式、形态、触发、护栏、隔离）
 │   ├── dossier/                档案库（SQLite 单文件 + WAL）
 │   │   ├── store.py            连接工厂、schema_version 顺序迁移（v4 指纹表+话术标记表、v6 Profile 工作区、v7 材料批次、v8 监测订阅、v9 编排 plan/三轴列、v10 监测平台三表、v11 平台信息源与领域列、v12 巡检报告 scan_reports；双重判定 = 版本账本 + schema 实态核对，重编号/半途中断自愈补跑、UPDATE 回填不重放）、档案域七表 + 会话域三表
 │   │   ├── profiles.py         Profile 工作区（多档案数据分家 + 角色，v6）
@@ -230,6 +231,52 @@ w=(0.2,0.5,0.3), λ=0.7, ε=1e-6`；约束 `w_x+w_y+w_z=1`、各权重 `>0`、`E
 **参数档位**：`spec`（默认，即最初指定的参数）与 `reachable`（拉高可达性）。
 切换档位会改变所有分数，属于口径变更，需显式选择；未指定时行为与引入档位机制前完全一致。
 
+### 现象判读：同一 E 分，不同形态
+
+`E` 是**标量**，只回答"多热"；`attention.phenomenon.classify_phenomenon(x, y, z)`
+把 `derive_signals` 的三个比值翻成**形态判读**，回答"是哪一种热"：
+
+```
+spread           = x       传播广度（文章数）
+engagement_ratio = z / y   参与深度（读的人里多大比例留言）
+resonance        = z / x   共鸣强度（单篇平均留言）
+```
+
+**为什么需要它**：同一个 E≈48.53 的话题，可能是"多篇文章 + 深参与"的全网热议，
+也可能只是"一篇文章引爆"。只按 E 分档，这两种事件会被判成同一结论——形态判读
+只看比值结构、不看 E，两者正交（测试里用五组 E≈48.53 的输入锁定）。
+
+| `archetype` | 档位名 | 判据（阈值全部外置） |
+| --- | --- | --- |
+| `broad_deep` | 全网热议 | 广度达标 且 参与深度达标（单篇共鸣达标为加强项） |
+| `broad_shallow` | 广而浅·媒体议题 | 广度达标 且 参与深度未达标 |
+| `narrow_deep` | 窄而深·圈层激辩 | 广度未达标 且（深度达标 或 单篇共鸣达标） |
+| `single_point` | 单点引爆 | 广度未达标 且（单篇触达 ≥100 万 或 单篇留言 ≥500） |
+| `low_attention` | 低度关注 | 广度、深度、单篇共鸣均未达标 |
+| `unknown` | 无法判读 | 输入不足（`x<=0`）或输入非法（非有限实数/负数），不猜 |
+
+默认阈值：`spread_min=20`（20 篇以上算"多篇在说"）、`engagement_min=0.002`
+（读的人里 ≥0.2% 留言才算"参与深"）、`resonance_min=5`（单篇平均 ≥5 条留言）、
+`single_point_reach=1e6`、`single_point_resonance=500`。全部在
+`src/mylocalai/attention/attn_rules.json` 的 `phenomenon` 段（含五档中文档位名
+`labels`），改阈值/改文案不改代码；缺段、类型错、JSON 坏时退回内置默认并在
+`basis` 里留「口径告警」，不崩。
+
+**返回字段**（固定键，便于单测逐项断言）：`archetype`（封闭枚举）/ `label`（中文短语）
+/ `sentence`（一句人话判读，**必带「同口径相对 · 代理估计」限定**，禁止"全社会广泛关注"
+这类绝对断言）/ `basis`（可复算依据，如 `x=30 ≥ 20（广度达标）`、`z/x=1.2 < 5（共鸣低）`）/
+`ratios` / `confidence`（`high`/`medium`/`low`）/ `profile` / `proxy_flags`。
+
+**代理值边界**：`x` 是检索命中的独立文章数（下限），`y`/`z` 是代理/估计值——所以判读
+只适合同口径相对比较；`y<=0`（缺阅读量）时参与深度不可判，按广度与单篇共鸣**降级判读**
+并把 `confidence` 降为 `low`；`z<=0` 时降为 `medium`；`x<=0` 或输入非法时给 `unknown`。
+纯函数、零 LLM、零网络、不抛异常，退化输入绝不返回 inf/nan。
+
+接线：`POST /api/attention`、`POST /api/attention/search`、`/api/analyze` 的 `attention`
+字段、热度卡 `compute_heat`/`check_heat` 与 CLI 的 `attention_for_text` 都带 `phenomenon`；
+网页热度卡里显示为一行「现象判读」（档位徽章 + 判读句），展开可看可复算的判读依据。
+判读只是附加字段：**E、档位、risk_score、verdict 标签一律不变**。
+
 ### 深读（Deep Read）：受控生成
 
 深读回答"为什么关注"。它**不参与任何打分**：是否触发由确定性代码决定，
@@ -311,7 +358,8 @@ python -m mylocalai.cli --attention-online "某段待分析的文本"
   opinions_arguments_system / opinions_cluster_system / opinions_contradiction_system，
   2026-11-21 外置，classic 同款 get_prompt + 内置兜底）、枚举白名单（2026-10-22 修复 G8）
 - `src/mylocalai/llm/providers.json` —— 提供方表（密钥/地址/模型名成组绑定 + 能否关思维链，修复 G4）
-- `src/mylocalai/attention/attn_rules.json` —— 关注度公式参数、档位表、深读阈值（2026-10-26）
+- `src/mylocalai/attention/attn_rules.json` —— 关注度公式参数、档位表、深读阈值，
+  以及 `phenomenon` 段（现象判读五档阈值与中文档位名，2026-11-25）
 - `src/mylocalai/attention/deep_read_rules.json` —— 深读触发规则（absolute/quantile/change_rate/any ×
   按档位覆盖）、受控生成参数、护栏禁词正则（2026-10-29）
 - `src/mylocalai/attention/society_issues.json` —— 封闭议题清单（40 项，LLM 只能从中选 `issue_tags`）
@@ -379,7 +427,9 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 2613 个用例（unittest discover 全量，2026-11-25 角色切换入口 v8 落地
+离线套件共 2662 个用例（unittest discover 全量，2026-11-25 现象判读层
+（`attention/phenomenon.py`：五档形态 + 同 E 不同形态锁定 + 配置回退 + 卡片接线）落地
+新增 `tests/test_attention_phenomenon.py` 49 例后实测；此前 2026-11-25 角色切换入口 v8 落地
 （顶栏角色标签 / 菜单一键换角色 / 左栏入口 + cards.js 收口 apiPath 补实现）后实测，
 本次新增 2 例：角色切换入口前后端自洽、cards.js 的 apiPath 导出守护；
 2026-11-25 合并实测：路由诚实降级

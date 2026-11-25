@@ -235,6 +235,22 @@
     const band = String(p.band || "");
     const profile = String(p.profile || "");
     const flags = Array.isArray(p.proxy_flags) ? p.proxy_flags : [];
+    /* 现象判读（attention.phenomenon）：E 回答"多热"，形态回答"是哪一种热"。
+       字段缺失/形状不对时整块不渲染（老后端、老档案快照都能正常显示 E 卡）。 */
+    const phenomenon = (p.phenomenon && typeof p.phenomenon === "object") ? p.phenomenon : null;
+    const phenomenonLabel = phenomenon ? String(phenomenon.label || "") : "";
+    const phenomenonSentence = phenomenon ? String(phenomenon.sentence || "") : "";
+    const phenomenonBasis = (phenomenon && Array.isArray(phenomenon.basis))
+      ? phenomenon.basis.map((b) => String(b || "")).filter((b) => b) : [];
+    const phenomenonRow = (phenomenonLabel || phenomenonSentence) ? `
+        <div class="dim-row"><span class="k">现象判读</span><span class="v">${
+          phenomenonLabel ? `<span class="badge gray">${escapeHtml(phenomenonLabel)}</span> ` : ""
+        }${escapeHtml(phenomenonSentence)}</span></div>
+        ${phenomenonBasis.length ? `
+          <details class="chat-evidence-fold">
+            <summary>判读依据 ${phenomenonBasis.length} 条（同口径相对 · 可复算）</summary>
+            <ul class="chat-ev-list">${phenomenonBasis.map((b) => `<li>${escapeHtml(b)}</li>`).join("")}</ul>
+          </details>` : ""}` : "";
     return `
       <div class="chat-card chat-card-heat">
         <div class="chat-card-title">📈 热度 / E 分<span class="badge gray">确定性公式</span>${degradedBadge(p)}</div>
@@ -253,6 +269,7 @@
           <div class="dim-row"><span class="k">x · 文章数量</span><span class="v">${fmtNum(p.x)}</span></div>
           <div class="dim-row"><span class="k">y · 文章阅读量</span><span class="v">${fmtNum(p.y)}</span></div>
           <div class="dim-row"><span class="k">z · 文章留言量</span><span class="v">${fmtNum(p.z)}</span></div>
+          ${phenomenonRow}
         </div>
         ${asOfLine(p.as_of)}
       </div>`;
