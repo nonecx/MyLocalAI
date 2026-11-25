@@ -379,7 +379,9 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 2613 个用例（unittest discover 全量，2026-11-25 角色切换入口 v8 落地
+离线套件共 2616 个用例（unittest discover 全量，2026-11-25 结论卡挂关注度 E 落地后实测，
+本次新增 3 例：结论卡带 E 行、无证据时整行省略、E 不影响 risk_score；
+此前 2026-11-25 角色切换入口 v8 落地
 （顶栏角色标签 / 菜单一键换角色 / 左栏入口 + cards.js 收口 apiPath 补实现）后实测，
 本次新增 2 例：角色切换入口前后端自洽、cards.js 的 apiPath 导出守护；
 2026-11-25 合并实测：路由诚实降级
