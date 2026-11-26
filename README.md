@@ -106,7 +106,7 @@
 │   │                           + chat.js/cards.js（会话、档案库、事件流与全部卡片渲染）+ chat.css
 │   │                           + profiles.js（档案切换器）+ batch.js（材料批次面板）+ monitor.js（领域监测面板）
 │   │                           + platform.js/platform.css（监测平台视图，index.html 已接线）
-│   │                           + mobile.css（手机/平板小屏覆盖层，最后引入）
+│   │                           + ui-polish.css（证据工作台视觉层）+ mobile.css（手机/平板小屏覆盖层，最后引入）
 │   │                           + install.js / sw.js / manifest.webmanifest / icons/（添加到桌面：PWA 快捷入口）
 │   ├── util/                   text_safety（代理项规整）/ console_io（stdio 规整）
 │   └── cli.py                  命令行入口（python -m mylocalai.cli）
@@ -379,9 +379,11 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 2613 个用例（unittest discover 全量，2026-11-25 角色切换入口 v8 落地
-（顶栏角色标签 / 菜单一键换角色 / 左栏入口 + cards.js 收口 apiPath 补实现）后实测，
-本次新增 2 例：角色切换入口前后端自洽、cards.js 的 apiPath 导出守护；
+离线套件共 2615 个用例（unittest discover 全量，2026-11-25 前端证据工作台视觉层
+（`static/ui-polish.css` + PWA 预缓存 iOS 图标）落地新增 2 例：主题样式引用/预缓存、
+apple-touch-icon 预缓存；2026-11-25 角色切换入口 v8 落地
+（顶栏角色标签 / 菜单一键换角色 / 左栏入口 + cards.js 收口 apiPath 补实现）新增 2 例：
+角色切换入口前后端自洽、cards.js 的 apiPath 导出守护；
 2026-11-25 合并实测：路由诚实降级
 与标题治理（fix/route-degradation-and-titles）新增 60 例；2026-11-24 巡检报告阶段
 （platform/report + schema v12 scan_reports + 两端点 + 平台页报告卡 + CLI 报告段 +
@@ -389,9 +391,9 @@ platform_feed kind="report"）落地新增 94 例——`tests/test_platform_repo
 58 例，外加 `test_platform_runner` / `test_platform_api` / `test_platform_tool` /
 `test_platform_store` / `test_platform_scheduler` / `test_import_rules` 的 v12 增补
 36 例；2026-11-24 移动端快捷入口
-（PWA 添加到桌面 + 小屏适配 + 启动脚本 --lan）落地新增 `tests/test_mobile_pwa.py`
-15 例；此前 2026-11-24 修「触发失败：HTTP 404」
-（platform_router 挂载）+ 本地库迁移漂移自愈（账本 + schema 实态双重判定）后实测；
+（PWA 添加到桌面 + 小屏适配 + 启动脚本 --lan）落地新增
+`tests/test_mobile_pwa.py` 17 例；此前 2026-11-24 修「触发失败：HTTP 404」（platform_router 挂载）+
+本地库迁移漂移自愈（账本 + schema 实态双重判定）后实测；
 此前 2026-11-24 收拢 model-settings
 worktree 未提交工作（模型管理规格 §8 收尾）后实测；此前 2026-11-24 合入
 user-profiles-roles 分支后为 2369 例，提取监测平台数据层与 API 层后为 2299 例，
@@ -939,6 +941,8 @@ CLI + 计划任务是另一通道），隐私 fail-closed（外部检索未授�
    （`my_website/start.bat --lan` 或 `./start.sh --lan`）改成 `0.0.0.0` 并在控制台打印局域网地址；
    首次运行记得放行 Windows 防火墙。默认值不变（仍只有本机能访问），要开才开。
 
+前端视觉采用独立的 `static/ui-polish.css` 覆盖层，统一对话与监测平台的证据工作台主题（暖白画布、深青绿操作色、明确的状态色、键盘焦点环与减少动态效果支持）；业务结构与交互契约不变。该样式纳入 Service Worker 界面壳预缓存。
+
 小屏适配（`static/mobile.css`，最后引入、只覆盖不改旧规则）：≤900px 单列后把**对话区提到左栏之前**
 （否则手机首屏只看到会话列表与档案库）；≤720px 收紧顶栏与面板内边距、输入框字号统一 16px
 （低于 16px 时 iOS 聚焦会自动放大整页）、表格改为横向滚动、弹层占满可用高度；≤420px 隐藏顶栏副标题；
@@ -948,6 +952,6 @@ CLI + 计划任务是另一通道），隐私 fail-closed（外部检索未授�
 快捷方式；完整 PWA（离线壳、独立窗口）只在 localhost 或 HTTPS 下成立。本项目本地优先，
 不为手机安装去自建自签证书。
 
-测试：`tests/test_mobile_pwa.py`（15 例：manifest 字段与图标实存、两个根路径资源的
+测试：`tests/test_mobile_pwa.py`（17 例：manifest 字段与图标实存、两个根路径资源的
 Content-Type 与 `Service-Worker-Allowed`、四段前端接线、`mobile.css` 的引入顺序与覆盖点、
 启动脚本 `--lan`）。
