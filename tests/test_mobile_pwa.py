@@ -213,7 +213,18 @@ class TestPageWiring(unittest.TestCase):
         self.assertIn('"/static/ui-polish.css"', self.sw)
         self.assertIn("prefers-reduced-motion: reduce", self.polish)
         self.assertIn(":focus-visible", self.polish)
-        self.assertIn("--primary: #176b68", self.polish)
+        # 卷宗纸感主题的三根支柱：墨蓝主色、朱砂强调色、衬线标题字体
+        self.assertIn("--primary: #1f3a5f", self.polish)
+        self.assertIn("--accent: #b03a2e", self.polish)
+        self.assertIn("--font-display: Georgia", self.polish)
+        self.assertIn("--paper: #f4efe4", self.polish)
+
+    def test_pwa_theme_color_matches_stylesheet(self):
+        """manifest 与 <meta theme-color> 必须与样式表主色同源，避免安装后色块割裂。"""
+        self.assertIn('name="theme-color" content="#1f3a5f"', self.html)
+        manifest = (STATIC / "manifest.webmanifest").read_text(encoding="utf-8")
+        self.assertIn('"theme_color": "#1f3a5f"', manifest)
+        self.assertIn('"background_color": "#f4efe4"', manifest)
 
     def test_apple_touch_icon_is_precached(self):
         """离线壳预缓存 HTML 声明的 iOS 主屏图标。"""

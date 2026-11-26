@@ -474,7 +474,8 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 2757 个用例（unittest discover 全量，2026-11-26 四条分支合并后实测
+离线套件共 2758 个用例（unittest discover 全量，2026-11-26 卷宗纸感界面重做落地后实测
+（全站视觉层重写 + PWA 主题色同源契约 1 例）；2026-11-26 四条分支合并后实测
 （结论卡挂关注度 E / 现象判读层 / 检索层韧性 / 能力使用率审计）；2026-11-25 能力使用率审计落地后实测，
 本次新增 44 例（`tests/test_capability_audit.py`：只读契约 / 空库 / 坏库 / 聚合 /
 接线对照 / JSON 键冻结 / CLI）；
@@ -502,7 +503,7 @@ platform_feed kind="report"）落地新增 94 例——`tests/test_platform_repo
 `test_platform_store` / `test_platform_scheduler` / `test_import_rules` 的 v12 增补
 36 例；2026-11-24 移动端快捷入口
 （PWA 添加到桌面 + 小屏适配 + 启动脚本 --lan）落地新增
-`tests/test_mobile_pwa.py` 17 例；此前 2026-11-24 修「触发失败：HTTP 404」（platform_router 挂载）+
+`tests/test_mobile_pwa.py` 18 例；此前 2026-11-24 修「触发失败：HTTP 404」（platform_router 挂载）+
 本地库迁移漂移自愈（账本 + schema 实态双重判定）后实测；
 此前 2026-11-24 收拢 model-settings
 worktree 未提交工作（模型管理规格 §8 收尾）后实测；此前 2026-11-24 合入
@@ -1106,7 +1107,7 @@ CLI + 计划任务是另一通道），隐私 fail-closed（外部检索未授�
    （`my_website/start.bat --lan` 或 `./start.sh --lan`）改成 `0.0.0.0` 并在控制台打印局域网地址；
    首次运行记得放行 Windows 防火墙。默认值不变（仍只有本机能访问），要开才开。
 
-前端视觉采用独立的 `static/ui-polish.css` 覆盖层，统一对话与监测平台的证据工作台主题（暖白画布、深青绿操作色、明确的状态色、键盘焦点环与减少动态效果支持）；业务结构与交互契约不变。该样式纳入 Service Worker 界面壳预缓存。
+前端视觉采用独立的 `static/ui-polish.css` 覆盖层，全站统一为**卷宗纸感**主题：米纸底（`--paper`）+ 墨蓝操作色（`--primary`）+ 朱砂强调色（`--accent`，只用于结论、风险与关键数字），标题用衬线字体（Georgia / 宋体）、正文用雅黑，形状收敛为小圆角单据感；覆盖对话页、监测平台、设置与档案弹层，并支持键盘焦点环与 `prefers-reduced-motion` 降级。主题色与 `manifest.webmanifest` 的 `theme_color`/`background_color` 同源，避免安装后色块割裂；该样式纳入 Service Worker 界面壳预缓存。业务结构与交互契约不变。
 
 小屏适配（`static/mobile.css`，最后引入、只覆盖不改旧规则）：≤900px 单列后把**对话区提到左栏之前**
 （否则手机首屏只看到会话列表与档案库）；≤720px 收紧顶栏与面板内边距、输入框字号统一 16px
@@ -1117,6 +1118,6 @@ CLI + 计划任务是另一通道），隐私 fail-closed（外部检索未授�
 快捷方式；完整 PWA（离线壳、独立窗口）只在 localhost 或 HTTPS 下成立。本项目本地优先，
 不为手机安装去自建自签证书。
 
-测试：`tests/test_mobile_pwa.py`（17 例：manifest 字段与图标实存、两个根路径资源的
+测试：`tests/test_mobile_pwa.py`（18 例：manifest 字段与图标实存、两个根路径资源的
 Content-Type 与 `Service-Worker-Allowed`、四段前端接线、`mobile.css` 的引入顺序与覆盖点、
 启动脚本 `--lan`）。

@@ -8,7 +8,7 @@
   <!-- PWA「添加到桌面」：manifest 由后端 /manifest.webmanifest 提供（Content-Type 必须是
        application/manifest+json），图标在 static/icons/（scripts/gen_pwa_icons.py 生成） -->
   <link rel="manifest" href="/manifest.webmanifest" />
-  <meta name="theme-color" content="#35618f" />
+  <meta name="theme-color" content="#1f3a5f" />
   <!-- iOS：全屏启动 + 桌面图标 + 状态栏样式（iOS 不读 manifest 的 display/icon） -->
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-title" content="MyLocalAI" />
@@ -362,6 +362,26 @@
             <button class="chat-welcome-sample" type="button"
               data-insights-kind="patterns">看看我的画像</button>
           </div>
+          <!-- 卷宗登记条：静态说明，不含任何数据与交互（不参与 chat.js 接线）。
+               作用是把首屏右侧的空白填成"这张单据怎么被填满"的指引。 -->
+          <dl class="chat-welcome-ledger" aria-label="核查单据的四个栏目">
+            <div class="chat-welcome-ledger-item">
+              <dt>结论</dt>
+              <dd>四档标签 + 置信度，由确定性规则得出</dd>
+            </div>
+            <div class="chat-welcome-ledger-item">
+              <dt>证据</dt>
+              <dd>来源分级、立场判定与原文链接，逐条可回查</dd>
+            </div>
+            <div class="chat-welcome-ledger-item">
+              <dt>截至</dt>
+              <dd>证据截至时间 as_of，过期即提示复核</dd>
+            </div>
+            <div class="chat-welcome-ledger-item">
+              <dt>复审</dt>
+              <dd>写清"什么条件下应重新核查"</dd>
+            </div>
+          </dl>
         </div>
       </div>
 
