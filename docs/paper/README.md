@@ -49,6 +49,19 @@ pdftotext -enc UTF-8 main.pdf main.txt
 .venv\Scripts\python.exe -X utf8 docs\paper\experiments\_verify_pdf.py
 ```
 
+## 参考文献核验
+
+15 条参考文献中有 DOI 的条目均在 Crossref 逐条核对过元数据（作者、年份、刊名、卷期、页码）：
+
+| 引用 | DOI | 核验结果 |
+| --- | --- | --- |
+| Vosoughi et al., Science 2018 | `10.1126/science.aap9559` | 359(6380):1146–1151，一致 |
+| Ji et al., ACM CSUR 2023 | `10.1145/3571730` | 55(12):1–38，一致 |
+| Shu et al., SIGKDD Explor. 2017 | `10.1145/3137597.3137600` | 19(1):22–36，一致 |
+| Breck et al., IEEE BigData 2017 | `10.1109/BigData.2017.8258038` | 1123–1132，一致 |
+
+无 DOI 的条目为会议论文、arXiv 预印本与政府规章，按可公开访问的出处著录。
+
 ## 数据口径与边界
 
 - 端到端数据采集于 **2026-11-25**，模型 `deepseek-v4.1-flash`，温度为 0、推理档位关闭；
