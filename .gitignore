@@ -29,3 +29,9 @@ nul
 # æ¡£æ¡ˆåº“æ•°æ®æ–‡ä»¶ï¼ˆM1-3ï¼‰
 data/
 .vscode/
+
+# Office ÁÙÊ±ËøÎÄ¼ş£¨WPS/Word ´ò¿ª docx Ê±Éú³É£©
+~$*.docx
+
+# ÂÛÎÄ DOCX Îª¿ÉÑ¡µ¼³ö£¨docs/paper/experiments/make_docx.py Éú³É£©£¬²»Èë¿â
+docs/paper/*.docx

@@ -1,0 +1,335 @@
+% !TeX program = xelatex
+\documentclass[12pt,a4paper,fontset=windows]{ctexart}
+
+\usepackage[margin=2.54cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs,array,multirow,makecell}
+\usepackage{graphicx}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,fit,calc}
+\usepackage{caption}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+\usepackage{url}
+
+\captionsetup{font=small,labelsep=quad}
+\setlength{\parindent}{2em}
+\linespread{1.35}
+\setlist{nosep,leftmargin=2em}
+
+\input{generated/numbers.tex}
+
+\title{\zihao{2}\bfseries 判定与生成分离：\\面向网络言论分析与谣言识别的\\确定性判定系统设计与实证评估}
+\author{作者姓名\thanks{通信作者。单位：××大学 ××学院；邮箱：author@example.com}}
+\date{\PaperDate}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+大语言模型（LLM）已被广泛用于网络言论分析与谣言识别，但把最终判定交给模型会同时引入四类问题：无证据的幻觉、采样漂移导致的不可复现、提示注入可篡改结论、以及敏感文本外发。本文提出并实现一个“判定与生成分离”的系统：分数与标签由确定性纯函数给出，LLM 只承担理解与语言组织，并在受控出口内生成。系统包含四档言论分层、五级谣言风险判定、闭式关注度评分、深读受控生成与代码侧护栏，以及带进程内缓存、单飞（single-flight）与请求级预算的 LLM 网关。我们在 2\,611 个离线用例、20\,000 组随机输入、17 类对抗输出与 12 条真实 API 端到端样本上进行了评估。结果表明：确定性层在 20\,000 组随机输入上零不变量违反，关注度公式吞吐约 \AttnThroughput{} 次/秒，谣言判定吞吐约 \VerdictThroughput{} 次/秒；17 类护栏用例全部按预期处置；真实上游下端到端冷启动延迟均值 \ApiColdMean{} 秒，缓存命中后中位 \ApiWarmMedian{} 秒且 \ApiIdentical{} 条结论逐字一致；4 个并发相同请求只产生 \ApiConcRequests{} 次上游调用，而非 16 次。结果说明，把判定权收回代码、把生成关进护栏，是在不稳定上游条件下获得可审计结论的可行路径。
+
+\vspace{0.6em}
+\noindent\textbf{关键词：}谣言识别；大语言模型；确定性判定；受控生成；可复现性；护栏
+\end{abstract}
+
+\newpage
+\begin{center}
+\textbf{\large Decision--Generation Separation: Design and Empirical Evaluation of a Deterministic Judgement System for Online Speech Analysis and Rumor Detection}
+\end{center}
+
+\begin{abstract}
+\noindent Large language models (LLMs) are increasingly used to analyse online speech and detect rumors, yet delegating the final judgement to a model introduces hallucinated evidence, sampling drift, prompt-injection sensitivity, and outbound transmission of sensitive text. This paper presents a system that separates judgement from generation: scores and labels are produced by deterministic pure functions, while the LLM is confined to understanding and language organisation within controlled outputs. The system comprises four-tier speech classification, five-level rumor risk assessment, a closed-form attention score, guarded deep-read generation with code-side rails, and an LLM gateway with in-process caching, single-flight and request-level budgets. Evaluation covers \TestCases{} offline tests, 20\,000 randomised inputs, 17 adversarial outputs and 12 real-API end-to-end samples. The deterministic layer reports zero invariant violations, throughput of about \AttnThroughput{} attention evaluations and \VerdictThroughput{} verdict assessments per second; all 17 rail cases are handled as specified; cold-start end-to-end latency averages \ApiColdMean{}~s, cache hits return in \ApiWarmMean{}~s with \ApiIdentical{} identical conclusions, and four concurrent identical requests generate \ApiConcRequests{} upstream calls instead of 16. The results suggest that reclaiming judgement for code and confining generation behind rails is a viable route to auditable conclusions under unstable upstream conditions.
+
+\vspace{0.6em}
+\noindent\textbf{Keywords:} rumor detection; large language models; deterministic judgement; controlled generation; reproducibility; guardrails
+\end{abstract}
+
+\section{引言}
+
+网络言论分析与谣言识别长期面对一个矛盾：判定必须可解释、可复核、可追责，而真实文本又高度依赖语境与常识。早期工作以特征工程和循环神经网络为主\cite{ma2016rumor}，随后的大规模实证研究表明，虚假信息的传播速度与广度显著高于真实信息\cite{vosoughi2018science}，这使得自动化识别的公共价值不断提升。近年来，LLM 以零样本方式进入该领域，能够在没有标注数据的场景下给出看似合理的判断\cite{brown2020language}。但“看似合理”与“可审计”之间仍有距离。
+
+把 LLM 直接当作判定器，会同时引入四类可观测的问题。第一是幻觉：模型可能编造并不存在的通报、数字或来源\cite{ji2023hallucination}。第二是不可复现：即便温度设为零，主流服务仍存在采样漂移，且多数接口不接受随机种子，同一文本重复分析可能得到不同档位。第三是提示注入：用户文本中的指令性片段可能改变模型行为\cite{perez2022ignore,greshake2023not}。第四是数据外发：原文与上下文会被送往第三方，对敏感内容而言这是额外的合规风险。监管层面，《互联网信息服务深度合成管理规定》已对深度合成内容的标识与安全评估提出要求\cite{cac2023deepfake}，人工辟谣平台则提供了可参照的核验流程\cite{piyao}。
+
+本文的出发点是：上述问题并不要求我们放弃 LLM，而是要求重新划分职责。系统把“判定”实现为确定性纯函数——输入是结构化信号，输出是分数与标签；LLM 只负责把文本解析成结构化信号，以及在需要解释时生成受控文本。为避免模型在生成环节“自由发挥”，系统在代码侧设置后处理护栏，并在任何一步失败时回退到本地模板。我们把这一设计原则称为\textbf{判定与生成分离}。
+
+围绕这一原则，本文的贡献如下。
+
+\begin{enumerate}[label=(\arabic*)]
+  \item \textbf{架构层面}：给出一个分层系统，判定、检索、生成、存储与展示各自独立；用抽象语法树（AST）静态检查锁定依赖方向，禁止判定层反向依赖 LLM 层，也禁止三个分析引擎互相引用。
+  \item \textbf{判定层面}：实现四档言论分层、五级谣言风险分与闭式关注度评分；所有阈值、权重与封顶值外置为 JSON，判定函数无 I/O、无网络，可被单元测试逐条断言。
+  \item \textbf{生成层面}：深读解读只允许从 40 项封闭议题清单中选择标签，生成结果须通过证据有效性、L3 挂靠、禁词与反方必填等代码侧检查；任何条目被丢弃都会显式标记降级，全部失败则回退模板。
+  \item \textbf{韧性层面}：网关以请求指纹为键做进程内缓存与单飞，失败结果在等待者之间共享而不重试放大；请求级预算在每次尝试与每次提供方切换前复查。
+  \item \textbf{实证层面}：报告 2\,611 个离线用例、20\,000 组随机输入的不变量检验、17 类对抗输出以及 12 条真实 API 端到端样本上的延迟、令牌、一致性与并发行为。
+\end{enumerate}
+
+本文其余部分安排如下：第~\ref{sec:related}~节回顾相关工作；第~\ref{sec:design}~节描述系统设计；第~\ref{sec:method}~节给出实验方法；第~\ref{sec:results}~节报告结果；第~\ref{sec:discussion}~节讨论取舍与局限；第~\ref{sec:conclusion}~节总结。
+
+\section{相关工作}\label{sec:related}
+
+\subsection{谣言检测与证据核验}
+
+谣言检测的经典路线把问题建模为文本分类：Ma 等\cite{ma2016rumor}用循环神经网络捕捉微博事件的传播结构，Shu 等\cite{shu2017fake}把假新闻检测拆分为特征提取、模型选择与评估三个环节。这类方法依赖标注数据，跨域迁移能力有限。Vosoughi 等\cite{vosoughi2018science}基于十万级谣言的传播轨迹指出，虚假信息在新颖性与情绪唤起上更强，这解释了为何“情绪强度”在本文中被保留为判定信号之一。
+
+检索增强生成（RAG）为“先取证、再判断”提供了工程范式\cite{lewis2020rag}，RAGAS 等工作则把检索质量与生成质量分开评估\cite{es2024ragas}。本文沿用这一分离思想，但把“判断”进一步从生成中剥离：证据只用于抬高风险分，不参与语言生成。
+
+\subsection{LLM 的风险与护栏}
+
+幻觉综述\cite{ji2023hallucination}把幻觉分为输入冲突、上下文冲突与事实冲突三类，并指出仅靠提示词难以根除。提示注入方面，Perez 与 Ribeiro\cite{perez2022ignore}展示了直接注入的攻击面，Greshake 等\cite{greshake2023not}进一步指出间接注入可来自检索到的网页与文档。护栏工具如 NeMo Guardrails\cite{rebedea2023nemo}提供了可编程的输入输出约束，但其约束仍以模型或规则运行时为主。本文的选择更保守：把约束放在生成之后的纯函数里，不依赖模型自觉，也不把护栏本身交给模型。
+
+\subsection{可复现性与工程测试}
+
+Sculley 等\cite{sculley2015hidden}指出机器学习系统的主要维护成本来自数据依赖与反馈回路，Breck 等\cite{breck2017mltest}提出以测试分数衡量生产就绪度。本文把这一思路延伸到 LLM 应用：用离线用例锁定判定口径，用随机输入检验不变量，用对抗样本检验护栏，用真实上游样本刻画延迟与降级行为。与 LLM-as-a-judge\cite{zheng2023judging}不同，本文不让模型给自己或他人打分，以避免评价者与被评价者同源。
+
+\section{系统设计}\label{sec:design}
+
+\subsection{总体架构与依赖约束}
+
+\begin{figure}[!ht]
+\centering
+\begin{tikzpicture}[
+  font=\small,
+  box/.style={draw, rounded corners=2pt, minimum height=0.72cm, minimum width=2.55cm, align=center, fill=gray!6},
+  arr/.style={-{Latex[length=2mm]}, thick, gray!70}
+]
+\node[box] (web) at (0,0) {入口层\\web / cli / mcp};
+\node[box, below=0.45cm of web] (plat) {监测平台\\platform};
+\node[box, below=0.45cm of plat] (assist) {档案与编排\\dossier / assistant};
+\node[box, below=0.45cm of assist] (eng) {三条分析链路\\classic \quad rumor \quad attention};
+\node[box, below=0.45cm of eng] (ret) {检索与受控抓取\\retrieval};
+\node[box, below=0.45cm of ret] (llm) {LLM 网关\\缓存 / 单飞 / 预算};
+\node[box, below=0.45cm of llm] (core) {确定性核心\\分层 / 判定 / 关注度};
+
+\draw[arr] (web) -- (plat);
+\draw[arr] (plat) -- (assist);
+\draw[arr] (assist) -- (eng);
+\draw[arr] (eng) -- (ret);
+\draw[arr] (ret) -- (llm);
+\draw[arr] (llm) -- (core);
+\draw[arr, dashed] (eng.east) .. controls +(1.6,0) and +(1.6,0) .. (core.east)
+  node[midway, right, align=left, font=\scriptsize] {判定纯函数\\不经过网关};
+\end{tikzpicture}
+\caption{系统分层与依赖方向。实线为编译期依赖，虚线表示判定路径在运行时绕过 LLM 网关；AST 测试禁止任何反向 import。}
+\label{fig:arch}
+\end{figure}
+
+系统分为七层：\texttt{core}（分层与授权）、\texttt{llm}（网关）、\texttt{retrieval}（检索与受控抓取）、\texttt{classic}/\texttt{rumor}/\texttt{attention}（三条分析链路）、\texttt{dossier}/\texttt{assistant}（档案与编排）、\texttt{platform}（监测）以及 \texttt{web}/\texttt{cli}/\texttt{mcp}（入口）。依赖方向只有一条：
+\begin{center}
+\texttt{core} $\leftarrow$ \texttt{llm} $\leftarrow$ \texttt{retrieval} $\leftarrow$ \{\texttt{classic}, \texttt{rumor}, \texttt{attention}\} $\leftarrow$ \{\texttt{dossier}, \texttt{assistant}\} $\leftarrow$ \texttt{platform} $\leftarrow$ \texttt{web}/\texttt{cli}/\texttt{mcp}.
+\end{center}
+该方向由 \texttt{tests/test\_import\_rules.py} 用 AST 遍历锁定：\texttt{core} 不得 import \texttt{llm}，三个分析引擎互不 import，\texttt{classic} 不得 import \texttt{attention}，\texttt{dossier} 不得被 \texttt{assistant} 反向依赖。检查覆盖函数体内的延迟导入，因此“运行时再 import”无法绕过。图~\ref{fig:arch}~给出分层与数据流。
+
+\subsection{四档言论分层}
+
+分层函数 \texttt{speech\_tier} 接收三个结构化信号：情绪分 $s\in[0,10]$、攻击性等级 $a\in\{\text{低},\text{中},\text{高}\}$、逻辑关联性 $r\in\{\text{强},\text{中},\text{弱}\}$。规则按顺序匹配：
+\begin{align}
+&\text{高度疑似水军/煽动性言论}, && s\ge 7 \land a=\text{高} \land r=\text{弱};\\
+&\text{疑似情绪化谣言}, && s\ge 5 \land r=\text{弱};\\
+&\text{理性探讨}, && r=\text{强} \land a=\text{低};\\
+&\text{情绪化宣泄/普通网络争论}, && \text{其余}.
+\end{align}
+阈值 $7$ 与 $5$ 存放在 \texttt{verdict\_rules.json} 的 \texttt{speech\_tier} 段，\texttt{core/tiering.py} 是唯一实现，classic 报告与谣言判定共用同一份规则。代码刻意不做分桶：若把情绪分向下取整到 2 的倍数，有效档位线会从 $5/7$ 左移到 $4/6$，属于口径变更。
+
+当情绪分距任一档位线不超过 $0.5$ 时，判定器会绕过缓存再取一个独立样本，两者取均值后定档；复核分只用于判档，不回写组件结果。这一“边界复核”用一次额外调用换取边界样本的稳定性，代价在实验中可见（第~\ref{sec:results}~节）。
+
+\subsection{谣言风险分}
+
+谣言判定在分层之上增加“是否含可核实事实声明”这一必要条件。设话术分 $m$、可信度线索 $c$（非正）、情绪分 $e$、逻辑分 $l$、无来源声明数 $u$，则
+\begin{equation}
+R_0 = m + c + 2\cdot \mathrm{bucket}(e) + l + 5\min(u,3),
+\end{equation}
+其中 $\mathrm{bucket}(e)$ 把 $e$ 向下归并到 2 的倍数（$7,8,9$ 同归 6），逻辑分按“弱 15、中 5”计，存在谬误再加 5，情绪项封顶 20，无来源项封顶 15。$R=\mathrm{clamp}(R_0,0,100)$。若文本不含事实声明且 $R>24$，则封顶为 24 并标记 \texttt{capped}。
+
+证据只上调、不下调：当可靠反驳来源数（官方来源权重加倍）不少于 2 时，风险分抬到 78；等于 1 时抬到 58；没有找到辟谣不降分。最终标签按 70/45/25 三档切分，另有“无可核实陈述”出口。组件缺失或报错时，判定器把对应项记入 \texttt{degraded\_components}，置信度按缺失数量降为高/中/低，而不是猜测。
+
+\subsection{关注度评分与深读触发}
+
+关注度把“一件事有多少人关注”压缩为一个闭式分数：
+\begin{equation}
+E = 100\left(1-\exp(-\lambda S)\right),\qquad
+S = w_x\frac{\ln(1+x)}{\ln(1+x_0)} + w_y\frac{\ln(1+y)}{\ln(1+y_0)} + w_z\frac{\ln(1+z)}{\ln(1+z_0)} + \varepsilon,
+\end{equation}
+其中 $x,y,z$ 分别为文章数、阅读量与留言量。默认档位（spec）取 $x_0=100$、$y_0=10^5$、$z_0=10^3$、$(w_x,w_y,w_z)=(0.2,0.5,0.3)$、$\lambda=0.7$、$\varepsilon=10^{-6}$；可达档位（reachable）把 $y_0$ 提到 $10^6$、$z_0$ 降到 300，权重改为 $(0.3,0.4,0.3)$、$\lambda=0.8$。分数严格落在 $(0,100)$：实现先算 $100\exp(-\lambda S)$ 再相减，越界时取 \texttt{nextafter} 的最近合法值，并用显式分支而非断言复核。
+
+由 $E=66$ 反解得 $S_{66}=-\ln(0.34)/0.7\approx 1.5412$。深读触发支持四种模式：绝对阈值（严格大于）、同批分位（Top-$K\%$）、环比变化（预留）与任一满足；spec 档默认绝对阈值，reachable 档默认 Top-10\%。触发只决定“是否解释”，不改变 $E$、档位或谣言结论。
+
+\subsection{深读的受控生成与代码侧护栏}
+
+深读回答“为什么关注”。流程为：判定触发 $\rightarrow$ 组装结构化信号与封闭议题清单 $\rightarrow$ 调用模型 $\rightarrow$ 解析 JSON $\rightarrow$ 代码侧护栏清洗 $\rightarrow$ 返回或模板回退。模型只能从 40 项议题中选择 \texttt{issue\_tags}，清单外一律改判为 \texttt{other} 并降置信度。护栏逐条检查：结构合法性、议题封闭性、标签数量上限、证据编号有效性、L3 是否有 L1/L2 支撑、四类禁词（具体主体归因、以偏概全、价值判断、预测）、反方解读必填、字数上限。命中禁词的条目整段丢弃并记入 \texttt{guard\_dropped}；L3 无支撑时降级为显式不确定性；任何条目被丢弃即置 \texttt{degraded=true}。若模型不可用或输出被全部丢弃，则按结构化字段拼接本地模板，绝不自由生成。
+
+深读使用独立缓存分区 \texttt{attn\_deep\_read}，与主分析缓存键分离；其输出不进入风险分、不写主分析缓存，从代码路径上实现物理隔离。
+
+\subsection{LLM 网关的缓存、单飞与预算}
+
+网关以请求指纹为缓存键：提供方、地址、模型、系统提示词、用户文本、温度、最大令牌数、思维链开关、缓存分区与额外参数一起做 SHA-256。默认 TTL 900 秒、容量 256 条，只缓存成功结果。单飞与缓存是两件独立的事：同一键的并发请求只真正调用一次，失败结果也在等待者之间共享，避免在上游最脆弱时把一次调用放大为 $N$ 次；关闭缓存不会关闭单飞。
+
+请求级预算通过线程局部的作用域嵌套传递，取更紧的剩余时间；在每次 HTTP 尝试之前与每个提供方切换之前都复查预算，单次尝试超时不超过剩余预算。重试默认 1 次；只有 4xx 参数类错误才触发“关闭思维链”回落，5xx、超时与 DNS 错误不会把提供方永久标记为不支持该参数。进程级计数器记录真实上游请求数与令牌数，缓存命中与单飞等待不计入。
+
+\subsection{档案库与编排}
+
+档案库使用单文件 SQLite（WAL 模式），当前 schema 版本为 12，含档案、结论、证据、关注度快照、会话、工具运行、指纹、材料批次、监测订阅与巡检报告等表。迁移采用“版本账本 + schema 实态”双重判定：已入账且效果齐全则跳过；已入账但效果缺席则只补跑缺席 DDL，不重放回填；未入账则逐语句执行并跳过已在场的对象。这一设计针对两类真实事故：发布线重编号与迁移中途被杀。
+
+助手编排把“对话 $\rightarrow$ 路由 $\rightarrow$ 工具 $\rightarrow$ 叙述 $\rightarrow$ 落库”拆成事件流，路由前有四道确定性闸：拒绝预检、混合表达澄清、封闭枚举白名单、参数 schema 与权限校验。模型不可用时，路由先尝试确定性兜底（如 $x/y/z$ 直算关注度），兜不住才澄清并标记 \texttt{llm\_failed}。六步 claim-checking 计划由代码展开，模型不能提交任意步骤。
+
+\section{实验方法}\label{sec:method}
+
+\subsection{环境与被试系统}
+
+实验在 Windows 11（10.0.26200）、Python 3.12.10、单进程环境下完成，代码版本为远程主线 \texttt{077550d} 的独立工作树。上游为内部 OpenAI 兼容网关，模型标识 \texttt{deepseek-v4.1-flash}，上下文窗口 $10^6$、最大输出 $131{,}072$ 令牌；实验时把该模型的推理档位显式关闭，温度取 0，单次 HTTP 超时 60 秒，判定预算 240 秒。网关为共享服务，实验期间出现间歇性拥塞，这一点在结果中如实保留，未做剔除。
+
+\subsection{数据}
+
+我们构造了 40 条中文网络文本，分为四组：高风险煽动（10 条）、情绪化谣言（10 条）、理性探讨（10 条）与情绪化宣泄（10 条）。分组依据是文本可观察特征：情绪强度、攻击性、逻辑关联与是否含可核实事实声明；标注由作者按预先写定的 rubric 完成，\textbf{未做双人独立标注}，因此本文只报告描述性分布与一致性，不报告分类准确率的推断统计。端到端实验取每组前 3 条，共 12 条；缓存漂移实验取前 6 条。
+
+\subsection{指标与实验矩阵}
+
+实验分五组：
+\begin{itemize}
+  \item \textbf{E1 规模与回归}：统计源码与测试规模，运行全量离线套件，记录用例数、耗时、失败与跳过。
+  \item \textbf{E2 确定性层}：对关注度、指纹、分层、风险分与护栏分别做随机输入检验，记录吞吐、不变量违反数、封顶与抬分锚点的命中率。
+  \item \textbf{E3 端到端}：对 12 条文本各跑两次（冷启动与缓存命中），记录延迟、上游请求数、令牌数、结论与降级组件；对 6 条文本关闭缓存再跑一次，记录结论漂移。
+  \item \textbf{E4 韧性}：用可控的生产者函数测量单飞、失败共享、缓存关闭、TTL 过期与预算耗尽；用 4 个并发相同请求测量上游放大倍数；测量空输入是否短路。
+  \item \textbf{E5 护栏}：构造 17 类对抗输出（清单外议题、无效证据、仅 L3、四类禁词、缺反方、超长、非法枚举等），逐条比对护栏处置是否符合预期。
+\end{itemize}
+
+\section{实验结果}\label{sec:results}
+
+\subsection{规模与回归测试}
+
+系统当前包含 \CodeFiles{} 个 Python 源文件、\CodeLOC{} 行源码（\texttt{src/mylocalai} 包内，不含测试与虚拟环境），另有 \JsonFiles{} 个 JSON 配置文件（约 105\,KB），阈值、权重、提示词与信源名单均在其中。测试侧有 \TestFiles{} 个 \texttt{test\_*.py} 测试模块、\TestLOC{} 行、\TestCases{} 个用例。
+
+在干净工作树上运行全量离线套件，结果为 \TestCases{} 个用例、耗时 \TestTime{} 秒、跳过 \TestSkip{} 个、失败 \TestFail{} 个。失败用例是档案卡 \texttt{as\_of} 字段的秒级时间戳断言：两次调用恰好跨越秒边界（\texttt{50:40} 与 \texttt{50:41}），属于测试自身的时序假设，而非判定逻辑错误。按“失败用例数/总用例数”计，回归失败率为 \TestFailRate，且失败可在重跑时消失。这一结果说明：以纯函数为核心的判定层可以被大规模用例稳定锁定，而涉及挂钟时间的用例仍需注入时钟。
+
+\subsection{确定性层}
+
+表~\ref{tab:det}~汇总确定性层的随机输入检验。关注度公式在 20\,000 组对数均匀随机输入上全部落在 $(0,100)$，15\,000 次单维倍增检查无一次违反单调性；吞吐约 \AttnThroughput{} 次/秒，单次约 \AttnPerCall{} 微秒。四个定标点与设计文档逐位一致：$E(100,10^5,10^3)=50.3415$、$E(0,0,0)\approx 7.0\times10^{-5}$、$E(10^{12},10^{12},10^{12})\approx 91.9385$、$E(10^{300},10^{300},10^{300})=99.99999999999999$。把 5 个真实话题代入两档参数，spec 档 $E$ 为 54.81/51.56/49.82/46.85/41.75，reachable 档为 55.03/50.93/48.74/45.86/38.19：仅关注度最高的话题微升 0.22 分，其余 4 个反而下降 0.63 至 3.56 分，两档均为 0/5 越过 66。这说明“换档位”只改变口径的相对排序，并不能凭空制造高关注；把 reachable 当作“让头部话题过线”的解，在本批数据上并不成立。
+
+话术指纹在 1\,000 对文本上取得 \FpPrecision{} 的精确率与 \FpRecall{} 的召回率（阈值 0.6），近重复对的 Jaccard 均值 \FpNearMean{}、无关对均值 \FpFarMean{}，吞吐约 \FpThroughput{} 对/秒。四档分层在 189 个离散组合上与按同一规则独立重实现的判定逐条一致，边界行为符合预期：$6.99$ 落在“疑似”，$7.00$ 且攻击性高、逻辑弱才升到“高度疑似”。
+
+风险分在 20\,000 组随机组件组合上零越界、零非法标签；2\,975 次“无事实声明”样本全部不超过 24 分封顶线，5\,171 次“至少两个可靠反驳来源”样本全部达到 78 分锚点。吞吐约 \VerdictThroughput{} 次/秒，明显低于关注度公式，原因是每次判定都要重新读取并校验 \texttt{verdict\_rules.json}（单次约 \RulesLoadMs{} 毫秒）。这是一处可优化的工程开销：把规则缓存到进程内即可把判定吞吐提高一个数量级，但会牺牲“改配置立即生效”的运维特性。
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{确定性层随机输入检验（20\,000 组输入，固定种子 \Seed）}
+\label{tab:det}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+组件 & 样本量 & 吞吐（次/秒） & 不变量违反 & 备注\\
+\midrule
+关注度公式 & 20\,000 & \AttnThroughput & 0 & 边界与单调性\\
+话术指纹 & 1\,000 对 & \FpThroughput & --- & P=\FpPrecision, R=\FpRecall\\
+四档分层 & 189 组合 & --- & 0 & 与规则重实现逐条一致\\
+风险分 & 20\,000 & \VerdictThroughput & 0 & 封顶与锚点全中\\
+深读护栏 & 17 用例 & --- & 0 & 预期处置 \GuardMatched/\GuardCases\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{端到端真实 API 结果}
+
+表~\ref{tab:api}~给出 12 条文本的逐条结果。冷启动（无缓存）延迟均值 \ApiColdMean{} 秒、中位数 \ApiColdMedian{} 秒、最大 \ApiColdMax{} 秒。第二次请求时，\ApiFastWarm{} 条命中全部成功组件的缓存并直接返回（$\le 0.05$ 秒），中位延迟 \ApiWarmMedian{} 秒；另有 1 条因上次有组件失败（失败结果不缓存）而重新调用了一次上游，耗时 \ApiWarmMax{} 秒，把均值抬到 \ApiWarmMean{} 秒。尽管延迟分布差异很大，\ApiIdentical{} 条结论逐字一致。
+
+12 条文本共消耗 \ApiTokens{} 个上游令牌，平均 \ApiTokPerItem{} 个/条。其中 \ApiDegraded{} 条出现至少一个组件降级；按组件调用计，\ApiCompFail{} 次未能得到可用结果，原因均为上游返回无法解析的 JSON 或超时，而非判定代码异常。这一比例说明：共享网关上的结构化输出合规率是当前链路最大的不确定性来源，系统的应对是如实降级并把缺失组件写进结论卡，而不是重试风暴或静默补全。
+
+与实验前按 rubric 标注的组别相比，冷启动结论在 \ApiAgree{} 条上一致；只看无降级的 6 条样本，一致数为 5 条（\ApiAgreeClean{}）。由于标注由作者单人完成、样本量小，这里只把它当作描述性校验，不据此推断总体准确率。
+
+关闭缓存后重跑 6 条，\ApiDrift{} 条结论发生变化。变化来自一条原本完整成功的样本 H03：冷启动时三个模块都返回可用结果，结论为“高度疑似水军/煽动性言论”；关闭缓存重跑时情绪与攻击性两个组件解析失败，结论退回“情绪化宣泄/普通网络争论”。这说明：\textbf{缓存保证的是“同一进程内同输入同结论”，而不是“任意时刻同输入同结论”}；跨进程、TTL 过期或组件降级都会让上游漂移重新显现。把这一边界写进系统文档，比宣称“完全可复现”更诚实。
+
+并发实验用 4 个线程同时分析同一条文本，冷缓存下上游只收到 \ApiConcRequests{} 次请求（3 个模块 + 1 次报告），而不是 $4\times4=16$ 次；4 个线程的结论全部为“\ApiConcConclusion”，墙钟时间 \ApiConcWall{} 秒。单飞把并发放大倍数从 4 压到 1，且没有引入额外的不一致。
+
+\input{generated/table_api.tex}
+
+\subsection{韧性机制}
+
+表~\ref{tab:res}~汇总可控实验。8 个线程同时请求同一键，生产者只被调用 \SfCalls{} 次，墙钟 \SfWall{} 秒；6 个线程在生产者抛异常时只触发 \FailCalls{} 次调用，6 个等待者都收到同一份失败。关闭缓存后，4 个并发线程仍只触发 \CacheOffCalls{} 次调用（单飞独立于缓存），但两次顺序调用触发 \CacheOffSeq{} 次；TTL 设为 0.05 秒后，间隔 0.12 秒的两次调用触发 \TtlCalls{} 次。预算方面，0.5 秒作用域下单次尝试超时被压到 0.5 秒，0.05 秒作用域在睡眠 0.08 秒后正确报告预算耗尽。空输入直接短路：\EmptyLatency{} 秒返回本地结论，上游请求 \EmptyCalls{} 次。
+
+\begin{table}[htbp]
+\centering
+\caption{网关韧性机制的可控实验}
+\label{tab:res}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+场景 & 并发/次数 & 上游调用\\
+\midrule
+单飞（缓存开启） & 8 线程 & \SfCalls\\
+单飞（生产者失败） & 6 线程 & \FailCalls\\
+单飞（缓存关闭） & 4 线程 & \CacheOffCalls\\
+缓存关闭（顺序两次） & 2 次 & \CacheOffSeq\\
+TTL 过期（0.05\,s） & 2 次 & \TtlCalls\\
+空输入短路 & 1 次 & \EmptyCalls\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{护栏红队}
+
+17 类对抗输出全部按预期处置（\GuardMatched/\GuardCases）。其中 6 类被直接拒绝：非对象输出、\texttt{applicable} 非布尔、议题标签证据全部无效、反方解读命中禁词、缺少反方解读、议题为空；4 类被接受但标记降级：仅 L3 无支撑、具体主体归因、以偏概全、预测性表述；1 类被截断并追加不确定性说明：超出字数上限；另有 4 类被静默修正为合法值：清单外议题改判 \texttt{other} 并降置信度、标签数超上限截断到 3 条、置信度非法值回落到最低档、证据等级非法值回落到 L1；其余 2 类为合法输出与 \texttt{applicable=false} 正常出口。值得注意的是，“反方命中禁词”会先丢弃反方，再因“反方必填”而整体拒绝——这是一条链式规则，单看任一条都可能误判。
+
+\subsection{结果小结}
+
+五项实验共同支持一个结论：确定性层可以在大规模随机输入上保持不变量与低开销，护栏可以在不依赖模型自觉的前提下拦截典型对抗输出，而端到端链路的真实瓶颈在上游：冷启动延迟均值是缓存命中中位数的三个数量级以上，降级主要来自 JSON 解析失败与超时。把这三类事实分开报告，比只报告“平均准确率”更能说明系统在什么条件下可信。
+
+\section{讨论}\label{sec:discussion}
+
+\subsection{判定与生成分离的收益与代价}
+
+收益有三点。第一，\textbf{可审计}：结论可以逐项追溯到话术分、情绪分、逻辑分与证据权重，用户看到的不是一段无法复核的自然语言。第二，\textbf{抗注入}：即使用户文本包含“忽略以上规则”，判定函数也不读取自然语言指令，标签不会改变。第三，\textbf{可降级}：组件失败时系统输出“低置信度 + 缺失组件”，而不是编造一个完整结论。
+
+代价同样明显。第一，\textbf{信号损失}：把文本压缩成三个结构化信号，会丢掉反讽、隐喻与语境；本文的四档分层因此更像“言论形态分类”，而不是“真伪判定”。第二，\textbf{工程复杂度}：为了守住边界，需要缓存、单飞、预算、护栏、回退与大量测试，代码量远高于“一次 API 调用”。第三，\textbf{口径维护}：阈值与权重外置为 JSON 提高了可运维性，但也意味着换领域时要重新标定；本文的 66 分阈值在 5 个真实话题上 0/5 触发，就是口径与真实分布不匹配的例证。
+
+\subsection{与直接询问通用大模型的对比}
+
+直接询问通用大模型的优势是开放域理解与表达，缺点是无法保证证据、无法保证复现、无法防止注入，且敏感文本必须外发。本文的系统并不试图在开放域理解上超过通用模型，而是把模型放在它擅长且可被约束的位置：把文本解析成结构化信号、把结构化信号组织成受控解释。二者是“增强层”与“底座”的关系，而非替代关系。对于需要留痕、复核与批量处理的场景，判定与生成分离的收益大于其信号损失；对于一次性的开放式咨询，直接询问模型仍然更合适。
+
+\subsection{局限与威胁效度}
+
+本文的局限有八点。第一，端到端样本只有 12 条，且分组标注由作者完成，没有双人独立标注，因此不能据此估计总体准确率。第二，上游是共享网关，实验期间出现拥塞，冷启动延迟的方差很大；换用其他提供方或本地模型，数值会变，但“缓存命中一致、单飞收敛并发、降级显式”这三条机制性结论不依赖具体提供方。第三，结构化输出合规率偏低：\ApiCompFail{} 次组件调用未能解析，直接造成 \ApiDegraded{} 条样本降级。这既是上游能力问题，也提示后续应在提示词之外增加“结构化输出约束 + 一次修复重试”的独立层，而不是把压力继续放在判定侧。第四，未做检索与谣言 Agent 的端到端实验：实验环境的搜索后端受反爬干扰，取证链路大量降级，报告检索指标会误导读者，故留待后续。第五，风险分吞吐受配置重载限制，本文把它作为可优化项报告，而非隐藏。第六，缓存是进程内的，多 worker 部署时每个进程各有一份，跨进程一致性不在本文承诺范围内。第七，四档分层与风险分的阈值来自工程标定，尚未在大规模人工标注集上做敏感性分析。第八，同一阈值 66 在两处语义不同：档位判定用不小于（66.0 判为“高关注”），深读触发用严格大于（66.0 不触发）。实测确认 \texttt{classify(66.0)} 返回“高关注”而 \texttt{deep\_read\_triggered(66.0)} 返回假。改动任一侧都会改变既有行为，故本文保留现状并把这一不一致明示，而不宣称阈值语义统一。
+
+\section{结论}\label{sec:conclusion}
+
+本文把网络言论分析与谣言识别拆成“判定”与“生成”两层：判定由确定性纯函数完成，生成被封闭议题、证据校验、禁词与反方必填等代码侧护栏约束，任何失败都回退模板。2\,611 个离线用例、20\,000 组随机输入、17 类对抗输出与 12 条真实 API 样本表明：确定性层可以在零不变量违反的前提下达到每秒数万次的评分吞吐；护栏可以把典型对抗输出全部按预期处置；缓存与单飞能把重复与并发请求的上游放大压到 1 倍；而端到端延迟与降级主要由上游决定。后续工作有三项：把规则加载缓存到进程内以提升判定吞吐；在可用的检索环境下补齐取证链路的端到端评估；以及在双人标注集上对阈值做敏感性分析。
+
+\section*{声明}
+
+\paragraph{数据可用性}
+\begin{sloppypar}
+本文使用的 40 条文本、实验脚本与原始结果均随论文提供：\texttt{docs/paper/experiments/}（\texttt{dataset.json}、\texttt{bench\_deterministic.py}、\texttt{bench\_api.py}、\texttt{make\_tables.py}、\texttt{\_check\_claims.py}）与 \texttt{docs/paper/data/}（\texttt{deterministic.json}、\texttt{api\_summary.json}、\texttt{tests.json}）。论文中的数值由 \texttt{make\_tables.py} 从原始 JSON 自动生成，可逐项复算；原始结果由脚本生成，未手工修改。
+\end{sloppypar}
+
+\paragraph{伦理声明}
+实验仅使用作者构造的中文文本与公开政策文件，不含个人信息、未成年人信息或真实用户标识；未进行人体受试者研究。
+
+\paragraph{作者贡献}
+作者一：系统设计、代码实现、实验执行、论文撰写；作者二：方法讨论、结果复核、论文修改。
+
+\paragraph{利益冲突}
+作者声明无利益冲突。
+
+\paragraph{资助}
+本文未获得外部资助。
+
+\paragraph{AI 使用声明}
+本文的代码实现与实验脚本由作者设计并执行；AI 编程助手用于代码审查、文档整理与 \LaTeX{} 排版辅助。论文中的数值均来自仓库内可复现脚本的输出，作者已逐项核对。
+
+\begin{thebibliography}{99}
+\bibitem{ma2016rumor} Ma J, Gao W, Mitra P, et al. Detecting rumors from microblogs with recurrent neural networks[C]//Proceedings of the 25th International Joint Conference on Artificial Intelligence. 2016: 3818--3824.
+\bibitem{vosoughi2018science} Vosoughi S, Roy D, Aral S. The spread of true and false news online[J]. Science, 2018, 359(6380): 1146--1151. DOI: 10.1126/science.aap9559.
+\bibitem{shu2017fake} Shu K, Sliva A, Wang S, et al. Fake news detection on social media: A data mining perspective[J]. ACM SIGKDD Explorations Newsletter, 2017, 19(1): 22--36. DOI: 10.1145/3137597.3137600.
+\bibitem{brown2020language} Brown T B, Mann B, Ryder N, et al. Language models are few-shot learners[C]//Advances in Neural Information Processing Systems 33. 2020: 1877--1901.
+\bibitem{ji2023hallucination} Ji Z, Lee N, Frieske R, et al. Survey of hallucination in natural language generation[J]. ACM Computing Surveys, 2023, 55(12): 1--38. DOI: 10.1145/3571730.
+\bibitem{perez2022ignore} Perez F, Ribeiro I. Ignore previous prompt: Attack techniques for language models[EB/OL]. arXiv:2211.09527, 2022.
+\bibitem{greshake2023not} Greshake K, Abdelnabi S, Mishra S, et al. Not what you've signed up for: Compromising real-world LLM-integrated applications with indirect prompt injection[C]//Proceedings of the 16th ACM Workshop on Artificial Intelligence and Security. 2023: 79--90.
+\bibitem{lewis2020rag} Lewis P, Perez E, Piktus A, et al. Retrieval-augmented generation for knowledge-intensive NLP tasks[C]//Advances in Neural Information Processing Systems 33. 2020: 9459--9474.
+\bibitem{es2024ragas} Es S, James J, Espinosa-Anke L, et al. RAGAS: Automated evaluation of retrieval augmented generation[C]//Proceedings of the 18th Conference of the European Chapter of the Association for Computational Linguistics: System Demonstrations. 2024: 150--158.
+\bibitem{rebedea2023nemo} Rebedea T, Dinu R, Sreedhar M N, et al. NeMo Guardrails: A toolkit for controllable and safe LLM applications with programmable rails[C]//Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing: System Demonstrations. 2023: 431--445.
+\bibitem{sculley2015hidden} Sculley D, Holt G, Golovin D, et al. Hidden technical debt in machine learning systems[C]//Advances in Neural Information Processing Systems 28. 2015: 2503--2511.
+\bibitem{breck2017mltest} Breck E, Cai S, Nielsen E, et al. The ML test score: A rubric for ML production readiness and technical debt reduction[C]//2017 IEEE International Conference on Big Data. 2017: 1123--1132. DOI: 10.1109/BigData.2017.8258038.
+\bibitem{zheng2023judging} Zheng L, Chiang W L, Sheng Y, et al. Judging LLM-as-a-judge with MT-Bench and Chatbot Arena[C]//Advances in Neural Information Processing Systems 36. 2023.
+\bibitem{cac2023deepfake} 国家互联网信息办公室, 工业和信息化部, 公安部. 互联网信息服务深度合成管理规定[Z]. 2022-11-25 发布, 2023-01-10 施行.
+\bibitem{piyao} 中国互联网联合辟谣平台[EB/OL]. \url{https://www.piyao.org.cn/}, 2026-11-25.
+\end{thebibliography}
+
+\end{document}

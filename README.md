@@ -113,7 +113,8 @@
 ├── my_website/                 启动器（start.bat / start.sh，支持 --lan 开局域网）与说明，实际代码在 src/mylocalai/web/
 ├── scripts/                    仓库级辅助脚本（gen_pwa_icons.py：生成添加到桌面所需图标）
 ├── tests/                      离线测试套件与真实 API 端到端脚本（import mylocalai.*）
-├── docs/                       检验报告、修复说明、项目/研究报告与关注度标定报告
+├── docs/                       检验报告、修复说明、项目/研究报告与关注度标定报告；
+│                               docs/paper/ 为中文 LaTeX 论文（main.tex + 实验脚本 + 原始数据）
 ├── pyproject.toml              src 布局包定义（pip install -e .）
 └── archive/                    遗留资产归档区（2026-10-30 清场建立，不入库）
 ```
@@ -548,6 +549,10 @@ CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
 - `docs/异步状态窗口清单-2026-11-22.md` —— 待办与状态口径清单（阶段进度对齐）。
 - `docs/评估-对比通用大模型-2026-11-22.md` —— 通用大模型（DeepSeek 等）对比评估报告
   （含网页版真机实测章节与可复现对比实验脚本 `scripts/compare_llm.py`）。
+- `docs/paper/main.tex` —— **中文 LaTeX 论文**《判定与生成分离：面向网络言论分析与谣言识别的
+  确定性判定系统设计与实证评估》（XeLaTeX + ctex 编译，15 页，含中英文摘要、7 节正文与
+  声明/参考文献）。数值由 `docs/paper/experiments/make_tables.py` 从
+  `docs/paper/data/` 的原始 JSON 生成，可逐项复算；实验脚本与数据集在同一目录。
 - `src/mylocalai/rumor/README.md` —— 谣言 Agent 的架构、证据本、受控浏览、MCP 与降级行为。
 - `my_website/README.md` —— 展示网站的启动方式与页面功能。
 
