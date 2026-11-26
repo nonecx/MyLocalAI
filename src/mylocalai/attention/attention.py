@@ -281,6 +281,26 @@ def load_profile(name: str | None = None,
     return params, warnings
 
 
+def active_profile_name(path: str | os.PathLike | None = None) -> str:
+    """返回当前生效的档位名（配置 `active_profile` 合法时用它，否则 DEFAULT_PROFILE）。
+
+    只负责"名字"，参数仍以 `load_profile()` 为准。用途：结论卡 / `/api/attention`
+    要把实际采用的档位如实回显，不能让前端猜（猜错就是把两档分数混在一个标签下）。
+    配置缺失、JSON 写坏、档位名不存在时一律退回 `DEFAULT_PROFILE`，**永不抛异常**。
+    """
+    target = Path(path) if path is not None else RULES_PATH
+    try:
+        with open(target, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return DEFAULT_PROFILE
+    if isinstance(data, dict):
+        candidate = data.get("active_profile")
+        if isinstance(candidate, str) and candidate.strip() in PROFILES:
+            return candidate.strip()
+    return DEFAULT_PROFILE
+
+
 def profile_bands(name: str | None = None) -> list[dict]:
     """取档位对应的档位表（bands）。档位不存在时退回默认档。"""
     chosen = name if name in PROFILES else DEFAULT_PROFILE

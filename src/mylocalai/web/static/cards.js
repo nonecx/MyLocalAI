@@ -162,6 +162,14 @@
     const evTotal = Number(c.evidence_total) || 0;
     const conf = String(c.confidence || "");
     const recheck = Array.isArray(c.recheck_conditions) ? c.recheck_conditions : [];
+    /* 关注度 E（2026-11-25 任务 B）：只是结论卡上的一行附加信息，不参与任何判定。
+       后端只用本轮已取回的检索结果估 x/y/z（不新增联网）；估不出时整个字段缺失，
+       这里据此**整行不渲染**——绝不显示 0 或占位值。有值时带「代理/估计值」徽章
+       （与 renderHeat 同口径），并注明只适合同口径相对排序。 */
+    const att = (c.attention && typeof c.attention === "object") ? c.attention : null;
+    const attE = att ? Number(att.e) : NaN;
+    const hasAttention = att !== null && Number.isFinite(attE) && attE > 0 && attE < 100;
+    const attFlags = (att && Array.isArray(att.proxy_flags)) ? att.proxy_flags : [];
     /* presentation === "simple"（v6 普通用户档案工作区）：换标题并加一行说明，
        保持 layperson 简化语气——简化必须看得见。全角色都只给标签与档位
        （不再有"普通视图才藏分数"的差别），说明行只讲"直接给结论 + 档案库可查"。 */
@@ -177,6 +185,18 @@
           <span class="badge gray">证据充分度：官方 ${Number(suff.official) || 0} · 非官方 ${Number(suff.unofficial) || 0} · 未知 ${Number(suff.unknown) || 0} / 共 ${Number(suff.total) || 0} 条</span>
         </div>
         ${asOfLine(c.as_of)}
+        ${hasAttention ? `
+        <div class="chat-dims">
+          <div class="dim-row"><span class="k">关注度 E</span><span class="v">${attE.toFixed(2)}</span></div>
+        </div>
+        <div class="chat-badges">
+          ${att.band ? `<span class="badge gray">${escapeHtml(String(att.band))}</span>` : ""}
+          ${att.profile ? `<span class="badge gray">档位 ${escapeHtml(String(att.profile))}</span>` : ""}
+          ${attFlags.length
+            ? `<span class="badge amber">代理/估计值：${escapeHtml(attFlags.join("、"))}</span>`
+            : '<span class="badge amber">代理 / 估计值</span>'}
+        </div>
+        <p class="chat-basis">关注度 E 由本轮已取回的检索结果估算，只适合同口径相对排序，不参与真伪判定。</p>` : ""}
         ${renderEvidencePreview(preview, evTotal)}
         ${recheck.length ? `
         <div class="chat-recheck">

@@ -79,6 +79,52 @@ def _now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+def _attention_row(entries: List[Dict[str, Any]], as_of: str,
+                   query: str = "") -> Optional[Dict[str, Any]]:
+    """结论卡附带的关注度 E 行（**只增展示字段，不参与任何判定**）。
+
+    口径（2026-11-25 任务 B）：
+      - x/y/z 只由**本轮核查已经取回的检索结果**（证据本 entries）估算，
+        复用 `attention.estimate.estimate_from_search`，**不新增任何联网调用**；
+      - 估不出来（没有条目 / quality=missing / 分数算不出）时返回 None，
+        调用方据此**整行省略**，绝不显示 0 或占位值；
+      - 返回结构与 `/api/attention` 的展示字段同口径：
+        {e, band, quality, estimated, proxy_flags, as_of, profile}；
+      - 本函数不碰 risk_score / confidence / verdict：E 只是卡上一行附加信息，
+        不新增降级态（估参失败就是"没有这个字段"，不是 degraded）。
+
+    proxy_flags 口径与 estimate.py 一致：x 是检索命中独立来源数（下限），
+    y 恒为量级代理；z 抽到公开留言数才算 z_proxy，否则 z_missing（缺失≠真实为 0）。
+    """
+    items = [e for e in (entries or []) if isinstance(e, dict)]
+    if not items or not as_of:
+        return None
+    try:
+        from mylocalai.attention import attention as _attn
+        from mylocalai.attention import estimate as _estimate
+
+        est = _estimate.estimate_from_search(str(query or ""), items)
+        if str(est.quality) == "missing" or int(est.x) <= 0:
+            return None
+        profile = _attn.active_profile_name()
+        params, _warnings = _attn.load_profile(profile)
+        score = float(_attn.attention_score(float(est.x), float(est.y), float(est.z), params))
+        band = str(_attn.classify(score, _attn.profile_bands(profile)))
+        flags = ["x_lower_bound", "y_proxy",
+                 "z_proxy" if float(est.z) > 0 else "z_missing"]
+        return {
+            "e": score,
+            "band": band,
+            "quality": str(est.quality),
+            "estimated": bool(est.estimated),
+            "proxy_flags": flags,
+            "as_of": str(as_of),
+            "profile": profile,
+        }
+    except Exception:  # noqa: BLE001  关注度是附加信息，估不出就不出字段、不影响卡片
+        return None
+
+
 class DossierService:
     """档案域编排门面（store 之上的业务语义层）。"""
 
@@ -170,6 +216,15 @@ class DossierService:
                              if k in result},
             )
             card["label"] = str(result.get("label", ""))
+            # 关注度 E（代理估计）：只用**本轮已取回的检索结果**估参，不新增联网。
+            # 估不出就整行不加（不显示 0/占位），也不改 confidence/risk_score——
+            # E 不参与判定，只作卡上的附加信息行。
+            attention_row = _attention_row(
+                entries, card["as_of"],
+                query=str(result.get("claim") or
+                          (book.get("claim") if isinstance(book, dict) else "") or ""))
+            if attention_row is not None:
+                card["attention"] = attention_row
             out["version"] = version
             out["card"] = card
 

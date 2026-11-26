@@ -463,7 +463,8 @@ def _attention_payload(x: float, y: float, z: float,
     """算一次关注度，返回可直接给前端的完整 payload（含分项、档位、深读标记）。
 
     输入非法时抛 400，而不是让 ValueError 冒成 500：这是用户填错数字，不是服务故障。
-    `profile` 为空时用默认档（spec），非法档位名会告警并回退默认档。
+    `profile` 为空时用 `attn_rules.json` 的默认档（2026-11-25 起为 reachable），
+    非法档位名会告警并回退默认档。
     """
     params, warnings = _attn.load_profile(profile or None)
     try:
@@ -500,7 +501,8 @@ def attention_score_api(req: AttentionRequest) -> Dict[str, Any]:
     """关注度评分：手动给定 x（文章数）/ y（阅读量）/ z（留言量）。
 
     纯确定性：不调用大模型、不联网，同一组输入必然复现同一分数。
-    返回 E、S、三个加权分项、档位、以及是否触发深读（E > 66 才触发，严格大于才算）。
+    返回 E、S、三个加权分项、档位、以及是否触发深读（默认档 reachable 用同批
+    Top-20% 分位口径；显式 profile="spec" 仍是 E > 66 的旧口径）。
     触发时附带 `deep_read` 解读（受控生成：议题标签 + 张力 + 现象 + 反方 + 边界；
     LLM 不可用则回退本地模板并标 degraded）。
     """

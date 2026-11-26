@@ -22,9 +22,12 @@ from tempfile import TemporaryDirectory
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from mylocalai.core.card import derive_card  # noqa: E402
 from mylocalai.core.privacy import DEFAULT_PREFERENCES, PrivacyPreferences, _validated  # noqa: E402
 from mylocalai.dossier.service import DossierService  # noqa: E402
 from mylocalai.dossier.store import DossierStore  # noqa: E402
+from mylocalai.attention import attention as A  # noqa: E402
+from mylocalai.attention.estimate import estimate_from_search  # noqa: E402
 
 
 def _entry(url: str, kind: str, tier: str, stance: str) -> dict:
@@ -291,6 +294,62 @@ class TestCompareAndDegradation(DossierServiceTestBase):
         out2 = self.svc.record_speech_analysis(did, {"conclusion": "理性探讨"})
         self.assertTrue(out2.get("degraded"))
         self.assertIsNone(out2["version"])
+
+
+class TestAttentionRowOnConclusionCard(DossierServiceTestBase):
+    """结论卡上的关注度 E 行（2026-11-25 任务 B）：只增展示字段，不参与判定。
+
+    硬约束：
+      - x/y/z 只来自**本轮已取回的检索结果**（证据本 entries），不新增联网；
+      - 估不出（无条目 / quality=missing）→ 整行省略，不显示 0/占位；
+      - E 不进 risk_score / confidence / evidence_sufficiency，也不新增降级态。
+    """
+
+    def test_card_attention_estimated_from_this_round_entries(self):
+        did = self.svc.start_dossier("自来水谣言", "听说自来水被下毒了")
+        out = self.svc.record_analysis(did, agent_result(entries=ENTRIES_V1))
+        card = out["card"]
+        att = card.get("attention")
+        self.assertIsInstance(att, dict)
+        self.assertEqual(set(att), {"e", "band", "quality", "estimated",
+                                    "proxy_flags", "as_of", "profile"})
+        # 逐位等于"同一批证据 + 默认档参数"的确定性结果（证明没有另算一套口径）
+        est = estimate_from_search("", ENTRIES_V1)
+        expected = A.attention_score(est.x, est.y, est.z,
+                                     A.PROFILES[A.DEFAULT_PROFILE]["params"])
+        self.assertAlmostEqual(att["e"], expected, places=12)
+        self.assertEqual(att["profile"], A.DEFAULT_PROFILE)
+        self.assertEqual(att["band"], A.classify(expected))
+        self.assertTrue(att["estimated"])
+        self.assertIn(att["quality"], ("exact", "estimated"))
+        self.assertEqual(att["as_of"], card["as_of"])
+        self.assertIn("y_proxy", att["proxy_flags"])
+
+    def test_card_omits_attention_when_no_evidence(self):
+        """无检索结果 → 整行省略（不是 0、不是占位），也不把卡片标成 degraded。"""
+        did = self.svc.start_dossier("空证据", "没有检索到任何东西")
+        out = self.svc.record_analysis(did, agent_result(entries=[]))
+        card = out["card"]
+        self.assertNotIn("attention", card)
+        self.assertFalse(bool(out.get("degraded")))
+        self.assertEqual(self.store.runs(did)[0]["status"], "ok")
+
+    def test_attention_does_not_change_risk_score_or_confidence(self):
+        """同一输入：加不加 attention 行，判定字段逐位相同（E 不参与判定）。"""
+        did = self.svc.start_dossier("t", "x")
+        out = self.svc.record_analysis(did, agent_result(entries=ENTRIES_V1))
+        card = out["card"]
+        self.assertIn("attention", card)
+        expected = derive_card({"label": "疑似谣言", "risk_score": 62},
+                               ENTRIES_V1, as_of=card["as_of"])
+        for key in ("label", "risk_score", "confidence", "evidence_sufficiency",
+                    "recheck_conditions", "verdict_basis"):
+            self.assertEqual(card[key], expected[key], f"判定字段 {key} 被 attention 扰动")
+        # 落库结论行同样不含 attention（数据层只存判定口径，不把展示字段混进去）
+        conclusion = self.store.conclusions(did)[0]
+        self.assertEqual(conclusion["risk_score"], 62)
+        self.assertEqual(conclusion["confidence"], "medium")
+        self.assertNotIn("attention", conclusion["raw_verdict"])
 
 
 if __name__ == "__main__":

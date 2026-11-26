@@ -379,7 +379,9 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 2615 个用例（unittest discover 全量，2026-11-25 前端证据工作台视觉层
+离线套件共 2616 个用例（unittest discover 全量，2026-11-25 结论卡挂关注度 E 落地后实测，
+本次新增 3 例：结论卡带 E 行、无证据时整行省略、E 不影响 risk_score；
+2026-11-25 前端证据工作台视觉层
 （`static/ui-polish.css` + PWA 预缓存 iOS 图标）落地新增 2 例：主题样式引用/预缓存、
 apple-touch-icon 预缓存；2026-11-25 角色切换入口 v8 落地
 （顶栏角色标签 / 菜单一键换角色 / 左栏入口 + cards.js 收口 apiPath 补实现）新增 2 例：

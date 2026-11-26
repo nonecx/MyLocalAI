@@ -122,6 +122,15 @@ def _verify_digest(result: Dict[str, Any], card: Optional[Dict[str, Any]]) -> st
     lines.append(f"- 标签：{label or '（无）'}（verdict.assess() 纯函数输出，大模型不参与打分）")
     if card:
         lines.append(f"- 置信度：{card.get('confidence', '')}；证据截至：{card.get('as_of', '') or '未知'}")
+        # 关注度 E 只是卡上附加信息：代理估计、不参与任何判定（不进 risk/verdict/置信度）。
+        att = card.get("attention") if isinstance(card.get("attention"), dict) else {}
+        try:
+            e_value = float(att.get("e")) if att else None
+        except (TypeError, ValueError):
+            e_value = None
+        if e_value is not None and 0.0 < e_value < 100.0:
+            lines.append(f"- 关注度 E：{e_value:.2f}（代理估计，仅适合同口径相对排序；"
+                         f"不参与真伪判定）")
         suff = card.get("evidence_sufficiency") or {}
         if suff:
             lines.append(f"- 证据充分度：官方 {suff.get('official', 0)} / 非官方 "
