@@ -3,5 +3,23 @@
   "params": {"x0":100,"y0":100000,"z0":1000,"w_x":0.2,"w_y":0.5,"w_z":0.3,"lambda":0.7,"epsilon":1e-06},
   "bands": [{"min":66,"label":"高关注"},{"min":50,"label":"中关注"},{"min":33,"label":"低关注"},{"min":0,"label":"冷启动"}],
   "deep_read_threshold": 66,
-  "active_profile": "spec"
+  "active_profile": "spec",
+  "phenomenon": {
+    "_comment": "现象判读（attention.phenomenon）：只判形态、不改 E。阈值口径为「同口径相对 · 代理估计」，写坏时 phenomenon.load_phenomenon_rules 退回内置默认并留告警；labels 为五档中文档位名，可单独改文案。",
+    "thresholds": {
+      "spread_min": 20,
+      "engagement_min": 0.002,
+      "resonance_min": 5,
+      "single_point_reach": 1000000,
+      "single_point_resonance": 500
+    },
+    "labels": {
+      "broad_deep": "全网热议",
+      "broad_shallow": "广而浅·媒体议题",
+      "narrow_deep": "窄而深·圈层激辩",
+      "single_point": "单点引爆",
+      "low_attention": "低度关注",
+      "unknown": "无法判读"
+    }
+  }
 }

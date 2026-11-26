@@ -21,10 +21,37 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 
+def _attach_phenomenon(detail: Dict[str, Any], profile: Optional[str] = None) -> Dict[str, Any]:
+    """给一份关注度 detail 补上「现象判读」字段（失败不影响主结果）。
+
+    判读口径与网页端 /api/attention 完全一致：都走 `attention.phenomenon.classify_phenomenon`，
+    x/y/z 直接取 detail 里的值，proxy_flags 原样透传，保证 CLI 与网页同口径。
+    """
+    if not isinstance(detail, dict):
+        return detail
+    try:
+        from mylocalai.attention.phenomenon import classify_phenomenon
+
+        detail["phenomenon"] = classify_phenomenon(
+            detail.get("x", 0.0),
+            detail.get("y", 0.0),
+            detail.get("z", 0.0),
+            profile=detail.get("profile") or profile,
+            proxy_flags=detail.get("proxy_flags"),
+        )
+    except Exception:  # noqa: BLE001  判读是附加信息，算不出也不能影响主流程
+        pass
+    return detail
+
+
 def attention_for_text(query: str = "",
                        allow_network: bool = False,
                        profile: Optional[str] = None) -> Dict[str, Any]:
-    """给一段文本/话题算关注度分数（原 classic.judge._attention_score_for_analysis）。"""
+    """给一段文本/话题算关注度分数（原 classic.judge._attention_score_for_analysis）。
+
+    返回的 detail 里始终带 `phenomenon`（五档形态判读，纯函数、零 LLM）；
+    判读本身失败时字段缺失，主关注度结果照常返回。
+    """
     try:
         from mylocalai.attention import attention as _attn
 
@@ -38,7 +65,7 @@ def attention_for_text(query: str = "",
                 detail.update(est.to_dict())
                 detail["estimated"] = True
                 detail["quality"] = est.quality
-                return detail
+                return _attach_phenomenon(detail, profile)
             except Exception as exc:  # noqa: BLE001  检索失败要能退回占位结果
                 detail = _baseline_attention(_attn)
                 detail["note"] = (
@@ -46,7 +73,7 @@ def attention_for_text(query: str = "",
                     "已退回基准值；这不代表真实热度")
                 detail["estimated"] = True
                 detail["quality"] = "fallback"
-                return detail
+                return _attach_phenomenon(detail, profile)
 
         detail = _baseline_attention(_attn)
         if profile:
@@ -62,7 +89,7 @@ def attention_for_text(query: str = "",
                     detail["profile"] = effective
             except Exception:  # noqa: BLE001  档位切换失败不影响主流程
                 pass
-        return detail
+        return _attach_phenomenon(detail, profile)
     except Exception:  # noqa: BLE001  关注度是附加信息，算不出也不能影响主流程
         return {}
 

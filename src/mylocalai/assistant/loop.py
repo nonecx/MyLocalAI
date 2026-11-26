@@ -482,8 +482,12 @@ def _real_service(name: str, rules: Dict[str, Any],
     if name == "heat_formula":
         def _heat_formula(x: float, y: float, z: float) -> Dict[str, Any]:
             from mylocalai.attention import attention as attn
+            from mylocalai.attention.phenomenon import classify_phenomenon
             detail = attn.score_detail(float(x), float(y), float(z))
             detail.setdefault("profile", attn.DEFAULT_PROFILE)
+            # 现象判读（五档形态）：纯函数、零 LLM，与 attention_for_text / 网页接口同口径
+            detail["phenomenon"] = classify_phenomenon(
+                detail["x"], detail["y"], detail["z"], profile=detail["profile"])
             return detail
         return _heat_formula
 
