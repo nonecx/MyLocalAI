@@ -113,7 +113,8 @@
 │   ├── util/                   text_safety（代理项规整）/ console_io（stdio 规整）
 │   └── cli.py                  命令行入口（python -m mylocalai.cli）
 ├── my_website/                 启动器（start.bat / start.sh，支持 --lan 开局域网）与说明，实际代码在 src/mylocalai/web/
-├── scripts/                    仓库级辅助脚本（gen_pwa_icons.py：生成添加到桌面所需图标）
+├── scripts/                    仓库级辅助脚本（gen_pwa_icons.py：生成添加到桌面所需图标；
+│                               audit_capability_usage.py：只读能力使用率审计）
 ├── tests/                      离线测试套件与真实 API 端到端脚本（import mylocalai.*）
 ├── docs/                       检验报告、修复说明、项目/研究报告与关注度标定报告
 ├── pyproject.toml              src 布局包定义（pip install -e .）
@@ -473,7 +474,10 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 2662 个用例（unittest discover 全量，2026-11-25 检索层韧性补齐
+离线套件共 2662 个用例（unittest discover 全量，2026-11-25 能力使用率审计落地后实测，
+本次新增 44 例（`tests/test_capability_audit.py`：只读契约 / 空库 / 坏库 / 聚合 /
+接线对照 / JSON 键冻结 / CLI）；
+2026-11-25 检索层韧性补齐
 （反爬共用判定 + 源冷却 + RSS/Atom 源 + 降级六态 + 上层接线）后实测，
 本次新增 `tests/test_retrieval_resilience.py` 46 例：验证页三路识别与冷却、
 冷却到期恢复、API 源重试退避/健康账本/阈值跳过、坏配置回默认告警、
@@ -589,6 +593,55 @@ CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
 另有 `tests/run_module_tests.py`（12 条内置用例全模块跑一遍并落盘）、
 `tests/smoke_api.py`（配置自检 + 连通性）。
 
+## 能力使用率审计（2026-11-25）
+
+**能力多 ≠ 都用上。** 项目建了 13 项用户能力、20 个对话工具 action、14 份执行层
+`SKILL.md`，但"有代码""有文档""能路由""被用过"是四件不同的事。本节的审计把四者
+摆到一张表上，结论见 `docs/能力使用率审计-2026-11-25.md`。
+
+```bash
+# 人读表格（默认读 data/dossier.db；DOSSIER_DB_PATH 或 --db 可换库）
+.venv/Scripts/python.exe -X utf8 scripts/audit_capability_usage.py
+
+# 机器可读 JSON（键集合由脚本内 SCHEMA_VERSION 冻结，供下游解析）
+.venv/Scripts/python.exe -X utf8 scripts/audit_capability_usage.py --json
+```
+
+**口径**（`scripts/audit_capability_usage.py`，纯函数化，`tests/test_capability_audit.py` 守护）：
+
+| 口径 | 怎么算 | 为什么要这么算 |
+| --- | --- | --- |
+| 工具调用 | `tool_runs` 按 `tool` 聚合：次数 / 最近一次 / 成功·失败·降级·其它 | 唯一记录"真的跑过什么"的表；失败优先于降级，超时不算成功 |
+| 复合能力入口 | 数 `dossiers` / `analysis_runs` / `batches` / `batch_items` / `subscriptions` / `subscription_runs` / `scan_runs` / `scan_reports` / `attention_snapshots` / `claim_fingerprints` | 面板类能力的真实入口不在对话里，只能数表 |
+| 能力清单对照 | 反射取四份清单求差集：运行时注册表（`AssistantLoop().registry`）、路由枚举（`router.TOOL_ACTIONS`）、各 `tools_*.register_all` 能注册的名字、能力注册表（13 条） | 差集才能区分"没被用"和"接不上"；清单不硬编码，代码改了审计自动跟着变 |
+| 只读 | `mode=ro` + `PRAGMA query_only=1`，不建表、不迁移、不联网 | 审计工具绝不能改被审计的对象 |
+
+**三类接线问题（本机实测，不是推测）**：
+
+1. **只有文件没有代码**：`skills/research/agent/SKILL.md` 与
+   `skills/authority/agent/SKILL.md` 描述的 `mode="agent"` 受限循环**未实现**
+   （`ResearchSkills.run` / `AuthoritySkills.run` 都不接受 `mode` 形参，
+   `agent_loop.run_agent_loop` 无调用方，两份文档不被任何代码注入模型）。两份文档
+   头部已标「当前状态：未接线……改了也不生效」。配套的 `data/skills_preferences.json`
+   模式开关同样预留未接线：**设置页没有「技能」页**，`/api/skills/preferences` 路由模块
+   存在但**未挂载**（访问返回 404），改了不影响执行——现行统一走固定阶段 pipeline。
+2. **注册但不可路由**：`platform_feed` 在 `assistant/tools_platform.py` 里
+   `register_all` 能注册，但**不在** `router.TOOL_ACTIONS`（20 个 action），**不在**
+   `assistant_rules.json` 的 `tool_allowlist` / `role_tool_allowlists`，也**不在**
+   `AssistantLoop` 的运行时注册表里——所以它**只有平台页（REST `/api/platform/*`）
+   可达**：对话里既没有自然语言路由，结构化 action 通道也会以"未注册的工具"拒绝。
+   `router_system` 里**故意不写它**（避免模型幻觉调用），接线要连带改四处
+   （注册表 / 路由枚举 / allowlist / prompts），不是只加一行。
+3. **阈值不可达**：`deep_read` 在 `spec` 档 5 个真实头部话题上 0/5 越过 `E>66`
+   （最高 54.81，见 `docs/关注度公式与深读阈值标定报告.md`）。另一分支在修，本分支
+   只记录、不改阈值。
+
+**边界声明**：本机 `data/dossier.db` 的 `tool_runs` 只有 5 行（`compute_heat` 3 次、
+`insights` 2 次），`dossiers` / `analysis_runs` / `batches` / `subscriptions` 均为 0。
+**这不能代表用户使用**——本机库很年轻、只有单人单机跑过几次，0 只能说明"这台机器上
+还没用到"，不能说明"这项能力无用"。审计工具给的是**可复现的口径**，结论要等真实
+使用数据积累后再下；本节的"待砍"项只针对**接线缺失**，不针对能力价值。
+
 ## 已知局限
 
 - **单一提供方为默认**：默认只配 LongCat；备用链路需要自己填别家的密钥才生效。
@@ -605,11 +658,17 @@ CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
 - **演示级部署**：网站监听 127.0.0.1、单进程、无鉴权。对话会话/消息/工具运行与核查档案
   已持久化到 `data/dossier.db`（SQLite + WAL，重启保留）；`/api/analyze` 的历史记录仍是
   内存轻模式（重启清空，契约不变）。多 worker 部署时缓存与历史各自独立（见 `my_website/README.md`）。
+- **能力多于实际接线**：13 项能力 / 20 个对话 action 里，`platform_feed` 仅平台页（REST）
+  可达（不在路由枚举、不在 allowlist、不在运行时注册表，`router_system` 故意不写它）；
+  两个技能的 `mode="agent"` 受限循环与 `data/skills_preferences.json` 模式开关预留未接线。
+  口径与实测见「能力使用率审计」一节与 `docs/能力使用率审计-2026-11-25.md`。
 - **真实上游冒烟依赖提供方状态**：LongCat 有返回空 content 的前科（2026-10-14 检验报告、
   2026-10-31 M2 末冒烟复现两次），冒烟失败不代表链路回退——离线套件与 mock 闸门全绿为准。
 
 ## 文档
 
+- `docs/能力使用率审计-2026-11-25.md` —— **能力使用率审计报告**（本机实测数据、
+  能力/动作逐条判断表、三类接线问题、边界声明；配套 `scripts/audit_capability_usage.py`）。
 - `docs/Agent工作流规格-v0.1.md` —— **Agent 工作流实施基线**（用户能力、主张/传播证据双维判定、外发授权、分类保存与验收矩阵；规格不等于所有阶段已实现）。
 - `docs/取证技能-2026-11-05.md` —— 取证三技能（领域识别/信源发现/证据检索）的口径文档：分工、执行流程、安全模型、状态取值、预算与局限。
 - `docs/智能助手Skill工作流设计讨论-2026-11-07.md` —— Skill 融入工作流的问题与方向讨论汇总（两套证据链现状、能力分层、混合表达、内部机制不暴露、待决问题清单）。
