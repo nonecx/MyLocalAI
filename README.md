@@ -474,7 +474,8 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 2662 个用例（unittest discover 全量，2026-11-25 能力使用率审计落地后实测，
+离线套件共 2757 个用例（unittest discover 全量，2026-11-26 四条分支合并后实测
+（结论卡挂关注度 E / 现象判读层 / 检索层韧性 / 能力使用率审计）；2026-11-25 能力使用率审计落地后实测，
 本次新增 44 例（`tests/test_capability_audit.py`：只读契约 / 空库 / 坏库 / 聚合 /
 接线对照 / JSON 键冻结 / CLI）；
 2026-11-25 检索层韧性补齐
