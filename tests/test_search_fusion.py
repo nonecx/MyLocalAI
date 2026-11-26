@@ -96,8 +96,9 @@ class _CountingStub:
 
 
 def _reset_fusion_state() -> None:
-    """清进程级融合状态（健康账本 / 查询缓存）：用例互不串扰、不外溢到其它模块。"""
+    """清进程级融合/韧性状态（健康账本 / 冷却表 / 查询缓存）：用例互不串扰、不外溢。"""
     search_mod._API_SOURCE_HEALTH.clear()
+    search_mod.clear_source_cooldowns()
     search_mod._QUERY_CACHE.clear()
 
 
@@ -410,9 +411,12 @@ class FusionGuardTests(FusionTestBase):
         stubs = [_CountingStub("360", [{"title": "a", "url": "https://example.com/1"}]),
                  _CountingStub("baidu", [{"title": "b", "url": "https://example.com/2"}])]
         out = search_mod.search_all("守卫查询", providers=stubs)
-        self.assertEqual(set(out), {"query", "results", "engines"})   # 形状逐位不变
+        # 2026-11-25 检索层韧性（D）：基础三键 + 降级四态键恒定出现；槽位带 blocked/reason。
+        self.assertEqual(set(out), {"query", "results", "engines", "status", "degraded",
+                                    "all_blocked", "sources_configured", "api_sources",
+                                    "rss_sources", "web_sources", "degraded_reason"})
         for slot in out["engines"].values():
-            self.assertEqual(set(slot), {"ok", "error", "count"})     # 槽位键逐位不变
+            self.assertEqual(set(slot), {"ok", "error", "count", "blocked", "reason"})
         out2 = search_mod.search_all("守卫查询", providers=stubs)
         self.assertEqual((stubs[0].calls, stubs[1].calls), (2, 2))    # 显式路径逐次外发
         self.assertEqual([r.url for r in out2["results"]],

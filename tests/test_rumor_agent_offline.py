@@ -921,6 +921,9 @@ class TestSearchOffline(unittest.TestCase):
             text = ""
         S.BaiduProvider._degraded_until = 0.0
         self.addCleanup(setattr, S.BaiduProvider, "_degraded_until", 0.0)
+        # 2026-11-25 起验证页命中同时写进程级冷却表（health/上层可见）：清理时复位。
+        S.clear_source_cooldowns("baidu")
+        self.addCleanup(S.clear_source_cooldowns, "baidu")
         with mock.patch.object(S.requests, "get", return_value=Resp()) as g:
             _, err = S.BaiduProvider().search("q")
             self.assertIn("验证码", err)

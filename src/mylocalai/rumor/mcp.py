@@ -119,17 +119,25 @@ def _view_book(book: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def search_web(query: str, k: int = 6) -> str:
-    """专用搜索 API：搜索与查询词相关的网页，返回标题/链接/摘要/来源等级。"""
+    """专用搜索 API：搜索与查询词相关的网页，返回标题/链接/摘要/来源等级。
+
+    2026-11-25 检索层韧性（D）：返回体带 status / all_blocked / sources_configured /
+    degraded_reason——被反爬拦截时调用方能看出来是"源被拦"而不是"没有相关网页"。
+    """
     k = max(1, min(int(k) if str(k).lstrip("-").isdigit() else 6, 10))
     r = search_all(str(query or ""), k)
-    return json.dumps({
+    payload = {
         "query": r["query"],
         "engines": r["engines"],
         "results": [{
             "title": x.title[:60], "url": x.url, "snippet": x.snippet[:150],
             "date": x.date, "domain_tier": x.domain_tier,
         } for x in r["results"]],
-    }, ensure_ascii=False)
+    }
+    for key in ("status", "all_blocked", "sources_configured", "degraded_reason"):
+        if key in r:
+            payload[key] = r[key]
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def open_evidence_session(text: str) -> str:

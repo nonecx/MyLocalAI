@@ -271,7 +271,37 @@ def health() -> Dict[str, Any]:
         # （注册表会 fail-soft 退回内置提供方表，服务照常起）。原文在设置面板里看，
         # 这里给一个计数，便于不看页面也知道"配置没被正常加载"。
         "models": {"warnings": len(_model_registry.warnings())},
+        # 检索层韧性（2026-11-25）：反爬冷却与结构化源配置**如实呈现**——
+        # 冷却中的源（含剩余秒数与中文原因）与"只有网页解析源、遇反爬无备用"
+        # 都摆在这里，而不是让用户以为"联网核查什么都没查到"。
+        "retrieval": _retrieval_health(),
     }
+
+
+def _retrieval_health() -> Dict[str, Any]:
+    """检索层健康摘要（只读本地状态：冷却表 + search_sources.json 声明）。
+
+    失败一律降级为空摘要（health 端点本身不能成为新的故障点）：
+    冷却表读进程内状态、配置摘要读一个小 JSON，都不联网。
+    """
+    try:
+        from mylocalai.retrieval import search as _search
+        summary = _search.source_config_summary()
+        cooldowns = _search.cooldown_snapshot()
+        return {
+            "sources_configured": bool(summary.get("sources_configured")),
+            "api_sources": list(summary.get("api_sources") or []),
+            "rss_sources": list(summary.get("rss_sources") or []),
+            "cooldowns": cooldowns,
+            "cooldown_seconds": _search._cooldown_seconds(),
+            "note": ("" if summary.get("sources_configured") else
+                     "未配置 API/RSS 结构化源：只有网页解析源，遇反爬无备用通道"),
+            "error": str(summary.get("error") or ""),
+        }
+    except Exception as exc:  # noqa: BLE001  health 端点绝不因检索层故障 500
+        return {"sources_configured": False, "api_sources": [], "rss_sources": [],
+                "cooldowns": {}, "cooldown_seconds": 0.0,
+                "note": "", "error": f"{type(exc).__name__}: {exc}"}
 
 
 class _Slot:

@@ -302,7 +302,14 @@ class SearchApiSourceConfigTests(unittest.TestCase):
 
 
 class SearchApiSourceBitwiseGuardTests(unittest.TestCase):
-    """⑤未配置任何 API 源时，search_all / default_providers 行为逐位不变。"""
+    """⑤未配置任何 API/RSS 源时，search_all / default_providers 行为逐位不变。
+
+    2026-11-25 检索层韧性（D）：返回体新增降级四态字段（status/degraded/
+    all_blocked/sources_configured/api_sources/rss_sources/web_sources/
+    degraded_reason），槽位新增 blocked/reason——形状守卫按**新契约**钉住：
+    这些键恒定出现（显式 providers 与默认装配同一形状），未配置结构化源时
+    sources_configured=False 且 status=empty（真有源成功返回了 0 条）。
+    """
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -325,10 +332,19 @@ class SearchApiSourceBitwiseGuardTests(unittest.TestCase):
         with mock.patch.object(search_mod, "_SEARCH_SOURCES_PATH", path), \
                 mock.patch.object(search_mod, "default_providers", return_value=stubs):
             out = search_mod.search_all("q")
-        self.assertEqual(set(out), {"query", "results", "engines"})   # 无 skipped/scope 键
+        # 新契约：基础三键 + 降级四态键（恒定出现）；未配置结构化源 → False
+        self.assertEqual(set(out), {"query", "results", "engines", "status", "degraded",
+                                    "all_blocked", "sources_configured", "api_sources",
+                                    "rss_sources", "web_sources", "degraded_reason"})
+        self.assertFalse(out["sources_configured"])                # 只有网页解析源
+        self.assertEqual((out["api_sources"], out["rss_sources"]), ([], []))
+        self.assertEqual(out["status"], "ok")                      # 两源都成功
+        self.assertFalse(out["degraded"])
+        self.assertFalse(out["all_blocked"])
         self.assertEqual(set(out["engines"]), {"360", "baidu"})
         for slot in out["engines"].values():
-            self.assertEqual(set(slot), {"ok", "error", "count"})     # 槽位键逐位不变
+            self.assertEqual(set(slot), {"ok", "error", "count", "blocked", "reason"})
+            self.assertFalse(slot["blocked"])
         self.assertEqual(len(out["results"]), 2)
         self.assertFalse(out.get("blocked", False))
 

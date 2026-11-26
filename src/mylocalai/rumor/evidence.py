@@ -553,6 +553,19 @@ def collect_evidence(
             book["error"] = "外部搜索未授权，未执行网络检索"
             book["search_status"] = "blocked"
             break
+        # 2026-11-25 检索层韧性（D）：反爬拦截/无可用源必须与"搜过了没找到"分开。
+        # 命中时记 search_status=blocked_by_antibot（或 no_sources）并带中文原因，
+        # 否则下面会把 0 条误写成"搜索无结果"，看起来像"没有相关发现"。
+        status = str(result.get("status") or "")
+        if status in ("all_blocked", "no_sources", "all_failed") or result.get("all_blocked"):
+            book["error"] = str(result.get("degraded_reason") or "").strip() or (
+                "全部检索源被反爬拦截，未取得任何结果"
+                if (result.get("all_blocked") or status == "all_blocked")
+                else "没有可用的检索源，未取得任何结果")
+            book["search_status"] = ("blocked_by_antibot"
+                                     if (result.get("all_blocked") or status == "all_blocked")
+                                     else "search_unavailable")
+            break
         book["queries"].append({"query": q, "extra": extra,
                                 "engines": result.get("engines", {})})
         for r in result.get("results", []):
@@ -570,14 +583,22 @@ def collect_evidence(
     #   site: 定向搜索。只补搜、不回改上面"要不要辟谣轮"的判定；被墙或搜索异常时
     #   这一轮落空即可，不影响已拿到的证据。不传/传空时整段跳过——book 不含
     #   domain_round 键，输出与没有此参数时逐位一致（tests/test_rumor_domain_hints.py）。
-    if domain_hints and book.get("search_status") != "blocked":
+    if domain_hints and not book.get("search_status"):
         hosts = _domain_hint_hosts(domain_hints)
         if hosts:
             _run_domain_round(book, query, hosts, search_fn, seen_urls)
 
     if not book["entries"]:
-        if book.get("search_status") == "blocked":
+        search_status = str(book.get("search_status") or "")
+        if search_status == "blocked":
             book["verdict_hint"] = "外部搜索未授权，未执行核查"
+            return book
+        if search_status == "blocked_by_antibot":
+            # D：被反爬拦截 ≠ 没有发现。如实说"拦截"，不把 0 条写成"无证据"。
+            book["verdict_hint"] = "检索源被反爬拦截，未取得证据（不等于没有相关发现）"
+            return book
+        if search_status == "search_unavailable":
+            book["verdict_hint"] = "没有可用的检索源，未取得证据（不等于没有相关发现）"
             return book
         if book["error"] is None:
             book["error"] = "搜索无结果"

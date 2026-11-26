@@ -220,6 +220,37 @@ def _opinions_signals_from_rows(rows: Any) -> Dict[str, List[str]]:
     return signals
 
 
+def _search_result_payload(raw: Dict[str, Any],
+                           as_dict: bool = False) -> Dict[str, Any]:
+    """search_all 原始返回 → 工具/技能可消费的检索结果 dict（降级口径统一接线）。
+
+    2026-11-25 检索层韧性（D）：复用检索层已给出的降级口径，不新造第二套：
+      - degraded 优先取 raw["degraded"]（区分"真的 0 条"与"源不可用"）；
+        老形状（无该键）退回"没有任何引擎 ok"的既有判定；
+      - status/all_blocked/sources_configured 原样透传，error 取 degraded_reason，
+        让上层能把"全部源被反爬拦截"如实说出来，而不是显示成"没有发现"。
+    as_dict=False 给 search 工具（要 SearchResult 对象）；True 给技能管线
+    （search_fn 契约要 dict：url/title/snippet）——不过这一层会被当成坏形状丢弃。
+    """
+    engines = raw.get("engines") or {}
+    if "degraded" in raw:
+        degraded = bool(raw.get("degraded"))
+    else:
+        error = str(raw.get("error") or "")
+        degraded = (bool(raw.get("blocked")) or bool(error)
+                    or not any((e or {}).get("ok") for e in engines.values()))
+    error = str(raw.get("degraded_reason") or raw.get("error") or "")
+    if degraded and not error:
+        error = "检索后端均不可用"
+    rows: List[Any] = list(raw.get("results") or [])
+    if as_dict:
+        rows = [r.to_dict() if hasattr(r, "to_dict") else r for r in rows]
+    return {"results": rows, "degraded": degraded, "error": error, "engines": engines,
+            "status": str(raw.get("status") or ""),
+            "all_blocked": bool(raw.get("all_blocked")),
+            "sources_configured": bool(raw.get("sources_configured"))}
+
+
 class _ServiceBox:
     """服务注入盒（编排者契约）：注入优先，缺省键惰性 import 真实引擎。
 
@@ -494,11 +525,10 @@ def _real_service(name: str, rules: Dict[str, Any],
     if name == "search":
         def _search(query: str) -> Dict[str, Any]:
             from mylocalai.retrieval.search import search_all
-            raw = search_all(str(query), k=8)
-            engines = raw.get("engines") or {}
-            degraded = not any((e or {}).get("ok") for e in engines.values())
-            return {"results": raw.get("results") or [], "engines": engines,
-                    "degraded": degraded}
+            # D：直接复用 search_all 的降级口径——"真的 0 条"不算降级；被反爬拦截/
+            # 无可用源/全失败才算，并把中文原因透传给模型与卡片，免得把"全被拦截"
+            # 说成"没有发现"。
+            return _search_result_payload(search_all(str(query), k=8))
         return _search
 
     if name == "opinions":
@@ -608,18 +638,8 @@ def _real_service(name: str, rules: Dict[str, Any],
                             "error": "consent_denied: 外部检索未授权"}
                 from mylocalai.retrieval.search import search_all
                 raw = search_all(str(query), k=k)
-                engines = raw.get("engines") or {}
-                error = str(raw.get("error") or "")
-                degraded = (bool(raw.get("blocked")) or bool(error)
-                            or not any((e or {}).get("ok") for e in engines.values()))
-                if degraded and not error:
-                    error = "检索后端均不可用"
-                # search_all 给的是 SearchResult 对象，pipeline 的 search_fn 契约要 dict
-                # （url/title/snippet）——不过这一层，全部结果会被当成坏形状静默丢弃。
-                rows = [r.to_dict() if hasattr(r, "to_dict") else r
-                        for r in (raw.get("results") or [])]
-                return {"results": rows, "degraded": degraded,
-                        "error": error, "engines": engines}
+                # D：统一吃检索层的降级口径（含 all_blocked/no_sources 的中文原因）。
+                return _search_result_payload(raw, as_dict=True)
             transport = default_transport()
 
             def _fetch(url, *, allowed_domains=None, cancel_check=None, deadline=None):
@@ -657,18 +677,8 @@ def _real_service(name: str, rules: Dict[str, Any],
                             "error": "consent_denied: 外部检索未授权"}
                 from mylocalai.retrieval.search import search_all
                 raw = search_all(str(query), k=k)
-                engines = raw.get("engines") or {}
-                error = str(raw.get("error") or "")
-                degraded = (bool(raw.get("blocked")) or bool(error)
-                            or not any((e or {}).get("ok") for e in engines.values()))
-                if degraded and not error:
-                    error = "检索后端均不可用"
-                # search_all 给的是 SearchResult 对象，pipeline 的 search_fn 契约要 dict
-                # （url/title/snippet）——不过这一层，全部结果会被当成坏形状静默丢弃。
-                rows = [r.to_dict() if hasattr(r, "to_dict") else r
-                        for r in (raw.get("results") or [])]
-                return {"results": rows, "degraded": degraded,
-                        "error": error, "engines": engines}
+                # D：统一吃检索层的降级口径（含 all_blocked/no_sources 的中文原因）。
+                return _search_result_payload(raw, as_dict=True)
             # rules.json 是取页上限的唯一来源：默认 transport 单例用的是
             # SafeTransport 的硬编码默认值，不按本实例规则构造的话，
             # 运维改 rules.json 的 max_page_bytes/io_timeout_s/max_redirect_hops/
@@ -715,16 +725,8 @@ def _real_service(name: str, rules: Dict[str, Any],
                             "error": "consent_denied: 外部检索未授权"}
                 from mylocalai.retrieval.search import search_all
                 raw = search_all(str(query), k=k)
-                engines = raw.get("engines") or {}
-                error = str(raw.get("error") or "")
-                degraded = (bool(raw.get("blocked")) or bool(error)
-                            or not any((e or {}).get("ok") for e in engines.values()))
-                if degraded and not error:
-                    error = "检索后端均不可用"
-                rows = [r.to_dict() if hasattr(r, "to_dict") else r
-                        for r in (raw.get("results") or [])]
-                return {"results": rows, "degraded": degraded,
-                        "error": error, "engines": engines}
+                # D：统一吃检索层的降级口径（含 all_blocked/no_sources 的中文原因）。
+                return _search_result_payload(raw, as_dict=True)
             # rules.json 是取页上限的唯一来源（同 research_skills 口径）：
             # 不按规则构造 transport 的话，运维改 max_page_bytes/io_timeout_s/
             # max_redirect_hops/max_text_chars 对真实取页毫无作用。
