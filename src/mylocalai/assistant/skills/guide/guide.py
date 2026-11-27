@@ -37,12 +37,13 @@ from mylocalai.assistant.skills.collect_core import (
     CollectRunState,
     load_collect_rules,
     load_skill_prompt,
+    max_power_rules,
     utc_now_iso,
 )
 from mylocalai.assistant.skills.pipeline import normalize_text
 
 __all__ = ["GuideSkills", "guide_fact_check", "render_report", "load_rules",
-           "FIVE_STEPS", "FIVE_STEP_TITLES"]
+           "MAX_POWER_RULES", "FIVE_STEPS", "FIVE_STEP_TITLES"]
 
 #: 用户可见的三个进度阶段；不暴露内部技能名
 _PROGRESS_STAGES = ("解析问题", "组织讲解", "整理输出")
@@ -102,6 +103,9 @@ _RULE_LIMITS: Dict[str, Tuple[float, float]] = {
     "total_deadline_s": (1, 3600),
     "max_answer_chars": (200, 20000),
 }
+
+#: 最大功率覆盖：输入/调用/时限/输出长度配额抬到安全区间上限。
+MAX_POWER_RULES: Dict[str, Any] = max_power_rules(_RULE_LIMITS)
 
 _QUESTION_MAX_CHARS = 300
 

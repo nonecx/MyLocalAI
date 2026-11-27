@@ -30,14 +30,15 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from mylocalai.assistant.fingerprint import jaccard, normalize_claim, shingles
 
-__all__ = ["DEFAULT_COMPARISON_RULES", "load_rules", "compare_dossiers"]
+__all__ = ["DEFAULT_COMPARISON_RULES", "MAX_POWER_RULES", "load_rules", "compare_dossiers"]
 
 _HERE = Path(__file__).resolve().parent
 _RULES_PATH = _HERE / "rules.json"
 
 #: 内置默认值（与 rules.json 同值；rules.json 缺失/写坏时逐键兜底）。
 #: 三个裁剪键只影响**呈现量**（版本历史/证据条目/域名清单各显示多少），不动判定；
-#: similarity_threshold 与 assistant_rules.json 的 fingerprint_threshold 同口径。
+#: similarity_threshold 与 assistant_rules.json 的 fingerprint_threshold 同口径。最大功率
+#: 模式会把呈现条数抬到各自安全区间上限，不修改相似度阈值。
 DEFAULT_COMPARISON_RULES: Dict[str, Any] = {
     "max_versions": 10,
     "max_evidence_items": 20,
@@ -51,6 +52,12 @@ _RULE_LIMITS: Dict[str, Tuple[float, float]] = {
     "max_evidence_items": (1, 100),
     "max_domain_items": (1, 100),
     "similarity_threshold": (0.30, 0.95),
+}
+
+#: 最大功率模式只抬呈现条数；相似度阈值属于判定口径，保持原配置。
+MAX_POWER_RULES: Dict[str, Any] = {
+    key: bounds[1] for key, bounds in _RULE_LIMITS.items()
+    if key.startswith("max_")
 }
 
 #: data 键名锁定（SKILL.md 头部契约同款；测试按此锁定，增删键先改文档）

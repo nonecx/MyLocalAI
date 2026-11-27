@@ -143,6 +143,9 @@ cp .env.example .env        # Windows PowerShell: Copy-Item .env.example .env
 #     的提供方视为本地、自动放行；数据保留三项本期不在面板里改（保存时原值回传）
 #     GET  /api/privacy/preferences   查看当前授权
 #     PUT  /api/privacy/preferences   设置（面板保存走这条；也可 curl 直调）
+#     技能资源模式：设置 → 技能 → 常规 / 最大功率；或直接读写
+#     GET/PUT /api/skills/preferences。最大功率将技能配额和回合总时限抬到安全上限（3600s），
+#     用户可随时停止；隐私授权、单页安全参数与判定阈值保持不变。
 
 # 3. 自检 + 跑一次分析
 .venv/Scripts/python.exe tests/smoke_api.py            # 配置自检 + 连通性
@@ -769,7 +772,7 @@ CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
   verdict_basis 标记；映射外置在 `config/verdict_rules.json` 的 `card` 段。
 - **持久化**：核查自动建档（结论版本化 v1/v2…、证据按批次、分析运行记录），会话/消息/工具运行
   落 SQLite；重启后档案与会话都在。删除档案不是助手工具（只有程序内部可达）。
-- **回合预算与取消**：`CHAT_TURN_DEADLINE_S`（默认 180s）经 llm_cache 预算继承进引擎链；
+- **回合预算与取消**：`CHAT_TURN_DEADLINE_S`（默认 180s；最大功率模式默认 3600s，环境变量仍优先）经 llm_cache 预算继承进引擎链；
   前端 AbortController → SSE 断开 → 协作取消（agent 轮询 cancel_check、judge 四取消位），
   超时/取消都诚实降级、已有卡片照发。
 - **取证三技能与用户能力分层**（2026-11-20；该时点八项，后经第四波/第五波扩到**十三项**，见下方「Skill 通用/专用分类」与「第五波专用技能」两节）：彼时面向用户的能力共**八项**（事实核查 /
@@ -1107,7 +1110,7 @@ CLI + 计划任务是另一通道），隐私 fail-closed（外部检索未授�
    （`my_website/start.bat --lan` 或 `./start.sh --lan`）改成 `0.0.0.0` 并在控制台打印局域网地址；
    首次运行记得放行 Windows 防火墙。默认值不变（仍只有本机能访问），要开才开。
 
-前端视觉采用独立的 `static/ui-polish.css` 覆盖层，全站统一为**卷宗纸感**主题：米纸底（`--paper`）+ 墨蓝操作色（`--primary`）+ 朱砂强调色（`--accent`，只用于结论、风险与关键数字），标题用衬线字体（Georgia / 宋体）、正文用雅黑，形状收敛为小圆角单据感；覆盖对话页、监测平台、设置与档案弹层，并支持键盘焦点环与 `prefers-reduced-motion` 降级。主题色与 `manifest.webmanifest` 的 `theme_color`/`background_color` 同源，避免安装后色块割裂；该样式纳入 Service Worker 界面壳预缓存。业务结构与交互契约不变。
+前端视觉采用独立的 `static/ui-polish.css` 覆盖层，统一对话与监测平台的卷宗纸感证据工作台主题（米纸/暖白画布、墨蓝与深青绿操作色、朱砂风险强调、键盘焦点环与减少动态效果支持）；业务结构与交互契约不变。主题样式纳入 Service Worker 界面壳预缓存，并与 PWA 的主题色保持一致。
 
 小屏适配（`static/mobile.css`，最后引入、只覆盖不改旧规则）：≤900px 单列后把**对话区提到左栏之前**
 （否则手机首屏只看到会话列表与档案库）；≤720px 收紧顶栏与面板内边距、输入框字号统一 16px

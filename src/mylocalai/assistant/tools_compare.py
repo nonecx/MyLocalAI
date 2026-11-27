@@ -32,7 +32,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from mylocalai.assistant.registry import ToolRegistry, id_param
-from mylocalai.assistant.skills.comparison import compare_dossiers
+from mylocalai.assistant.skills.comparison import MAX_POWER_RULES, compare_dossiers
 from mylocalai.assistant.tools_guard import dossier_visible
 
 __all__ = ["register_all"]
@@ -237,7 +237,9 @@ def _compare_dossiers(ctx: Any, left_id: int, right_id: int) -> Dict[str, Any]: 
         if not visible:
             return _not_found(int(did))
     try:
-        result = compare_dossiers(store, int(left_id), int(right_id))
+        from mylocalai.assistant.skills.preferences import max_power_enabled
+        compare_rules = MAX_POWER_RULES if max_power_enabled() else None
+        result = compare_dossiers(store, int(left_id), int(right_id), rules=compare_rules)
     except Exception as exc:  # noqa: BLE001  纯函数自带"永不抛"外壳，这里是二道闸
         return _store_failure(f"对比执行异常（{type(exc).__name__}）")
     if not isinstance(result, dict) or not isinstance(result.get("data"), dict):

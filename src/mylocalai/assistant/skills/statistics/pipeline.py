@@ -50,6 +50,7 @@ from mylocalai.assistant.skills.collect_core import (
     classify_source,
     load_collect_rules,
     load_skill_prompt,
+    max_power_rules,
     render_counts_line,
     url_key,
     utc_now_iso,
@@ -63,7 +64,7 @@ from mylocalai.assistant.skills.transport import strip_query_operators
 from mylocalai.retrieval.sources import tier_rank
 
 __all__ = ["StatisticsSkills", "check_statistics", "render_report", "load_rules",
-           "VERDICTS", "STATUSES", "TASK_STATUSES"]
+           "MAX_POWER_RULES", "VERDICTS", "STATUSES", "TASK_STATUSES"]
 
 #: 口径比对结论（封闭枚举，四态；全部由代码产出，模型不参与判定）
 VERDICTS = ("consistent", "inconsistent", "caliber_mismatch", "unverifiable")
@@ -120,6 +121,9 @@ _RULE_LIMITS: Dict[str, Tuple[float, float]] = {
     "max_redirect_hops": (0, 10),
     "max_quote_chars": (10, 5000),
 }
+
+#: 最大功率覆盖：计数/长度/条数/总时限抬到安全区间上限；单页资源限制不变。
+MAX_POWER_RULES: Dict[str, Any] = max_power_rules(_RULE_LIMITS)
 
 #: 补充说明的机器契约（可选受约束生成；越界即丢弃，退纯模板摘要）
 _NOTE_CONTRACT = ('只输出 JSON：{"note":"<不超过100字的补充说明>"}；'

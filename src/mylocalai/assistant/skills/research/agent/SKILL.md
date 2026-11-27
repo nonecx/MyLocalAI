@@ -1,5 +1,7 @@
 <!--
 技能名：research-agent（资料收集·受限循环）
+分类：通用
+服务能力：information-collection
 职责：在一轮受限资料收集里逐步决定“下一步做什么”：检索、读页、摘录，够了就收尾。
 输入：主题、研究问题、子问题清单、当前候选池/已读页面/已摘录证据/剩余预算（全部由程序给出）。
 输出：每一步一个动作；动作由代码执行并校验，越界/未锚定的动作会被拒绝。
@@ -11,6 +13,10 @@
       （口径见 research/scope/SKILL.md 与 research/digest/SKILL.md）。
       详见 docs/能力使用率审计-2026-11-25.md（"只有文件没有代码"一类）。
       此处留档只为将来接线时契约不改写。
+当前状态：mode="agent" 受限循环**尚未接线**——现行工作模式是固定阶段 pipeline
+      （口径见 research/scope/SKILL.md 与 research/digest/SKILL.md）：ResearchSkills.run
+      不接受 mode 形参，agent_loop.run_agent_loop 暂无调用方。接线前本文件不注入模型，
+      此处留存只为接线时契约不改写；本文件的「分类/服务能力」与其余执行层 SKILL.md 同规。
 -->
 
 # 资料收集：受限循环
