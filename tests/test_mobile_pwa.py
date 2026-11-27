@@ -204,6 +204,11 @@ class TestPageWiring(unittest.TestCase):
                       "单列后必须把对话区排到左栏之前，否则手机首屏看不到对话")
         self.assertIn("font-size: 16px", self.mobile,
                       "输入框必须 16px，否则 iOS 聚焦时会自动放大页面")
+        for selector in (".chat-batch-textarea", ".chat-batch-file-input",
+                         ".platform-drawer input", ".platform-drawer select",
+                         ".platform-drawer textarea"):
+            self.assertIn(selector, self.mobile,
+                          f"移动端输入控件缺少 iOS 16px 防缩放覆盖：{selector}")
         self.assertIn("env(safe-area-inset-bottom", self.mobile,
                       "缺安全区，iPhone 底部按钮会被小横条压住")
 
