@@ -33,8 +33,10 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -53,6 +55,7 @@ from mylocalai.util.console_io import force_utf8_stdio  # noqa: E402
 from mylocalai.util.text_safety import has_surrogates, sanitize_text  # noqa: E402
 from mylocalai.web.models_api import router as models_router  # noqa: E402
 from mylocalai.web.privacy_api import router as privacy_router  # noqa: E402
+from mylocalai.web.skills_api import router as skills_router  # noqa: E402
 from mylocalai.web.profiles_api import router as profiles_router  # noqa: E402
 from mylocalai.web.batch_api import router as batch_router  # noqa: E402
 from mylocalai.web.materials_api import router as materials_router  # noqa: E402
@@ -77,14 +80,17 @@ async def _lifespan(_app: Any):
     """
     from mylocalai.web import monitor_api
     from mylocalai.web import platform_api
-    monitor_api.start_scheduler()
+    _monitor_started = False
     _platform_started = False
     if _WORKERS <= 1:
+        monitor_api.start_scheduler()
+        _monitor_started = True
         _platform_started = platform_api.start_scheduler_if_enabled()
     try:
         yield
     finally:
-        monitor_api.stop_scheduler()
+        if _monitor_started:
+            monitor_api.stop_scheduler()
         if _platform_started:
             platform_api.get_scheduler().stop()
 
@@ -138,7 +144,40 @@ app = FastAPI(
     version="1.0.0",
     lifespan=_lifespan,
 )
+
+# Path identifiers are intentionally normalized to the same 404 contract used by
+# sessions, dossiers, and batches.  FastAPI otherwise returns 422 before a route
+# handler can apply the API's resource-not-found semantics.
+_PATH_ID_KINDS = {
+    "profile_id": "档案",
+    "sub_id": "订阅",
+    "query_id": "监控词",
+    "source_id": "信息源",
+    "scan_id": "巡检记录",
+}
+
+
+@app.exception_handler(RequestValidationError)
+async def _request_validation_handler(request: Request,
+                                      exc: RequestValidationError) -> JSONResponse:
+    errors = exc.errors()
+    path_errors = [error for error in errors
+                   if error.get("loc", ()) and error["loc"][0] == "path"]
+    if (path_errors and len(path_errors) == len(errors)
+            and all(error.get("type") in {"int_parsing", "int_type"}
+                    for error in path_errors)):
+        param = str(path_errors[0]["loc"][1]) if len(path_errors[0]["loc"]) > 1 else ""
+        kind = _PATH_ID_KINDS.get(param, "资源")
+        raw = request.path_params.get(param, request.url.path.rsplit("/", 1)[-1])
+        return JSONResponse(status_code=404,
+                            content={"detail": f"{kind}不存在: {raw}"})
+    return JSONResponse(status_code=422, content=jsonable_encoder({"detail": errors}))
+
+
 app.include_router(privacy_router)
+# 技能偏好（设置页「技能」）：最大功率开关与工作流偏好；漏挂会使文档承诺的
+# GET/PUT /api/skills/preferences 直接 404，因此与隐私路由紧挨挂载。
+app.include_router(skills_router)
 # 模型管理（设置面板）：与 privacy_router 紧挨——两者都是"用户在本机改自己的配置"，
 # 前缀/异常口径保持一致（404 未知、400 中文 detail、写后 llm_client.reset_cache()）
 app.include_router(models_router)

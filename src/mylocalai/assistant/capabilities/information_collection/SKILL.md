@@ -45,7 +45,8 @@
 
 - 上表是 `src/mylocalai/assistant/registry.py` 注册表的可读摘要，权限/成本/延迟以注册表
   为准；预算上限（主题长度、子问题数、搜索/读页/模型调用次数、总时长等）以
-  `assistant/skills/research/rules.json` 为唯一来源，改配置不改代码。
+  `assistant/skills/research/rules.json` 为唯一来源，改配置不改代码；设置页「技能」的最大功率模式会将
+  这些预算抬到各自安全区间上限，回合总时限同步为 3600 秒。
 - 输入是主题（topic，1-500 字字符串）：空主题、超长主题、主题过宽都会先追问，
   不带着模糊输入检索。
 - 死线与取消透传：回合死线（`llm_cache.deadline_at()`）与流水线自建死线取更紧者；

@@ -52,7 +52,7 @@ __all__ = [
     "SourceInfo", "classify_source", "dynamic_authority_signals", "is_decisive_source",
     "url_key", "dedupe_sources", "near_duplicate_source",
     "anchor_quote", "load_skill_prompt", "render_evidence_line", "render_counts_line",
-    "utc_now_iso",
+    "utc_now_iso", "max_power_rules", "SAFETY_RULE_KEYS",
 ]
 
 _HERE = Path(__file__).resolve().parent
@@ -101,6 +101,31 @@ _RULE_LIMITS: Dict[str, Tuple[float, float]] = {
 
 #: 审计里可计数的键（CollectBudget 为这些键维护 used）
 _COUNT_KEYS = frozenset({"max_searches", "max_pages", "max_llm_calls"})
+
+#: 最大功率模式下**不抬升**的安全参数（不是配额：抬它们只放大故障面——单次 IO 超时、
+#: 单页字节/字符上限、重定向跳数、引文长度）。抬升口径见 max_power_rules。
+SAFETY_RULE_KEYS = frozenset({"io_timeout_s", "max_page_bytes", "max_text_chars",
+                              "max_redirect_hops", "max_quote_chars"})
+
+
+def max_power_rules(limits: Mapping[str, Tuple[float, float]]) -> Dict[str, Any]:
+    """最大功率的规则覆盖项：计数、长度、条数及时限类配额 → 安全区间上限。
+
+    口径（2026-11-25，「最大功率」设置）：用户选择最大功率后，技能调用不考虑配额，
+    只确保功能完成——因此把预算/呈现类配额抬到各键**既有安全区间**的上限
+    （如 max_pages 12→200、total_deadline_s 90→3600），既非真无限（仍受区间封顶），
+    也不碰安全参数与阈值类键：
+      - `SAFETY_RULE_KEYS`（io_timeout_s/max_page_bytes/max_text_chars/
+        max_redirect_hops/max_quote_chars）保持 rules.json/默认值；
+      - 非 `max_*` 的阈值键（near_dup_threshold/dynamic_min_signals/
+        similarity_threshold/allow_dynamic_authority 等）天然不在内。
+
+    传入的是**调用方模块自己的** `_RULE_LIMITS`（各技能区间不同，如信源速查
+    max_pages 上限只有 4），因此返回的覆盖项自动贴合该技能的包络。
+    """
+    return {key: hi for key, (lo, hi) in dict(limits).items()
+            if (key.startswith("max_") or "_max_" in key or key == "total_deadline_s")
+            and key not in SAFETY_RULE_KEYS}
 
 
 def utc_now_iso() -> str:

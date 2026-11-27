@@ -45,13 +45,14 @@ from mylocalai.assistant.skills.collect_core import (
     load_authority_config,
     load_collect_rules,
     load_skill_prompt,
+    max_power_rules,
     utc_now_iso,
 )
 from mylocalai.assistant.skills.pipeline import normalize_text
 from mylocalai.retrieval.sources import normalize_host
 
 __all__ = ["SourceSkills", "check_source", "render_report", "load_rules",
-           "CATEGORY_LABELS", "SIGNAL_LABELS", "STATUSES", "TASK_STATUSES",
+           "MAX_POWER_RULES", "CATEGORY_LABELS", "SIGNAL_LABELS", "STATUSES", "TASK_STATUSES",
            "AUTHORITY_CLASSES"]
 
 #: 权威类别中文标签（七值封闭枚举，与 collect_core.AUTHORITY_CLASSES 一一对应）
@@ -104,6 +105,11 @@ _RULE_LIMITS: Dict[str, Tuple[float, float]] = {
     "max_text_chars": (200, 500000),
     "max_redirect_hops": (0, 10),
 }
+
+#: 最大功率模式的规则覆盖项（2026-11-25）：配额键抬到各自安全区间上限。本技能是
+#: 速查（默认只读 1 页），其 max_pages 上限只有 4——抬升仍贴本技能包络，不会把
+#: 速查变成深挖；安全参数与阈值不动，口径见 collect_core.max_power_rules。
+MAX_POWER_RULES: Dict[str, Any] = max_power_rules(_RULE_LIMITS)
 
 #: 补充说明的机器契约（可选受约束生成；authority/adjudicate 同族的"越界即丢弃"）
 _NOTE_CONTRACT = ('只输出 JSON：{"note":"<不超过100字的补充说明>"}；'

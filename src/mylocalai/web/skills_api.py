@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""技能工作流偏好 API（设置页“技能”）：两个新技能的模式与协同开关。
+"""技能偏好 API（设置页“技能”）：功率模式与现有工作流偏好。
 
 - GET  /api/skills/preferences → 当前配置（含 warning）
 - PUT  /api/skills/preferences → 全量校验后原子写；非法 400

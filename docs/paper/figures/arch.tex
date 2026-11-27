@@ -1,0 +1,28 @@
+\documentclass[border=6pt]{standalone}
+\usepackage{ctex}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,fit,calc}
+\begin{document}
+\begin{tikzpicture}[
+  font=\small,
+  box/.style={draw, rounded corners=2pt, minimum height=0.78cm, minimum width=3.1cm, align=center, fill=gray!6},
+  arr/.style={-{Latex[length=2mm]}, thick, gray!70}
+]
+\node[box] (web) at (0,0) {入口层\\web / cli / mcp};
+\node[box, below=0.5cm of web] (plat) {监测平台\\platform};
+\node[box, below=0.5cm of plat] (assist) {档案与编排\\dossier / assistant};
+\node[box, below=0.5cm of assist] (eng) {三条分析链路\\classic \quad rumor \quad attention};
+\node[box, below=0.5cm of eng] (ret) {检索与受控抓取\\retrieval};
+\node[box, below=0.5cm of ret] (llm) {LLM 网关\\缓存 / 单飞 / 预算};
+\node[box, below=0.5cm of llm] (core) {确定性核心\\分层 / 判定 / 关注度};
+
+\draw[arr] (web) -- (plat);
+\draw[arr] (plat) -- (assist);
+\draw[arr] (assist) -- (eng);
+\draw[arr] (eng) -- (ret);
+\draw[arr] (ret) -- (llm);
+\draw[arr] (llm) -- (core);
+\draw[arr, dashed] (eng.east) .. controls +(1.9,0) and +(1.9,0) .. (core.east)
+  node[midway, right, align=left, font=\scriptsize] {判定纯函数\\不经过网关};
+\end{tikzpicture}
+\end{document}

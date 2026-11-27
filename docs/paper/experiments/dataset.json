@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "description": "经典分析链路（classic）端到端评测集：40 条中文网络文本，按四类构造性分组。分组依据是文本可观察特征（情绪强度、攻击性、逻辑关联、是否含可核实事实声明），不涉及内容真伪判断。",
+  "labeling_rubric": {
+    "high_risk_agitation": "高情绪（>=7/10）+ 攻击性高 + 逻辑关联弱，含动员/转发指令或阴谋论框架",
+    "emotional_rumor": "情绪 >=5/10 + 逻辑关联弱，含具体可核实事实声明（事件、数字、因果）",
+    "rational_discussion": "逻辑关联强 + 攻击性低，含论证结构或来源引用",
+    "emotional_vent": "情绪表达为主，无可核实事实声明或论证结构"
+  },
+  "items": [
+    {"id": "H01", "group": "high_risk_agitation", "text": "气死了！听说自来水被人下毒了，官方根本不敢说！转给家人看看，别再喝了！"},
+    {"id": "H02", "group": "high_risk_agitation", "text": "紧急扩散！某地已经抓了三百人，媒体全被封锁了，只有我们还在说真话，快转发！"},
+    {"id": "H03", "group": "high_risk_agitation", "text": "这帮人太可恶了，背后肯定有境外势力操控，大家一起举报，让他们无处可藏！"},
+    {"id": "H04", "group": "high_risk_agitation", "text": "别信官方通报，全是骗人的！他们早就串通好了，我们必须站出来，不然下一个就是你！"},
+    {"id": "H05", "group": "high_risk_agitation", "text": "太可怕了！我朋友的朋友在医院工作，说已经死了好几十个，消息被压下来了，赶紧扩散！"},
+    {"id": "H06", "group": "high_risk_agitation", "text": "这些专家没一个好东西，收钱办事，故意害老百姓，大家千万别听他们的，转发让更多人知道！"},
+    {"id": "H07", "group": "high_risk_agitation", "text": "震惊！某品牌奶粉被查出有毒，孩子喝了会得病，家长们都疯了，快转！"},
+    {"id": "H08", "group": "high_risk_agitation", "text": "上面的人根本不管我们死活，只会删帖封号，大家团结起来，把这条顶上去！"},
+    {"id": "H09", "group": "high_risk_agitation", "text": "还在装？证据早就被销毁了，他们就是一伙的，谁信谁傻，赶紧告诉身边的人！"},
+    {"id": "H10", "group": "high_risk_agitation", "text": "彻底完了！据说今晚就要断水断电，超市都被抢空了，快跑吧，别怪我没提醒！"},
+
+    {"id": "R01", "group": "emotional_rumor", "text": "听说喝隔夜茶会致癌，亚硝酸盐超标好几倍，我家里人都倒掉了，转给家人看看！"},
+    {"id": "R02", "group": "emotional_rumor", "text": "网传某地自来水检出重金属超标，居民都不敢喝了，官方一直没有回应，太吓人了。"},
+    {"id": "R03", "group": "emotional_rumor", "text": "有人说疫苗里有芯片，打完会被控制，我越想越怕，大家先别打了！"},
+    {"id": "R04", "group": "emotional_rumor", "text": "朋友圈都在传：某小区昨晚发生入室抢劫，警察到现在都没抓到人，晚上千万别出门！"},
+    {"id": "R05", "group": "emotional_rumor", "text": "专家说手机放枕头边会得脑瘤，辐射特别大，吓得我晚上都不敢充电了。"},
+    {"id": "R06", "group": "emotional_rumor", "text": "据说某食品厂用病死猪肉做香肠，已经流到好几个省了，想想就恶心，别买了！"},
+    {"id": "R07", "group": "emotional_rumor", "text": "网传某医院发生集体感染，几十个病人被隔离，院方封锁消息，家里有老人的注意了。"},
+    {"id": "R08", "group": "emotional_rumor", "text": "听邻居说，某地要建垃圾焚烧厂，二噁英会致癌，附近房价都要跌了，赶紧抵制！"},
+    {"id": "R09", "group": "emotional_rumor", "text": "有人爆料某网红带货的减肥药含违禁成分，吃了会心慌，太可怕了，别再买了。"},
+    {"id": "R10", "group": "emotional_rumor", "text": "据说这次暴雨淹死了很多人，数字被瞒报了，看着视频心里特别难受，转出去让更多人看到。"},
+
+    {"id": "D01", "group": "rational_discussion", "text": "关于隔夜茶致癌的说法，我认为需要区分亚硝酸盐含量与致癌剂量，现有检测数据并不支持这一结论。"},
+    {"id": "D02", "group": "rational_discussion", "text": "从公开通报看，该事件的伤亡数字与网传版本存在明显差异，建议以应急管理部门发布的信息为准。"},
+    {"id": "D03", "group": "rational_discussion", "text": "这项研究样本量只有 30 人，且没有对照组，据此推断因果关系并不严谨，需要更大规模验证。"},
+    {"id": "D04", "group": "rational_discussion", "text": "如果电价上调，短期内会推高制造业成本，但也要看配套补贴政策，不能只看单一变量。"},
+    {"id": "D05", "group": "rational_discussion", "text": "我查阅了该市的统计年鉴，近五年常住人口确实在下降，但降幅与网传的百分之二十不符。"},
+    {"id": "D06", "group": "rational_discussion", "text": "需要指出，视频中的实验缺少空白对照，温度、湿度等条件也未控制，结论可信度有限。"},
+    {"id": "D07", "group": "rational_discussion", "text": "两种说法都有一定道理：一方强调效率，一方强调公平，关键在于如何设计过渡期安排。"},
+    {"id": "D08", "group": "rational_discussion", "text": "根据气象部门数据，本次降雨量为五十毫米，属于常见量级，与所谓百年一遇的说法不符。"},
+    {"id": "D09", "group": "rational_discussion", "text": "这个问题可以从三个层面分析：制度设计、执行成本与公众接受度，三者缺一不可。"},
+    {"id": "D10", "group": "rational_discussion", "text": "我倾向于认为该政策效果有限，理由是覆盖人群不足，且缺乏长期跟踪评估数据。"},
+
+    {"id": "V01", "group": "emotional_vent", "text": "今天上班又被领导骂了，真是烦死了，什么都不想干了。"},
+    {"id": "V02", "group": "emotional_vent", "text": "堵车堵了一个小时，心态崩了，这日子没法过了。"},
+    {"id": "V03", "group": "emotional_vent", "text": "这家店的服务态度也太差了吧，气死我了，以后再也不会来了。"},
+    {"id": "V04", "group": "emotional_vent", "text": "追了三个月的剧居然烂尾了，我真的会谢，编剧出来挨打。"},
+    {"id": "V05", "group": "emotional_vent", "text": "天气热得离谱，空调还坏了，整个人都要化了，救命啊。"},
+    {"id": "V06", "group": "emotional_vent", "text": "孩子作业写到十一点，我也快崩溃了，当家长太难了。"},
+    {"id": "V07", "group": "emotional_vent", "text": "排队两小时看病五分钟，真是又累又气，这体验太糟糕了。"},
+    {"id": "V08", "group": "emotional_vent", "text": "刚买的手机就降价了，心在滴血，我为什么要这么着急。"},
+    {"id": "V09", "group": "emotional_vent", "text": "楼上装修吵了一整天，脑子嗡嗡的，能不能让人安静会儿。"},
+    {"id": "V10", "group": "emotional_vent", "text": "比赛输了，难受，但也没办法，下次再努力吧。"}
+  ]
+}

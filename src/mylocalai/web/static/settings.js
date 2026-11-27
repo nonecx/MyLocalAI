@@ -42,6 +42,7 @@
     configPath: "/api/models/config-path",
     configOpen: "/api/models/config/open",
     privacyPreferences: "/api/privacy/preferences",
+     skillsPreferences: "/api/skills/preferences",
   };
 
   /* HTTP 状态码 → 中文动作说明：具体原因由后端 detail 原文补充，这里只说"哪一步失败了" */
@@ -200,6 +201,7 @@
     creating: false,   // true = 正在填「新建提供方」表单（此时 selectedPid 为 null）
     models: [],        // 当前提供方的模型草稿（含新增未保存的卡）
     privacy: null,     // 隐私偏好 { data, error }：进「隐私与授权」时 GET，保存后用 PUT 响应刷新
+    skills: null,      // 技能偏好 { data, error }：进「技能」时 GET，保存后用 PUT 响应刷新
     discover: null,    // 最近一次 discover 结果 { mode, pid, baseUrl, count, models[] }
     busy: false,       // 有请求在跑：挡住重复点击
     lastFocus: null,   // 打开弹层前的焦点，关闭时还回去
@@ -319,6 +321,7 @@
       setActiveNav(state.tab);
       showStatus("");
       state.privacy = null;             // 每次打开都重新 GET 隐私偏好：看到的一定是磁盘现状
+       state.skills = null;              // 技能偏好同样每次打开读取磁盘现状
       renderPane();                     // 先出骨架，避免打开后一片空白等网络
       const closeBtn = $("#settingsCloseBtn");
       if (closeBtn) closeBtn.focus();    // 焦点进弹层（与 aboutDialog 一致）
@@ -523,6 +526,10 @@
     const pane = $("#settingsPane");
     if (!pane) return;
     pane.textContent = "";
+    if (state.tab === "skills") {
+      pane.appendChild(buildSkillsPane());
+      return;
+    }
     if (state.tab === "privacy") {
       pane.appendChild(buildPrivacyPane());
       return;
@@ -1303,7 +1310,75 @@
      保存 = PUT 完整载荷：外部处理两字段用面板草稿，save_enabled / retention_days
      本期不在面板里改、按 GET 到的原值回传；成功后用 PUT 响应重渲染（含最新 warning），
      400 时把后端 detail 原文显示在状态区。 */
-  function buildPrivacyPane() {
+  /* 技能偏好面板：最大功率只抬配额与回合时限，不绕过隐私授权。 */
+   function buildSkillsPane() {
+     const wrap = el("div", "settings-privacy");
+     const section = el("section", "settings-section");
+     section.appendChild(el("h3", null, "技能"));
+     section.appendChild(el("p", "settings-hint", "最大功率会把技能配额与回合时限抬到安全上限（最长 3600 秒）；外部处理授权仍按隐私设置执行，用户可随时停止。"));
+     if (!state.skills) {
+       section.appendChild(el("p", "settings-empty", "正在载入技能偏好…"));
+       wrap.appendChild(section);
+       loadSkillsPreferences();
+       return wrap;
+     }
+     if (state.skills.error) {
+       section.appendChild(el("p", "settings-empty", "技能偏好载入失败：" + state.skills.error));
+       const retry = el("div", "settings-actions");
+       retry.appendChild(button("重新载入", "btn-ghost settings-btn-sm", () => { state.skills = null; renderPane(); }, "重新载入技能偏好"));
+       section.appendChild(retry);
+       wrap.appendChild(section);
+       return wrap;
+     }
+     const prefs = state.skills.data || {};
+     if (prefs.warning) {
+       const warn = el("div", "settings-notice");
+       warn.appendChild(el("strong", null, "技能偏好告警："));
+       warn.appendChild(el("span", null, String(prefs.warning)));
+       section.appendChild(warn);
+     }
+     const draft = { power_mode: String(prefs.power_mode || "normal") };
+     section.appendChild(el("div", "settings-field-label", "技能功率模式"));
+     const group = el("div", "settings-check-group");
+     [["normal", "常规模式", "按各技能常规配额执行"], ["max", "最大功率", "忽略配额，使用安全区间上限"]].forEach((item) => {
+       const radio = checkboxInput(draft.power_mode === item[0]);
+       radio.type = "radio"; radio.name = "settingsSkillPowerMode"; radio.value = item[0];
+       radio.addEventListener("change", () => { if (radio.checked) draft.power_mode = item[0]; });
+       const label = el("label", "settings-check settings-check-strong");
+       label.appendChild(radio); label.appendChild(el("span", null, item[1]));
+       label.appendChild(el("small", "settings-hint", item[2])); group.appendChild(label);
+     });
+     section.appendChild(group);
+     const actions = el("div", "settings-actions");
+     actions.appendChild(button("保存技能设置", "btn-primary settings-btn-sm", () => saveSkillsPreferences(draft), "保存技能设置"));
+     section.appendChild(actions);
+     section.appendChild(el("p", "settings-hint", "保存后立即生效，无需重启服务；安全参数、判定阈值和隐私授权门保持不变。"));
+     wrap.appendChild(section); return wrap;
+   }
+
+   async function loadSkillsPreferences() {
+     try { state.skills = { data: await request("GET", SETTINGS_API.skillsPreferences), error: "" }; }
+     catch (err) { state.skills = { data: null, error: err.message }; }
+     if (state.tab === "skills") renderPane();
+   }
+
+   async function saveSkillsPreferences(draft) {
+     if (state.busy) return;
+     const current = state.skills && state.skills.data ? state.skills.data : null;
+     if (!current) { showStatus("error", "技能偏好尚未载入：等载入完成后再保存。"); return; }
+     state.busy = true;
+     const body = { schema_version: current.schema_version || 1, power_mode: draft.power_mode,
+       research: current.research || { workflow_mode: "pipeline", auto_verify_findings: true },
+       authority: current.authority || { workflow_mode: "pipeline" },
+       composite: current.composite || { enabled: true } };
+     try {
+       state.skills = { data: await request("PUT", SETTINGS_API.skillsPreferences, body), error: "" };
+       showStatus("ok", "技能设置已保存，最大功率将在下一次技能调用生效。");
+     } catch (err) { showStatus("error", err.message); }
+     finally { state.busy = false; if (state.tab === "skills") renderPane(); }
+   }
+
+   function buildPrivacyPane() {
     const wrap = el("div", "settings-privacy");
     const section = el("section", "settings-section");
     section.appendChild(el("h3", null, "隐私与授权"));

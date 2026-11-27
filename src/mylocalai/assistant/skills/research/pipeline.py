@@ -45,6 +45,7 @@ from mylocalai.assistant.skills.collect_core import (
     load_authority_config,
     load_collect_rules,
     load_skill_prompt,
+    max_power_rules,
     near_duplicate_source,
     render_counts_line,
     render_evidence_line,
@@ -56,7 +57,7 @@ from mylocalai.assistant.skills.transport import strip_query_operators
 from mylocalai.retrieval.sources import tier_rank
 
 __all__ = ["ResearchSkills", "collect_research", "render_report", "load_rules",
-           "STATUSES", "TASK_STATUSES"]
+           "MAX_POWER_RULES", "STATUSES", "TASK_STATUSES"]
 
 #: 用户可见的四个进度阶段（契约 §4.1）；不暴露内部技能名
 _PROGRESS_STAGES = ("确定范围", "检索资料", "阅读摘录", "整理简报")
@@ -126,6 +127,12 @@ _RULE_LIMITS: Dict[str, Tuple[float, float]] = {
     "max_dynamic_domains": (1, 10),
     "dynamic_min_signals": (1, 10),
 }
+
+#: 最大功率模式的规则覆盖项（2026-11-25）：配额键抬到各自安全区间上限，安全参数
+#: （io_timeout_s/max_page_bytes/max_text_chars/max_redirect_hops/max_quote_chars）与
+#: 阈值键（near_dup_threshold/dynamic_min_signals 等）不动；口径见
+#: collect_core.max_power_rules，由 loop 工厂在 power_mode=max 时叠加。
+MAX_POWER_RULES: Dict[str, Any] = max_power_rules(_RULE_LIMITS)
 
 
 # ---------------------------------------------------------------------------

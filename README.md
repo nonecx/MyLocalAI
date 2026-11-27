@@ -116,7 +116,8 @@
 ├── scripts/                    仓库级辅助脚本（gen_pwa_icons.py：生成添加到桌面所需图标；
 │                               audit_capability_usage.py：只读能力使用率审计）
 ├── tests/                      离线测试套件与真实 API 端到端脚本（import mylocalai.*）
-├── docs/                       检验报告、修复说明、项目/研究报告与关注度标定报告
+├── docs/                       检验报告、修复说明、项目/研究报告与关注度标定报告；
+│                               docs/paper/ 为中文 LaTeX 论文（main.tex + 实验脚本 + 原始数据）
 ├── pyproject.toml              src 布局包定义（pip install -e .）
 └── archive/                    遗留资产归档区（2026-10-30 清场建立，不入库）
 ```
@@ -143,6 +144,9 @@ cp .env.example .env        # Windows PowerShell: Copy-Item .env.example .env
 #     的提供方视为本地、自动放行；数据保留三项本期不在面板里改（保存时原值回传）
 #     GET  /api/privacy/preferences   查看当前授权
 #     PUT  /api/privacy/preferences   设置（面板保存走这条；也可 curl 直调）
+#     技能资源模式：设置 → 技能 → 常规 / 最大功率；或直接读写
+#     GET/PUT /api/skills/preferences。最大功率将技能配额和回合总时限抬到安全上限（3600s），
+#     用户可随时停止；隐私授权、单页安全参数与判定阈值保持不变。
 
 # 3. 自检 + 跑一次分析
 .venv/Scripts/python.exe tests/smoke_api.py            # 配置自检 + 连通性
@@ -474,7 +478,7 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 2758 个用例（unittest discover 全量，2026-11-26 卷宗纸感界面重做落地后实测
+离线套件共 2774 个用例（unittest discover 全量，2026-11-27 技能最大功率模式、移动端抽屉控件防缩放、调度器多 worker 门控与路径 ID 404 语义收口后实测
 （全站视觉层重写 + PWA 主题色同源契约 1 例）；2026-11-26 四条分支合并后实测
 （结论卡挂关注度 E / 现象判读层 / 检索层韧性 / 能力使用率审计）；2026-11-25 能力使用率审计落地后实测，
 本次新增 44 例（`tests/test_capability_audit.py`：只读契约 / 空库 / 坏库 / 聚合 /
@@ -719,6 +723,10 @@ CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
 - `docs/异步状态窗口清单-2026-11-22.md` —— 待办与状态口径清单（阶段进度对齐）。
 - `docs/评估-对比通用大模型-2026-11-22.md` —— 通用大模型（DeepSeek 等）对比评估报告
   （含网页版真机实测章节与可复现对比实验脚本 `scripts/compare_llm.py`）。
+- `docs/paper/main.tex` —— **中文 LaTeX 论文**《判定与生成分离：面向网络言论分析与谣言识别的
+  确定性判定系统设计与实证评估》（XeLaTeX + ctex 编译，15 页，含中英文摘要、7 节正文与
+  声明/参考文献）。数值由 `docs/paper/experiments/make_tables.py` 从
+  `docs/paper/data/` 的原始 JSON 生成，可逐项复算；实验脚本与数据集在同一目录。
 - `src/mylocalai/rumor/README.md` —— 谣言 Agent 的架构、证据本、受控浏览、MCP 与降级行为。
 - `my_website/README.md` —— 展示网站的启动方式与页面功能。
 
@@ -769,7 +777,7 @@ CRUD + run-now 防重入 + lifespan 调度线程、前端监测面板）；
   verdict_basis 标记；映射外置在 `config/verdict_rules.json` 的 `card` 段。
 - **持久化**：核查自动建档（结论版本化 v1/v2…、证据按批次、分析运行记录），会话/消息/工具运行
   落 SQLite；重启后档案与会话都在。删除档案不是助手工具（只有程序内部可达）。
-- **回合预算与取消**：`CHAT_TURN_DEADLINE_S`（默认 180s）经 llm_cache 预算继承进引擎链；
+- **回合预算与取消**：`CHAT_TURN_DEADLINE_S`（默认 180s；最大功率模式默认 3600s，环境变量仍优先）经 llm_cache 预算继承进引擎链；
   前端 AbortController → SSE 断开 → 协作取消（agent 轮询 cancel_check、judge 四取消位），
   超时/取消都诚实降级、已有卡片照发。
 - **取证三技能与用户能力分层**（2026-11-20；该时点八项，后经第四波/第五波扩到**十三项**，见下方「Skill 通用/专用分类」与「第五波专用技能」两节）：彼时面向用户的能力共**八项**（事实核查 /
@@ -967,6 +975,7 @@ DOSSIER_DB_PATH 可覆盖）。测试：`tests.test_mcp_assistant`（同核对�
   role=full，旧档案可读、行为不变）。
 - **接口**：`GET/POST /api/profiles`、`PUT/DELETE /api/profiles/{id}`、
   `POST /api/profiles/{id}/activate`；列表/详情/画像端点一律按激活档案过滤。
+  资源路径 ID 无法解析为整数时统一返回 404（资源不存在），避免与会话/批次端点出现 422/404 分裂；正整数的业务校验仍按各端点既有 400/404/409 规则执行。
 - **换角色怎么走（2026-11-24 v8，解决"不知道角色在哪切"）**：顶栏按钮常驻
   「档案名 · 角色短名」，点开菜单**顶部就是「切换角色（当前档案）」**——四个角色
   一键换、当前项打勾、每项带一句能力说明；左栏「当前档案」行右侧另有常驻
@@ -1107,7 +1116,7 @@ CLI + 计划任务是另一通道），隐私 fail-closed（外部检索未授�
    （`my_website/start.bat --lan` 或 `./start.sh --lan`）改成 `0.0.0.0` 并在控制台打印局域网地址；
    首次运行记得放行 Windows 防火墙。默认值不变（仍只有本机能访问），要开才开。
 
-前端视觉采用独立的 `static/ui-polish.css` 覆盖层，全站统一为**卷宗纸感**主题：米纸底（`--paper`）+ 墨蓝操作色（`--primary`）+ 朱砂强调色（`--accent`，只用于结论、风险与关键数字），标题用衬线字体（Georgia / 宋体）、正文用雅黑，形状收敛为小圆角单据感；覆盖对话页、监测平台、设置与档案弹层，并支持键盘焦点环与 `prefers-reduced-motion` 降级。主题色与 `manifest.webmanifest` 的 `theme_color`/`background_color` 同源，避免安装后色块割裂；该样式纳入 Service Worker 界面壳预缓存。业务结构与交互契约不变。
+前端视觉采用独立的 `static/ui-polish.css` 覆盖层，统一对话与监测平台的卷宗纸感证据工作台主题（米纸/暖白画布、墨蓝与深青绿操作色、朱砂风险强调、键盘焦点环与减少动态效果支持）；业务结构与交互契约不变。主题样式纳入 Service Worker 界面壳预缓存，并与 PWA 的主题色保持一致。
 
 小屏适配（`static/mobile.css`，最后引入、只覆盖不改旧规则）：≤900px 单列后把**对话区提到左栏之前**
 （否则手机首屏只看到会话列表与档案库）；≤720px 收紧顶栏与面板内边距、输入框字号统一 16px

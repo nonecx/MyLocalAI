@@ -35,7 +35,7 @@ echo [CI 2/3] OK - unittest discover
 echo [CI 3/3] mock_run.py gates (28 checks, mock upstream) ...
 if not exist ".tmp\verify-2026-10-22\mock_run.py" (
     echo [CI 3/3] SKIP - local harness missing: .tmp\verify-2026-10-22\mock_run.py
-    echo [CI] RESULT: GREEN (compileall + unittest; mock gates skipped, harness not in repo)
+    echo [CI] RESULT: GREEN - compileall + unittest; mock gates skipped; harness not in repo
     exit /b 0
 )
 "%PY%" -X utf8 .tmp\verify-2026-10-22\mock_run.py

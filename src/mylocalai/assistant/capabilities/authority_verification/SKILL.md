@@ -46,7 +46,8 @@
 
 - 上表是 `src/mylocalai/assistant/registry.py` 注册表的可读摘要，权限/成本/延迟以注册表
   为准；预算上限（原文长度、主张数、权威来源数、搜索/读页/模型调用次数、总时长等）以
-  `assistant/skills/authority/rules.json` 为唯一来源，改配置不改代码。
+  `assistant/skills/authority/rules.json` 为唯一来源，改配置不改代码；设置页「技能」的最大功率模式会将
+  这些预算抬到各自安全区间上限，回合总时限同步为 3600 秒。
 - 输入是原文（text，字符串）：空/超长先追问（单次长度上限见 `rules.json` 的
   `max_input_chars`），不带着模糊输入检索。
 - 纯链接输入会先安全抓取该页作为**待核验原文**：该链接一律记"用户提供链接，未核验"，
