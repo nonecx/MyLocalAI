@@ -478,7 +478,7 @@ scripts\ci.cmd
 .venv/Scripts/python.exe tests/rumor_agent_e2e.py --out .tmp/verify/out
 ```
 
-离线套件共 2758 个用例（unittest discover 全量，2026-11-26 卷宗纸感界面重做落地后实测
+离线套件共 2774 个用例（unittest discover 全量，2026-11-27 技能最大功率模式、移动端抽屉控件防缩放、调度器多 worker 门控与路径 ID 404 语义收口后实测
 （全站视觉层重写 + PWA 主题色同源契约 1 例）；2026-11-26 四条分支合并后实测
 （结论卡挂关注度 E / 现象判读层 / 检索层韧性 / 能力使用率审计）；2026-11-25 能力使用率审计落地后实测，
 本次新增 44 例（`tests/test_capability_audit.py`：只读契约 / 空库 / 坏库 / 聚合 /
@@ -975,6 +975,7 @@ DOSSIER_DB_PATH 可覆盖）。测试：`tests.test_mcp_assistant`（同核对�
   role=full，旧档案可读、行为不变）。
 - **接口**：`GET/POST /api/profiles`、`PUT/DELETE /api/profiles/{id}`、
   `POST /api/profiles/{id}/activate`；列表/详情/画像端点一律按激活档案过滤。
+  资源路径 ID 无法解析为整数时统一返回 404（资源不存在），避免与会话/批次端点出现 422/404 分裂；正整数的业务校验仍按各端点既有 400/404/409 规则执行。
 - **换角色怎么走（2026-11-24 v8，解决"不知道角色在哪切"）**：顶栏按钮常驻
   「档案名 · 角色短名」，点开菜单**顶部就是「切换角色（当前档案）」**——四个角色
   一键换、当前项打勾、每项带一句能力说明；左栏「当前档案」行右侧另有常驻
